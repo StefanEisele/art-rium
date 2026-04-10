@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="art-rium">
+  <title>art-rium</title>
+  <link rel="manifest" href="/manifest.json">
+  <style>
+    :root {
+      --bg:         #111111;
+      --surface:    #1c1c1e;
+      --surface2:   #2c2c2e;
+      --accent:     #f5a623;
+      --accent-tap: #d4901e;
+      --text:       #f2f2f7;
+      --text-dim:   #8e8e93;
+      --border:     #3a3a3c;
+      --green:      #32d74b;
+      --red:        #ff453a;
+      --radius:     14px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+      overscroll-behavior: none;
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      min-height: 100dvh;
+      max-width: 600px;
+      margin: 0 auto;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; }
+
+    .status { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-dim); }
+
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--red); flex-shrink: 0; transition: background 0.3s;
+    }
+    .dot.connected  { background: var(--green); }
+    .dot.connecting { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
+
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+    /* ── Main scroll ── */
+    main {
+      flex: 1; overflow-y: auto; padding: 18px 20px 28px;
+      display: flex; flex-direction: column; gap: 18px;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    /* ── Auth panel ── */
+    #auth-panel {
+      display: none; background: var(--surface);
+      border-radius: var(--radius); padding: 20px;
+      gap: 12px; flex-direction: column;
+    }
+    #auth-panel.show { display: flex; }
+    #auth-panel h2 { font-size: 15px; font-weight: 600; }
+    #auth-panel p  { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+
+    /* ── Form ── */
+    .field { display: flex; flex-direction: column; gap: 7px; }
+
+    label {
+      font-size: 11px; font-weight: 700; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.7px;
+    }
+
+    textarea, input[type="number"], input[type="password"] {
+      width: 100%; background: var(--surface); border: 1.5px solid var(--border);
+      border-radius: 10px; color: var(--text); font-size: 16px;
+      padding: 13px 14px; outline: none; font-family: inherit;
+      transition: border-color 0.2s; -webkit-appearance: none;
+    }
+    textarea:focus, input:focus { border-color: var(--accent); }
+
+    /* ── Style template dropdown ── */
+    .template-select {
+      width: 100%; background: var(--surface); border: 1.5px solid var(--border);
+      border-radius: 10px; color: var(--text-dim); font-size: 14px;
+      padding: 11px 14px; outline: none; font-family: inherit;
+      transition: border-color 0.2s; -webkit-appearance: none; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238e8e93' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 14px center;
+    }
+    .template-select:focus { border-color: var(--accent); }
+    .template-select option { background: var(--surface2); color: var(--text); }
+
+    #prompt { min-height: 130px; resize: none; line-height: 1.55; }
+
+    .char-count { font-size: 11px; color: var(--text-dim); text-align: right; margin-top: -4px; }
+
+    /* ── Advanced toggle ── */
+    .adv-toggle {
+      display: flex; align-items: center; gap: 6px;
+      background: none; border: none; color: var(--text-dim);
+      font-size: 14px; font-family: inherit; cursor: pointer;
+      padding: 2px 0; width: fit-content;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .adv-toggle .chevron { transition: transform 0.22s ease; }
+    .adv-toggle.open .chevron { transform: rotate(180deg); }
+
+    .adv-panel {
+      display: none; flex-direction: column; gap: 16px;
+      background: var(--surface); border-radius: var(--radius); padding: 16px;
+    }
+    .adv-panel.show { display: flex; }
+
+    /* ── Size buttons 3-col ── */
+    .size-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+
+    .size-btn {
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 10px; color: var(--text-dim);
+      font-size: 11px; line-height: 1.5; padding: 9px 4px;
+      cursor: pointer; text-align: center;
+      transition: all 0.15s; font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .size-btn strong { display: block; font-size: 12px; color: var(--text); }
+    .size-btn.active { background: var(--accent); border-color: var(--accent); color: #000; }
+    .size-btn.active strong { color: #000; }
+
+    /* ── Batch selector ── */
+    .batch-row {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 2px;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    .batch-row::-webkit-scrollbar { display: none; }
+
+    .batch-btn {
+      flex-shrink: 0;
+      width: 38px; height: 38px;
+      border-radius: 50%;
+      background: var(--surface2); border: 1.5px solid var(--border);
+      color: var(--text-dim); font-size: 14px; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .batch-btn.active { background: var(--accent); border-color: var(--accent); color: #000; }
+
+    /* ── Generate button ── */
+    #gen-btn {
+      width: 100%; background: var(--accent); color: #000;
+      font-size: 17px; font-weight: 700; padding: 16px;
+      border: none; border-radius: var(--radius); cursor: pointer;
+      font-family: inherit; transition: background 0.15s, transform 0.1s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #gen-btn:active:not(:disabled) { background: var(--accent-tap); transform: scale(0.985); }
+    #gen-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* ── Progress ── */
+    #progress { display: none; flex-direction: column; gap: 9px; }
+    #progress.show { display: flex; }
+
+    .prog-header { display: flex; justify-content: space-between; font-size: 14px; }
+    #prog-batch  { font-weight: 600; color: var(--text); }
+    #prog-steps  { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+    .prog-track { height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+    #prog-bar   { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; transition: width 0.35s ease; }
+
+    #prog-node { font-size: 12px; color: var(--text-dim); }
+
+    /* ── Gallery ── */
+    #result { display: none; flex-direction: column; gap: 14px; }
+    #result.show { display: flex; }
+
+    #result-header {
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    #result-count { font-size: 14px; color: var(--text-dim); }
+
+    .gallery {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+    .gallery.multi { grid-template-columns: 1fr 1fr; }
+
+    .gallery-item { display: flex; flex-direction: column; gap: 7px; }
+
+    .gallery-item img {
+      width: 100%; border-radius: var(--radius);
+      display: block; background: var(--surface2);
+      aspect-ratio: 1; object-fit: cover;
+    }
+
+    .gallery-item img.portrait  { aspect-ratio: 3/4; }
+    .gallery-item img.landscape { aspect-ratio: 4/3; }
+    .gallery-item img.wide      { aspect-ratio: 16/9; }
+    .gallery-item img.tall      { aspect-ratio: 9/16; }
+    .gallery-item img.hd        { aspect-ratio: 1; }
+
+    /* In single view, show full image without forced ratio */
+    .gallery:not(.multi) .gallery-item img { aspect-ratio: unset; }
+
+    .save-btn {
+      width: 100%; padding: 11px;
+      border-radius: 10px; border: 1.5px solid var(--border);
+      background: var(--surface); color: var(--text);
+      font-size: 14px; font-weight: 600; cursor: pointer;
+      font-family: inherit; transition: all 0.13s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .save-btn:active { transform: scale(0.97); }
+
+    /* Bottom action row */
+    .btn-row { display: flex; gap: 10px; }
+    .btn {
+      flex: 1; padding: 14px; border-radius: var(--radius);
+      border: 1.5px solid var(--border); background: var(--surface);
+      color: var(--text); font-size: 15px; font-weight: 600;
+      cursor: pointer; font-family: inherit; transition: all 0.13s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #000; }
+    .btn:active { transform: scale(0.97); }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed; left: 20px; right: 20px;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
+      max-width: 560px; margin: 0 auto;
+      background: var(--red); color: #fff; font-size: 14px;
+      padding: 13px 16px; border-radius: var(--radius);
+      transform: translateY(120px); opacity: 0;
+      transition: transform 0.3s ease, opacity 0.3s ease;
+      z-index: 999; pointer-events: none;
+    }
+    #toast.show { transform: translateY(0); opacity: 1; }
+
+    /* ── Icon buttons (header) ── */
+    .icon-btn {
+      background: none; border: none; font-size: 20px; cursor: pointer;
+      padding: 0; margin-right: 10px;
+      -webkit-tap-highlight-color: transparent;
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <h1>art-rium</h1>
+    <div class="status">
+      <div class="dot connecting" id="dot"></div>
+      <span id="status-label">connecting…</span>
+    </div>
+  </header>
+
+  <main>
+
+    <!-- Auth panel -->
+    <div id="auth-panel">
+      <h2>API Key Required</h2>
+      <p>Enter the API key from your desktop's <code>.env</code> file.</p>
+      <div class="field">
+        <label>API Key</label>
+        <input type="password" id="api-key-input" placeholder="paste key here"
+               autocomplete="off" autocorrect="off" spellcheck="false">
+      </div>
+      <button class="btn primary" onclick="saveApiKey()">Connect</button>
+    </div>
+
+    <!-- Prompt -->
+    <div class="field">
+      <label>Prompt</label>
+      <select id="template-select" class="template-select"></select>
+      <textarea id="prompt" placeholder="Describe your image…"
+                maxlength="2000" oninput="onPromptInput()"></textarea>
+      <div class="char-count"><span id="char-count">0</span> / 2000</div>
+    </div>
+
+    <!-- Advanced toggle -->
+    <button class="adv-toggle" id="adv-toggle" onclick="toggleAdv()">
+      <svg class="chevron" width="14" height="14" viewBox="0 0 14 14"
+           fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="3,5 7,9 11,5"/>
+      </svg>
+      Advanced options
+    </button>
+
+    <div class="adv-panel" id="adv-panel">
+
+      <!-- Seed -->
+      <div class="field">
+        <label>Seed (−1 = random per image)</label>
+        <input type="number" id="seed" value="-1" min="-1" max="4294967295">
+      </div>
+
+      <!-- Image size -->
+      <div class="field">
+        <label>Image Size</label>
+        <div class="size-grid">
+          <button class="size-btn active" onclick="setSize(1024,1024,this)">
+            <strong>1024×1024</strong>Square
+          </button>
+          <button class="size-btn" onclick="setSize(768,1024,this)">
+            <strong>768×1024</strong>Portrait
+          </button>
+          <button class="size-btn" onclick="setSize(1024,768,this)">
+            <strong>1024×768</strong>Landscape
+          </button>
+          <button class="size-btn" onclick="setSize(2048,2048,this)">
+            <strong>2048×2048</strong>Square HD
+          </button>
+          <button class="size-btn" onclick="setSize(1080,1920,this)">
+            <strong>1080×1920</strong>Portrait HD
+          </button>
+          <button class="size-btn" onclick="setSize(1920,1080,this)">
+            <strong>1920×1080</strong>Landscape HD
+          </button>
+        </div>
+      </div>
+
+      <!-- Batch count -->
+      <div class="field">
+        <label>Batch — number of images</label>
+        <div class="batch-row" id="batch-row"></div>
+      </div>
+
+    </div>
+
+    <!-- Generate -->
+    <button id="gen-btn" onclick="generate()">Generate</button>
+
+    <!-- Progress -->
+    <div id="progress">
+      <div class="prog-header">
+        <span id="prog-batch">Generating…</span>
+        <span id="prog-steps"></span>
+      </div>
+      <div class="prog-track"><div id="prog-bar"></div></div>
+      <div id="prog-node"></div>
+    </div>
+
+    <!-- Result gallery -->
+    <div id="result">
+      <div id="result-header">
+        <span id="result-count"></span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn primary" id="share-instagram-btn"
+                  style="width:auto;padding:8px 16px;font-size:14px;display:none"
+                  onclick="shareInstagram()">Share to Instagram</button>
+          <button class="btn primary" id="again-btn"
+                  style="width:auto;padding:8px 16px;font-size:14px"
+                  onclick="generate()">Again</button>
+        </div>
+      </div>
+      <div class="gallery" id="gallery"></div>
+    </div>
+
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIGURATION & CONSTANTS (SSOT - Single Source of Truth)
+// ═══════════════════════════════════════════════════════════════════════════
+const CONFIG = {
+  maxPromptLength: 2000,
+  maxBatchCount: 10,
+  maxBatchMin: 1,
+  toastDuration: 4500,
+  wsReconnectDelay: 3500,
+  defaultSize: { width: 1024, height: 1024 },
+};
+
+const DOM_IDS = {
+  prompt: 'prompt',
+  charCount: 'char-count',
+  authPanel: 'auth-panel',
+  apiKeyInput: 'api-key-input',
+  genBtn: 'gen-btn',
+  progress: 'progress',
+  progBatch: 'prog-batch',
+  progSteps: 'prog-steps',
+  progBar: 'prog-bar',
+  progNode: 'prog-node',
+  result: 'result',
+  resultCount: 'result-count',
+  gallery: 'gallery',
+  toast: 'toast',
+  dot: 'dot',
+  statusLabel: 'status-label',
+  advPanel: 'adv-panel',
+  advToggle: 'adv-toggle',
+  seed: 'seed',
+  batchRow: 'batch-row',
+  shareInstagramBtn: 'share-instagram-btn',
+  templateSelect: 'template-select',
+};
+
+const EVENTS = {
+  batchStart: 'batch_start',
+  progress: 'progress',
+  executing: 'executing',
+  imageReady: 'image_ready',
+  executionError: 'execution_error',
+  error: 'error',
+};
+
+const NODE_LABELS = {
+  '39': 'Loading CLIP…',
+  '40': 'Loading VAE…',
+  '41': 'Preparing latent…',
+  '42': 'Zeroing conditions…',
+  '44': 'Sampling…',
+  '45': 'Encoding prompt…',
+  '46': 'Loading model…',
+  '47': 'Setting sampler…',
+  '51': 'Loading LoRA…',
+  '9':  'Decoding image…',
+};
+
+const STORAGE_KEYS = {
+  clientId: 'z_client_id',
+  apiKey: 'z_apikey',
+  images: 'z_generated_images',
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STYLE TEMPLATES (personal style archive — Z-Image Turbo)
+// ═══════════════════════════════════════════════════════════════════════════
+const PROMPT_TEMPLATES = [
+  {
+    name: "Oil Diffusion Portrait",
+    prompt: `Iron oxide spreading through a mineral blue field — rust as corrosion, not as color. The orange enters the way oxidation spreads across aged steel: slow, irreversible, following the grain of the surface rather than any designed path. The blue is not a background — it is a pressurized environment, dense as deep water, a field the subject exists within rather than in front of. Heavy and lightless. Where the two zones collide, forms erode: surface memory dissolves, structure gives way to chemical process. Portrait format. The image should read like a cross-section of something that has weathered for decades — material fatigue rendered in a single frame. Archival photographic quality, heavy analog grain, no digital smoothing. No watermark, no text overlays, sharp focus, professional quality.`,
+  },
+  {
+    name: "Recursive Identities",
+    prompt: `Raw industrial pigment — acrylic as a physical substance with mass and viscosity, not decoration. Paint ribboning under its own weight, surface tension holding the pour together as a continuous filament before it breaks. Burnt copper oxide bleeding into slate mineral blue, cream white settling into the low points. The freeze-frame captures not motion but physics — the exact moment before surface tension fails and the ribbon separates. Forms dissolve not in motion but in material fatigue — like a surface stressed past its structural threshold. Dramatic raking light from upper left, revealing texture across every plane. Canon 5D Mark IV with 85mm f/1.4 lens, shallow depth of field, foreground detail sharp enough to show material grain. Hyperrealistic photography of an impossible material state, tactile surface rendering. No watermark, no logos, no text overlays, sharp focus, professional quality.`,
+  },
+  {
+    name: "Geometric Portal",
+    prompt: `Heavy structural geometry draped in fabric that carries weight and memory — not decorative, not pristine. The textile shows the marks of load: pulled tight over edges, pooling where gravity wins, the specific drape of something substantial that has been used. The structural anchor points show iron oxide corrosion — rust bleeding down into the fabric from the places where stress is concentrated, orange staining the white material below the load point. Warm amber light reads as thermal rather than atmospheric — heat from within, not ambience. Wide-angle environmental shot. Shot on Sony A7R V with 35mm f/2 lens. Hyperrealistic photography emphasizing material weight and the evidence of endured stress. No watermark, no text overlays, sharp focus, professional quality.`,
+  },
+  {
+    name: "Paint as Connection",
+    prompt: `Paint as matter in gravitational relationship: a single filament of burnt copper oxide pigment falling under its own weight, viscous enough to hold as a continuous thread before the drop forms. The moment of surface contact — where the falling substance meets what receives it. Extreme close-up, macro detail revealing pigment suspended in medium, the grain of the material itself. Mineral blue atmosphere in the background — dim, vertical, pressurized. The image reads as evidence of a physical process rather than a designed composition. Hasselblad medium format with 80mm macro lens, Kodak Portra 400, film grain reinforcing the material weight. No watermark, sharp focus, professional quality.`,
+  },
+  {
+    name: "Rust Thread / Filament",
+    prompt: `A single filament of iron oxide — rust orange under the physics of gravity, thin enough to be transparent at the edges, thick enough to hold its form as a continuous thread. It connects two states: what is above and what is below, the source and what receives it. The surrounding field is mineral blue — water, haze, or atmosphere indistinguishable from each other in density and tone. The filament is the only warm element in a cold field. It reads as both intrusion and tether. Where the thread meets a surface, the contact point is the center of the composition. Photorealistic, natural light, no studio artifice. The image should feel like documentary evidence of something that cannot be documented. Analog grain, no digital smoothing. No watermark, no text overlays, sharp focus, professional quality.`,
+  },
+  {
+    name: "Submerged Field",
+    prompt: `The mineral blue of deep water as total environment — not background but pressure, density, immersion. Rust orange enters from below, rising as a thermal plume or dissolving upward the way iron oxide behaves when sediment is disturbed: branching, biological in shape, driven by convection rather than intention. The air-water boundary is visible above — a threshold, a membrane between states. Light refracts from the surface in caustic patterns, making the blue field luminous at the edges while remaining heavy at depth. The orange substance rises toward the boundary without reaching it. Underwater photographic quality — the specific color desaturation of water at depth, bubbles as material evidence, sediment as texture at the base. No watermark, no text overlays, sharp focus, professional quality.`,
+  },
+  {
+    name: "Membrane + Echo Figure",
+    prompt: `A translucent barrier as material subject — industrial plastic sheeting, gauze, or architectural membrane with its own physical presence: creases, condensation, the slight milkiness of a surface that has been under stress. A figure seen through the membrane, with ghost versions visible at the edges — the same form repeated at lower opacity, slightly offset, as if the transparency of the barrier multiplies rather than clarifies. The structural suspension points of the membrane show iron oxide rust — corrosion at the load-bearing anchor, bleeding downward into the white material below. The environment behind and around everything: dim mineral blue haze. The rust orange exists only at the structural failure point — specific, located, earned by time. Photorealistic, dim diffused interior light. Leica M10 with 35mm lens, Kodak Tri-X pushed to 1600, heavy grain. No watermark, no text overlays, sharp focus, professional quality.`,
+  },
+];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════════
+const state = {
+  clientId: (() => { let id = localStorage.getItem(STORAGE_KEYS.clientId); if (!id) { id = crypto.randomUUID(); localStorage.setItem(STORAGE_KEYS.clientId, id); } return id; })(),
+  apiKey: localStorage.getItem(STORAGE_KEYS.apiKey) || '',
+  ws: null,
+  wsReady: false,
+  authRequired: false,
+  imgWidth: CONFIG.defaultSize.width,
+  imgHeight: CONFIG.defaultSize.height,
+  batchCount: 1,
+  batchTotal: 1,
+  doneCount: 0,
+  generatedImages: [],
+  toastTimer: null,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UTILITY: DOM & API
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Get element by ID (KISS - single responsibility) */
+const $ = (id) => document.getElementById(id);
+
+/** Set element text content */
+const setText = (id, text) => {
+  const el = $(id);
+  if (el) el.textContent = text;
+};
+
+/** Toggle element class */
+const toggleClass = (id, className) => {
+  const el = $(id);
+  if (el) el.classList.toggle(className);
+};
+
+/** Add auth header to URL or request headers */
+const withAuth = (url) => {
+  if (!state.apiKey) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + 'api_key=' + encodeURIComponent(state.apiKey);
+};
+
+const getAuthHeaders = () => state.apiKey ? { 'X-API-Key': state.apiKey } : {};
+
+/** Deactivate all buttons matching selector, activate the given one */
+const selectButton = (selector, activeBtn) => {
+  document.querySelectorAll(selector).forEach(b => b.classList.remove('active'));
+  activeBtn.classList.add('active');
+};
+
+/** Fetch with error handling (KISS - centralized fetch logic) */
+const apiFetch = async (endpoint, opts = {}) => {
+  const r = await fetch(endpoint, {
+    ...opts,
+    headers: { ...getAuthHeaders(), ...opts.headers },
+  });
+  
+  if (r.status === 401) {
+    state.apiKey = '';
+    localStorage.removeItem(STORAGE_KEYS.apiKey);
+    showAuthPanel();
+    throw new Error('Authentication required');
+  }
+  
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || err.error || `Server error ${r.status}`);
+  }
+  
+  return r;
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STORAGE HELPERS (DRY - single place for persistence)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const storage = {
+  saveImages: () => localStorage.setItem(STORAGE_KEYS.images, JSON.stringify(state.generatedImages)),
+  loadImages: () => {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEYS.images)) || [];
+    } catch {
+      return [];
+    }
+  },
+  clearImages: () => localStorage.removeItem(STORAGE_KEYS.images),
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UI HELPERS (KISS - atomic operations)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const toast = (msg) => {
+  const el = $(DOM_IDS.toast);
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => el.classList.remove('show'), CONFIG.toastDuration);
+};
+
+const setStatus = (status) => {
+  const dot = $(DOM_IDS.dot);
+  dot.className = 'dot ' + status;
+  setText(DOM_IDS.statusLabel,
+    status === 'connected' ? 'connected' :
+    status === 'connecting' ? 'connecting…' : 'disconnected'
+  );
+};
+
+const showAuthPanel = () => $(DOM_IDS.authPanel).classList.add('show');
+
+const hideAuthPanel = () => $(DOM_IDS.authPanel).classList.remove('show');
+
+/** Get image aspect-ratio class based on dimensions */
+const getImageRatioClass = (w, h) => {
+  if (w === h) return '';
+  if (w < h) return 'portrait';
+  if (w === 1920 || h === 1080) return 'wide';
+  return 'landscape';
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GALLERY MANAGEMENT (KISS & DRY - all gallery logic in one place)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const gallery = {
+  create: (data) => {
+    const item = document.createElement('div');
+    item.className = 'gallery-item';
+
+    const img = document.createElement('img');
+    img.src = withAuth(data.url);
+    img.alt = `Generated image ${state.generatedImages.length}`;
+    const ratioClass = getImageRatioClass(state.imgWidth, state.imgHeight);
+    if (ratioClass) img.className = ratioClass;
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'save-btn';
+    saveBtn.textContent = state.generatedImages.length > 1
+      ? `Save image ${state.generatedImages.length}`
+      : 'Save to Gallery';
+    saveBtn.onclick = () => saveImage(data.url, data.filename);
+
+    item.appendChild(img);
+    item.appendChild(saveBtn);
+    return item;
+  },
+
+  add: (data) => {
+    state.generatedImages.push({ url: data.url, filename: data.filename });
+    storage.saveImages();
+
+    const gal = $(DOM_IDS.gallery);
+    const item = gallery.create(data);
+    gal.appendChild(item);
+
+    if (gal.children.length >= 2) gal.classList.add('multi');
+    setText(DOM_IDS.resultCount, `${state.generatedImages.length} images`);
+
+    if (state.doneCount === 1) item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  },
+
+  render: () => {
+    if (state.generatedImages.length === 0) return;
+
+    $(DOM_IDS.result).classList.add('show');
+    const gal = $(DOM_IDS.gallery);
+    gal.innerHTML = '';
+
+    state.generatedImages.forEach((data) => {
+      gal.appendChild(gallery.create(data));
+    });
+
+    if (state.generatedImages.length >= 2) gal.classList.add('multi');
+    setText(DOM_IDS.resultCount, `${state.generatedImages.length} images`);
+  },
+
+  clear: async () => {
+    state.generatedImages = [];
+    storage.clearImages();
+    $(DOM_IDS.gallery).innerHTML = '';
+    $(DOM_IDS.result).classList.remove('show');
+    updateShareButton();
+    await clearPendingImagesQueue();
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PROGRESS MANAGEMENT (KISS - isolated progress logic)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const progress = {
+  show: () => $(DOM_IDS.progress).classList.add('show'),
+  hide: () => $(DOM_IDS.progress).classList.remove('show'),
+  
+  reset: () => {
+    progress.hide();
+    $(DOM_IDS.progBar).style.width = '0%';
+    setText(DOM_IDS.progSteps, '');
+    setText(DOM_IDS.progNode, '');
+    $(DOM_IDS.genBtn).disabled = false;
+  },
+
+  setBatch: (index, total) => {
+    setText(DOM_IDS.progBatch,
+      total > 1 ? `Image ${index} / ${total}` : 'Generating…'
+    );
+    $(DOM_IDS.progBar).style.width = '0%';
+    setText(DOM_IDS.progSteps, '');
+    setText(DOM_IDS.progNode, '');
+  },
+
+  setSteps: (value, max) => {
+    const pct = Math.round((value / max) * 100);
+    $(DOM_IDS.progBar).style.width = pct + '%';
+    setText(DOM_IDS.progSteps, `${value} / ${max}`);
+  },
+
+  setNode: (nodeId) => {
+    setText(DOM_IDS.progNode, NODE_LABELS[nodeId] || `Node ${nodeId}`);
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MESSAGE HANDLER (KISS - simplified message dispatch)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const messageHandlers = {
+  [EVENTS.batchStart]: (data) => {
+    progress.setBatch(data.index, data.total);
+  },
+
+  [EVENTS.progress]: (data) => {
+    progress.setSteps(data.value, data.max);
+  },
+
+  [EVENTS.executing]: (data) => {
+    if (data.node) progress.setNode(data.node);
+  },
+
+  [EVENTS.imageReady]: (data) => {
+    gallery.add(data);
+    onBatchDone(() => {
+      progress.reset();
+      updateShareButton();
+      clearPendingImagesQueue();
+    });
+  },
+
+  [EVENTS.executionError]: (data) => {
+    toast(`Image ${data.batch_index}/${data.batch_total} failed: ${data.message}`);
+    onBatchDone(() => {
+      progress.reset();
+      updateShareButton();
+    });
+  },
+
+  [EVENTS.error]: (data) => {
+    toast(data.message || 'An error occurred.');
+    progress.reset();
+  },
+};
+
+const handleMsg = (msg) => {
+  const handler = messageHandlers[msg.type];
+  if (handler) handler(msg.data);
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WEBSOCKET (KISS - isolated WS logic)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const connectWs = () => {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const key = state.apiKey ? `?api_key=${encodeURIComponent(state.apiKey)}` : '';
+  state.ws = new WebSocket(`${proto}//${location.host}/ws/${state.clientId}${key}`);
+  setStatus('connecting');
+
+  state.ws.onopen = () => {
+    state.wsReady = true;
+    setStatus('connected');
+  };
+
+  state.ws.onerror = () => state.ws.close();
+
+  state.ws.onclose = (e) => {
+    state.wsReady = false;
+    setStatus('disconnected');
+    if (e.code === 4001) {
+      state.apiKey = '';
+      localStorage.removeItem(STORAGE_KEYS.apiKey);
+      showAuthPanel();
+      return;
+    }
+    setTimeout(connectWs, CONFIG.wsReconnectDelay);
+  };
+
+  state.ws.onmessage = (e) => {
+    try {
+      handleMsg(JSON.parse(e.data));
+    } catch (_) {}
+  };
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// API CALLS
+// ═══════════════════════════════════════════════════════════════════════════
+
+const clearPendingImagesQueue = async () => {
+  try {
+    await apiFetch(`/api/clear_pending_images/${state.clientId}`, { method: 'POST' });
+  } catch (_) {}
+};
+
+/** Increment doneCount; call callback when all batch items are settled */
+const onBatchDone = (onComplete) => {
+  state.doneCount++;
+  if (state.doneCount >= state.batchTotal) onComplete();
+};
+
+const checkHealth = async () => {
+  try {
+    const r = await apiFetch('/api/health');
+    const d = await r.json();
+    state.authRequired = d.auth_required;
+    if (state.authRequired && !state.apiKey) showAuthPanel();
+  } catch (_) {
+    if (!state.apiKey) showAuthPanel();
+  }
+};
+
+const generate = async () => {
+  const promptText = $(DOM_IDS.prompt).value.trim();
+  if (!promptText) { toast('Please enter a prompt.'); return; }
+  if (!state.wsReady) { toast('Not connected yet — please wait.'); return; }
+
+  state.batchTotal = state.batchCount;
+  state.doneCount = 0;
+
+  $(DOM_IDS.result).classList.add('show');
+  progress.show();
+  $(DOM_IDS.genBtn).disabled = true;
+
+  setText(DOM_IDS.progBatch,
+    state.batchCount > 1 ? `Queuing ${state.batchCount} images…` : 'Queuing…'
+  );
+
+  const seed = parseInt($(DOM_IDS.seed).value ?? '-1');
+
+  try {
+    const r = await apiFetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt: promptText,
+        seed,
+        width: state.imgWidth,
+        height: state.imgHeight,
+        client_id: state.clientId,
+        batch_count: state.batchCount,
+      }),
+    });
+
+    const d = await r.json();
+    setText(DOM_IDS.progBatch,
+      d.batch_count > 1 ? `Image 1 / ${d.batch_count}` : 'Waiting for GPU…'
+    );
+  } catch (e) {
+    toast(e.message || 'Failed to reach server.');
+    progress.reset();
+  }
+};
+
+const shareInstagram = async () => {
+  if (!state.generatedImages.length) {
+    toast('No images available to share.');
+    return;
+  }
+
+  const btn = $(DOM_IDS.shareInstagramBtn);
+  btn.disabled = true;
+  btn.textContent = 'Sharing…';
+
+  try {
+    await apiFetch('/api/share_instagram', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filenames: state.generatedImages.map(img => img.filename),
+        caption: $(DOM_IDS.prompt).value.trim() || 'Generated with z-image',
+      }),
+    });
+
+    toast('Shared to Instagram successfully.');
+    btn.textContent = 'Shared';
+    setTimeout(updateShareButton, 2500);
+  } catch (err) {
+    toast('Instagram share failed: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = 'Share to Instagram';
+  }
+};
+
+const saveImage = async (url, filename) => {
+  try {
+    const blob = await (await fetch(withAuth(url))).blob();
+    const file = new File([blob], filename || 'z-image.png', { type: 'image/png' });
+
+    if (navigator.share && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: 'z-image' });
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename || 'z-image.png';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('Could not save: ' + e.message);
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UI INTERACTIONS
+// ═══════════════════════════════════════════════════════════════════════════
+
+const saveApiKey = () => {
+  const val = $(DOM_IDS.apiKeyInput).value.trim();
+  if (!val) return;
+  state.apiKey = val;
+  localStorage.setItem(STORAGE_KEYS.apiKey, state.apiKey);
+  hideAuthPanel();
+  if (state.ws) state.ws.close();
+  connectWs();
+};
+
+const onPromptInput = () => {
+  setText(DOM_IDS.charCount, $(DOM_IDS.prompt).value.length);
+};
+
+const toggleAdv = () => {
+  toggleClass(DOM_IDS.advPanel, 'show');
+  toggleClass(DOM_IDS.advToggle, 'open');
+};
+
+const setSize = (w, h, btn) => {
+  state.imgWidth = w;
+  state.imgHeight = h;
+  selectButton('.size-btn', btn);
+};
+
+const setBatch = (n, btn) => {
+  state.batchCount = n;
+  selectButton('.batch-btn', btn);
+};
+
+const updateShareButton = () => {
+  const btn = $(DOM_IDS.shareInstagramBtn);
+  const progressVisible = $(DOM_IDS.progress).classList.contains('show');
+  if (state.generatedImages.length > 0 && (!progressVisible || state.doneCount >= state.batchTotal)) {
+    btn.style.display = 'inline-flex';
+    btn.disabled = false;
+    btn.textContent = 'Share to Instagram';
+  } else {
+    btn.style.display = 'none';
+  }
+};
+
+const refreshSession = () => {
+  state.generatedImages = storage.loadImages();
+  gallery.render();
+  if (!state.wsReady) connectWs();
+  toast(state.generatedImages.length ? 'Session images refreshed.' : 'Session restored.');
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INITIALIZATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Create header buttons (refresh + clear) */
+const buildHeaderButtons = () => {
+  const header = document.querySelector('header');
+  
+  const createIconBtn = (icon, title, onclick) => {
+    const btn = document.createElement('button');
+    btn.className = 'icon-btn';
+    btn.textContent = icon;
+    btn.title = title;
+    btn.onclick = onclick;
+    return btn;
+  };
+
+  header.appendChild(createIconBtn('↻', 'Refresh session images', refreshSession));
+  header.appendChild(createIconBtn('🗑', 'Clear image history', () => {
+    if (confirm('Clear all images from this session?')) gallery.clear();
+  }));
+};
+
+/** Populate style template dropdown */
+const buildTemplateSelect = () => {
+  const sel = $(DOM_IDS.templateSelect);
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  placeholder.textContent = '— load style template —';
+  sel.appendChild(placeholder);
+
+  PROMPT_TEMPLATES.forEach((tpl, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = tpl.name;
+    sel.appendChild(opt);
+  });
+
+  sel.addEventListener('change', () => {
+    const idx = parseInt(sel.value);
+    if (isNaN(idx) || !PROMPT_TEMPLATES[idx]) return;
+    $(DOM_IDS.prompt).value = PROMPT_TEMPLATES[idx].prompt;
+    onPromptInput();
+    sel.value = '';
+  });
+};
+
+/** Create batch selector buttons */
+const buildBatchRow = () => {
+  const row = $(DOM_IDS.batchRow);
+  for (let i = 1; i <= CONFIG.maxBatchCount; i++) {
+    const btn = document.createElement('button');
+    btn.className = 'batch-btn' + (i === 1 ? ' active' : '');
+    btn.textContent = i;
+    btn.onclick = () => setBatch(i, btn);
+    row.appendChild(btn);
+  }
+};
+
+window.addEventListener('load', async () => {
+  buildTemplateSelect();
+  buildBatchRow();
+  buildHeaderButtons();
+  state.generatedImages = storage.loadImages();
+  gallery.render();
+  await checkHealth();
+  connectWs();
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+});
+</script>
+</body>
+</html>

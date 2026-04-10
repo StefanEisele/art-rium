@@ -1,0 +1,77 @@
+import asyncio
+import logging
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+
+from core.config import settings
+from workers.comfy_listener import ComfyListener
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+
+def _quiet_exception_handler(loop, context):
+    exc = context.get("exception")
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError)):
+        return
+    loop.default_exception_handler(context)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if sys.platform == "win32":
+        asyncio.get_running_loop().set_exception_handler(_quiet_exception_handler)
+
+    # Ensure storage dirs exist
+    settings.images_dir.mkdir(parents=True, exist_ok=True)
+    settings.shop_prep_dir.mkdir(parents=True, exist_ok=True)
+
+    # Start ComfyUI WebSocket listener
+    listener = ComfyListener(app.state)
+    task = asyncio.create_task(listener.run())
+    app.state.comfy_listener = listener
+
+    yield
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(title="art-rium", lifespan=lifespan)
+
+# ── Routers ──────────────────────────────────────────────────────────────────
+from routers import generate, images  # noqa: E402  (after app is created)
+
+app.include_router(generate.router)
+app.include_router(images.router)
+
+# ── Static frontend ───────────────────────────────────────────────────────────
+_static = Path(__file__).parent / "frontends" / "mobile"
+if _static.exists():
+    app.mount("/", StaticFiles(directory=str(_static), html=True), name="static")
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    cert_dir = Path(__file__).parent / "certs"
+    ssl_key = cert_dir / "key.pem"
+    ssl_cert = cert_dir / "cert.pem"
+    use_ssl = ssl_key.exists() and ssl_cert.exists() and "--http" not in sys.argv
+
+    logger.info(f"Starting {'HTTPS' if use_ssl else 'HTTP'} on port {settings.port}")
+
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=settings.port,
+        ssl_keyfile=str(ssl_key) if use_ssl else None,
+        ssl_certfile=str(ssl_cert) if use_ssl else None,
+        log_level="info",
+    )

@@ -1,0 +1,27 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Storage (large files — not tracked in git)
+storage/images/
+storage/shop_prep/
+
+# Certs
+certs/
+
+# Alembic auto-generated (keep versions/, ignore cache)
+migrations/__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

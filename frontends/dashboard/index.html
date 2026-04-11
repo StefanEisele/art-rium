@@ -162,6 +162,66 @@
       color: var(--text-dim);
       text-align: center;
     }
+
+    /* ── Status dot animation ── */
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+    .dot-connecting { animation: blink 1.2s ease-in-out infinite; }
+
+    /* ── Comfy progress strip ── */
+    #comfy-strip {
+      display: none;
+      flex-direction: column;
+      gap: 5px;
+      padding: 8px 20px 10px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    #comfy-strip.show { display: flex; }
+    .comfy-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    #comfy-label { font-size: 13px; color: var(--text-dim); font-weight: 500; }
+    #comfy-steps { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+    .comfy-track { height: 2px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+    #comfy-bar   { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; transition: width 0.35s ease; }
+
+    /* ── Auth panel ── */
+    #auth-panel {
+      display: none;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+      gap: 12px;
+      flex-direction: column;
+    }
+    #auth-panel.show { display: flex; }
+    #auth-panel h2 { font-size: 15px; font-weight: 600; }
+    #auth-panel p  { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
+
+    .field { display: flex; flex-direction: column; gap: 7px; }
+    .field label {
+      font-size: 11px; font-weight: 700; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.7px;
+    }
+    .field input[type="password"] {
+      width: 100%; background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 10px; color: var(--text); font-size: 16px;
+      padding: 13px 14px; outline: none; font-family: inherit;
+      transition: border-color 0.2s; -webkit-appearance: none;
+    }
+    .field input[type="password"]:focus { border-color: var(--accent); }
+
+    .connect-btn {
+      padding: 13px 16px; border-radius: var(--radius);
+      border: none; background: var(--accent);
+      color: #000; font-size: 15px; font-weight: 700;
+      cursor: pointer; font-family: inherit; transition: all 0.13s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .connect-btn:active { transform: scale(0.97); }
   </style>
 </head>
 <body>
@@ -175,7 +235,28 @@
     <div class="status-dot" id="status-dot" style="opacity:0"></div>
   </header>
 
+  <!-- Comfy progress strip — visible during active generation -->
+  <div id="comfy-strip">
+    <div class="comfy-row">
+      <span id="comfy-label">Generating…</span>
+      <span id="comfy-steps"></span>
+    </div>
+    <div class="comfy-track"><div id="comfy-bar"></div></div>
+  </div>
+
   <main>
+
+    <!-- API connection panel — shown when auth is required and key is not set -->
+    <div id="auth-panel">
+      <h2>API Key Required</h2>
+      <p>Enter the API key from your server's <code>.env</code> file to connect all tools.</p>
+      <div class="field">
+        <label>API Key</label>
+        <input type="password" id="api-key-input" placeholder="paste key here"
+               autocomplete="off" autocorrect="off" spellcheck="false">
+      </div>
+      <button class="connect-btn" onclick="saveApiKey()">Connect</button>
+    </div>
 
     <section>
       <div class="section-label">Generation</div>
@@ -263,24 +344,144 @@
 </div>
 
 <script>
-// Ping health to show server status dot
-(async () => {
-  const dot = document.getElementById('status-dot');
-  try {
-    const r = await fetch('/api/health');
-    if (r.ok) {
-      dot.style.background = 'var(--green)';
-      dot.style.opacity = '1';
-    }
-  } catch (_) {
-    dot.style.background = 'var(--red, #ff453a)';
-    dot.style.opacity = '1';
-  }
-})();
+// ── Shared localStorage keys (same as z-image tool) ────────────────────────
+const STORAGE_KEYS = { clientId: 'z_client_id', apiKey: 'z_apikey' };
 
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
-}
+const NODE_LABELS = {
+  '39': 'Loading CLIP…', '40': 'Loading VAE…', '41': 'Preparing latent…',
+  '42': 'Zeroing conditions…', '44': 'Sampling…', '45': 'Encoding prompt…',
+  '46': 'Loading model…', '47': 'Setting sampler…', '51': 'Loading LoRA…',
+  '9': 'Decoding image…',
+};
+
+const state = {
+  clientId: (() => {
+    let id = localStorage.getItem(STORAGE_KEYS.clientId);
+    if (!id) { id = crypto.randomUUID(); localStorage.setItem(STORAGE_KEYS.clientId, id); }
+    return id;
+  })(),
+  apiKey: localStorage.getItem(STORAGE_KEYS.apiKey) || '',
+  ws: null,
+  wsReady: false,
+};
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+const setText = (id, t) => { const el = $(id); if (el) el.textContent = t; };
+
+const setDot = (status) => {
+  const dot = $('status-dot');
+  dot.style.opacity = '1';
+  dot.classList.remove('dot-connecting');
+  if (status === 'connected') {
+    dot.style.background = 'var(--green)';
+  } else if (status === 'connecting') {
+    dot.style.background = 'var(--accent)';
+    dot.classList.add('dot-connecting');
+  } else {
+    dot.style.background = '#ff453a';
+  }
+};
+
+// ── Auth panel ───────────────────────────────────────────────────────────────
+const showAuthPanel = () => $('auth-panel').classList.add('show');
+const hideAuthPanel = () => $('auth-panel').classList.remove('show');
+
+const saveApiKey = () => {
+  const val = $('api-key-input').value.trim();
+  if (!val) return;
+  state.apiKey = val;
+  localStorage.setItem(STORAGE_KEYS.apiKey, state.apiKey);
+  hideAuthPanel();
+  if (state.ws) state.ws.close();
+  connectWs();
+};
+
+// ── Comfy progress strip ─────────────────────────────────────────────────────
+let stripHideTimer = null;
+const strip = {
+  show: () => { clearTimeout(stripHideTimer); $('comfy-strip').classList.add('show'); },
+  hide: (delay = 0) => {
+    clearTimeout(stripHideTimer);
+    stripHideTimer = setTimeout(() => $('comfy-strip').classList.remove('show'), delay);
+  },
+  setLabel: (t) => setText('comfy-label', t),
+  setSteps: (t) => setText('comfy-steps', t),
+  setBar: (pct) => { $('comfy-bar').style.width = pct + '%'; },
+  reset: () => { strip.setBar(0); strip.setSteps(''); },
+  done: () => {
+    strip.setLabel('Done ✓');
+    strip.setBar(100);
+    strip.setSteps('');
+    strip.hide(2200);
+  },
+};
+
+// ── WS message handler ───────────────────────────────────────────────────────
+const handleMsg = (msg) => {
+  const { type, data } = msg;
+  if (type === 'batch_start') {
+    strip.show();
+    strip.reset();
+    strip.setLabel(data.total > 1 ? `Image ${data.index} / ${data.total}` : 'Generating…');
+  } else if (type === 'progress') {
+    strip.show();
+    strip.setBar(Math.round((data.value / data.max) * 100));
+    strip.setSteps(`${data.value} / ${data.max}`);
+  } else if (type === 'executing') {
+    strip.show();
+    if (data.node) strip.setLabel(NODE_LABELS[data.node] || 'Generating…');
+  } else if (type === 'image_ready' || type === 'text_ready') {
+    strip.done();
+  } else if (type === 'execution_error') {
+    strip.setLabel('Generation failed');
+    strip.hide(3000);
+  }
+};
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+const connectWs = () => {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const key = state.apiKey ? `?api_key=${encodeURIComponent(state.apiKey)}` : '';
+  state.ws = new WebSocket(`${proto}//${location.host}/ws/${state.clientId}${key}`);
+  setDot('connecting');
+
+  state.ws.onopen = () => { state.wsReady = true; setDot('connected'); };
+  state.ws.onerror = () => state.ws.close();
+  state.ws.onclose = (e) => {
+    state.wsReady = false;
+    setDot('disconnected');
+    if (e.code === 4001) {
+      state.apiKey = '';
+      localStorage.removeItem(STORAGE_KEYS.apiKey);
+      showAuthPanel();
+      return;
+    }
+    setTimeout(connectWs, 3500);
+  };
+  state.ws.onmessage = (e) => {
+    try { handleMsg(JSON.parse(e.data)); } catch (_) {}
+  };
+};
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+window.addEventListener('load', async () => {
+  // Check if auth is required before connecting
+  try {
+    const headers = state.apiKey ? { 'X-API-Key': state.apiKey } : {};
+    const r = await fetch('/api/health', { headers });
+    if (r.ok) {
+      const d = await r.json();
+      if (d.auth_required && !state.apiKey) showAuthPanel();
+    }
+  } catch (_) {}
+
+  connectWs();
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+});
 </script>
 
 </body>

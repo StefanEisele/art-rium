@@ -88,16 +88,6 @@
       -webkit-overflow-scrolling: touch;
     }
 
-    /* ── Auth panel ── */
-    #auth-panel {
-      display: none; background: var(--surface);
-      border-radius: var(--radius); padding: 20px;
-      gap: 12px; flex-direction: column;
-    }
-    #auth-panel.show { display: flex; }
-    #auth-panel h2 { font-size: 15px; font-weight: 600; }
-    #auth-panel p  { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
-
     /* ── Form ── */
     .field { display: flex; flex-direction: column; gap: 7px; }
 
@@ -307,18 +297,6 @@
 
   <main>
 
-    <!-- Auth panel -->
-    <div id="auth-panel">
-      <h2>API Key Required</h2>
-      <p>Enter the API key from your desktop's <code>.env</code> file.</p>
-      <div class="field">
-        <label>API Key</label>
-        <input type="password" id="api-key-input" placeholder="paste key here"
-               autocomplete="off" autocorrect="off" spellcheck="false">
-      </div>
-      <button class="btn primary" onclick="saveApiKey()">Connect</button>
-    </div>
-
     <!-- Prompt -->
     <div class="field">
       <label>Prompt</label>
@@ -429,8 +407,6 @@ const CONFIG = {
 const DOM_IDS = {
   prompt: 'prompt',
   charCount: 'char-count',
-  authPanel: 'auth-panel',
-  apiKeyInput: 'api-key-input',
   genBtn: 'gen-btn',
   progress: 'progress',
   progBatch: 'prog-batch',
@@ -521,7 +497,6 @@ const state = {
   apiKey: localStorage.getItem(STORAGE_KEYS.apiKey) || '',
   ws: null,
   wsReady: false,
-  authRequired: false,
   imgWidth: CONFIG.defaultSize.width,
   imgHeight: CONFIG.defaultSize.height,
   batchCount: 1,
@@ -560,7 +535,7 @@ const apiFetch = async (endpoint, opts = {}) => {
   if (r.status === 401) {
     state.apiKey = '';
     localStorage.removeItem(STORAGE_KEYS.apiKey);
-    showAuthPanel();
+    location.href = '/';
     throw new Error('Authentication required');
   }
   if (!r.ok) {
@@ -600,9 +575,6 @@ const setStatus = (status) => {
     status === 'connecting' ? 'connecting…' : 'disconnected'
   );
 };
-
-const showAuthPanel = () => $(DOM_IDS.authPanel).classList.add('show');
-const hideAuthPanel = () => $(DOM_IDS.authPanel).classList.remove('show');
 
 const getImageRatioClass = (w, h) => {
   if (w === h) return '';
@@ -781,7 +753,7 @@ const connectWs = () => {
     if (e.code === 4001) {
       state.apiKey = '';
       localStorage.removeItem(STORAGE_KEYS.apiKey);
-      showAuthPanel();
+      location.href = '/';
       return;
     }
     setTimeout(connectWs, CONFIG.wsReconnectDelay);
@@ -805,17 +777,6 @@ const clearPendingImagesQueue = async () => {
 const onBatchDone = (onComplete) => {
   state.doneCount++;
   if (state.doneCount >= state.batchTotal) onComplete();
-};
-
-const checkHealth = async () => {
-  try {
-    const r = await apiFetch('/api/health');
-    const d = await r.json();
-    state.authRequired = d.auth_required;
-    if (state.authRequired && !state.apiKey) showAuthPanel();
-  } catch (_) {
-    if (!state.apiKey) showAuthPanel();
-  }
 };
 
 const generate = async () => {
@@ -909,16 +870,6 @@ const saveImage = async (url, filename) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // UI INTERACTIONS
 // ═══════════════════════════════════════════════════════════════════════════
-
-const saveApiKey = () => {
-  const val = $(DOM_IDS.apiKeyInput).value.trim();
-  if (!val) return;
-  state.apiKey = val;
-  localStorage.setItem(STORAGE_KEYS.apiKey, state.apiKey);
-  hideAuthPanel();
-  if (state.ws) state.ws.close();
-  connectWs();
-};
 
 const onPromptInput = () => {
   setText(DOM_IDS.charCount, $(DOM_IDS.prompt).value.length);
@@ -1023,7 +974,6 @@ window.addEventListener('load', async () => {
   buildHeaderButtons();
   state.generatedImages = storage.loadImages();
   gallery.render();
-  await checkHealth();
   connectWs();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});

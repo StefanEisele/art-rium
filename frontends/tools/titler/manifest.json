@@ -1,0 +1,19 @@
+{
+  "name": "Image Titler",
+  "short_name": "Titler",
+  "description": "Generate and save titles for images using AI",
+  "start_url": "/tools/titler/",
+  "scope": "/tools/titler/",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

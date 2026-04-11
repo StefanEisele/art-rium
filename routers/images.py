@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api/images")
 
 
 class ImageUpdate(BaseModel):
+    title: Optional[str] = None
     tags: Optional[list[str]] = None
     rating: Optional[int] = None
     notes: Optional[str] = None
@@ -77,6 +78,8 @@ async def update_image(
     img = await db.get(Image, image_id)
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
+    if body.title is not None:
+        img.title = body.title or None
     if body.tags is not None:
         img.tags = body.tags
     if body.rating is not None:
@@ -119,6 +122,7 @@ def _serialize(img: Image) -> dict:
         "id": str(img.id),
         "filename": img.filename,
         "url": f"/api/image/{img.filename}",
+        "title": img.title,
         "prompt": img.prompt,
         "seed": img.seed,
         "width": img.width,

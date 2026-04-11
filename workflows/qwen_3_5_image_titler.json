@@ -1,0 +1,93 @@
+{
+  "1": {
+    "inputs": {
+      "system": "You are an art curator with profession in contemporary media art.",
+      "prompt": "Please give me 5 titles for this ai art image.",
+      "think": false,
+      "format": "text",
+      "reset_session": false,
+      "connectivity": [
+        "7",
+        0
+      ],
+      "images": [
+        "11",
+        0
+      ]
+    },
+    "class_type": "OllamaChat",
+    "_meta": {
+      "title": "Ollama Chat"
+    }
+  },
+  "6": {
+    "inputs": {
+      "preview_markdown": "\n\nLet's double check if I should interpret \"rust orange\" as just a color description or a required word. The user said \"give me 3 titles for this image with rust orange in it\". This is slightly ambiguous. It could mean \"give me 3 titles that describe the image, ensuring 'rust orange' is in the text\". That is the most likely interpretation given the specific phrasing.\n\nSo, I will generate:\n1.  Rust Orange Vision\n2.  The Rust Orange Gaze\n3.  Inside the Rust Orange Block\n\nThese are strong and directly address the prompt.\n\nLet's review the previous turn. The user provided an image. I need to output 3 titles. The constraint is \"with rust orange in it\".\n\nOkay, final selection:\n1.  Rust Orange Focus\n2.  The Rust Orange Eye\n3.  Gazing Through Rust Orange Glass\n\nI think \"Rust Orange Focus\" is good. \"Rust Orange Vision\" is good.\nLet's try:\n1.  Rust Orange Gaze\n2.  The Rust Orange Prism\n3.  Rust Orange Reflections\n\nThese sound artistic.\n\nLet's go with:\n1.  Rust Orange Gaze\n2.  The Rust Orange Prism\n3.  Inside the Rust Orange Block\n\nActually, \"Rust Orange Focus\" is better than \"The Rust Orange Prism\" because it's an eye.\nLet's try:\n1.  Rust Orange Focus\n2.  The Rust Orange Lens\n3.  Gazing Through Rust Orange Glass\n\nThese are distinct.\n1.  **Rust Orange Focus**\n2.  **The Rust Orange Lens**\n3.  **Rust Orange Reflections**\n\nI will use these. They are concise and fit the constraint.\n\nOne more check: Does the user want the *image* to contain rust orange? No, they want the *titles* to have \"rust orange in it\".\nOkay, I'm confident.\n\nWait, looking at the image again, it looks like the eye is submerged in a liquid, maybe amber or whiskey, inside a block.\nTitle 1: Rust Orange Focus\nTitle 2: The Rust Orange Gaze\nTitle 3: Inside the Rust Orange Block\n\nThese are better.\n\nLet's finalize:\n1.  **Rust Orange Focus**\n2.  **The Rust Orange Gaze**\n3.  **Inside the Rust Orange Block**\n\nWait, the prompt says \"with rust orange in it\". It could mean \"titles that describe the rust orange color\". But usually, when people say \"give me X with Y in it\", they mean the text Y.\n\nI will provide titles that include the phrase \"rust orange\".\n\nFinal list:\n1.  Rust Orange Focus\n2.  The Rust Orange Gaze\n3.  Inside the Rust Orange Block\n\nOr maybe:\n1.  Rust Orange Vision\n2.  The Rust Orange Eye\n3.  Rust Orange Reflections\n\nLet's go with:\n1.  Rust Orange Focus\n2.  The Rust Orange Gaze\n3.  Inside the Rust Orange Block\n\nThese are descriptive and accurate.\n</think>\n\nHere are 3 titles for the image that include \"rust orange\":\n\n1.  **Rust Orange Focus**\n2.  **The Rust Orange Gaze**\n3.  **Inside the Rust Orange Block**",
+      "preview_text": "\n\nLet's double check if I should interpret \"rust orange\" as just a color description or a required word. The user said \"give me 3 titles for this image with rust orange in it\". This is slightly ambiguous. It could mean \"give me 3 titles that describe the image, ensuring 'rust orange' is in the text\". That is the most likely interpretation given the specific phrasing.\n\nSo, I will generate:\n1.  Rust Orange Vision\n2.  The Rust Orange Gaze\n3.  Inside the Rust Orange Block\n\nThese are strong and directly address the prompt.\n\nLet's review the previous turn. The user provided an image. I need to output 3 titles. The constraint is \"with rust orange in it\".\n\nOkay, final selection:\n1.  Rust Orange Focus\n2.  The Rust Orange Eye\n3.  Gazing Through Rust Orange Glass\n\nI think \"Rust Orange Focus\" is good. \"Rust Orange Vision\" is good.\nLet's try:\n1.  Rust Orange Gaze\n2.  The Rust Orange Prism\n3.  Rust Orange Reflections\n\nThese sound artistic.\n\nLet's go with:\n1.  Rust Orange Gaze\n2.  The Rust Orange Prism\n3.  Inside the Rust Orange Block\n\nActually, \"Rust Orange Focus\" is better than \"The Rust Orange Prism\" because it's an eye.\nLet's try:\n1.  Rust Orange Focus\n2.  The Rust Orange Lens\n3.  Gazing Through Rust Orange Glass\n\nThese are distinct.\n1.  **Rust Orange Focus**\n2.  **The Rust Orange Lens**\n3.  **Rust Orange Reflections**\n\nI will use these. They are concise and fit the constraint.\n\nOne more check: Does the user want the *image* to contain rust orange? No, they want the *titles* to have \"rust orange in it\".\nOkay, I'm confident.\n\nWait, looking at the image again, it looks like the eye is submerged in a liquid, maybe amber or whiskey, inside a block.\nTitle 1: Rust Orange Focus\nTitle 2: The Rust Orange Gaze\nTitle 3: Inside the Rust Orange Block\n\nThese are better.\n\nLet's finalize:\n1.  **Rust Orange Focus**\n2.  **The Rust Orange Gaze**\n3.  **Inside the Rust Orange Block**\n\nWait, the prompt says \"with rust orange in it\". It could mean \"titles that describe the rust orange color\". But usually, when people say \"give me X with Y in it\", they mean the text Y.\n\nI will provide titles that include the phrase \"rust orange\".\n\nFinal list:\n1.  Rust Orange Focus\n2.  The Rust Orange Gaze\n3.  Inside the Rust Orange Block\n\nOr maybe:\n1.  Rust Orange Vision\n2.  The Rust Orange Eye\n3.  Rust Orange Reflections\n\nLet's go with:\n1.  Rust Orange Focus\n2.  The Rust Orange Gaze\n3.  Inside the Rust Orange Block\n\nThese are descriptive and accurate.\n</think>\n\nHere are 3 titles for the image that include \"rust orange\":\n\n1.  **Rust Orange Focus**\n2.  **The Rust Orange Gaze**\n3.  **Inside the Rust Orange Block**",
+      "previewMode": null,
+      "source": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "PreviewAny",
+    "_meta": {
+      "title": "Preview as Text"
+    }
+  },
+  "7": {
+    "inputs": {
+      "url": "http://127.0.0.1:11434",
+      "model": "qwen3.5:latest",
+      "keep_alive": 5,
+      "keep_alive_unit": "minutes",
+      "🔄 Reconnect": null
+    },
+    "class_type": "OllamaConnectivityV2",
+    "_meta": {
+      "title": "Ollama Connectivity"
+    }
+  },
+  "10": {
+    "inputs": {
+      "image": "z-image_00825_.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "11": {
+    "inputs": {
+      "width": 512,
+      "height": 512,
+      "upscale_method": "nearest-exact",
+      "keep_proportion": "stretch",
+      "pad_color": "0, 0, 0",
+      "crop_position": "center",
+      "divisible_by": 2,
+      "device": "cpu",
+      "image": [
+        "12",
+        0
+      ],
+      "mask": [
+        "12",
+        1
+      ]
+    },
+    "class_type": "ImageResizeKJv2",
+    "_meta": {
+      "title": "Resize Image v2"
+    }
+  },
+  "12": {
+    "inputs": {
+      "image": ""
+    },
+    "class_type": "ETN_LoadImageBase64",
+    "_meta": {
+      "title": "Load Image (Base64)"
+    }
+  }
+}

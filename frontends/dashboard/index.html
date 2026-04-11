@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="art-rium">
+  <title>art-rium</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    :root {
+      --bg:         #111111;
+      --surface:    #1c1c1e;
+      --surface2:   #2c2c2e;
+      --accent:     #f5a623;
+      --text:       #f2f2f7;
+      --text-dim:   #8e8e93;
+      --border:     #3a3a3c;
+      --green:      #32d74b;
+      --radius:     14px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+      overscroll-behavior: none;
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      min-height: 100dvh;
+      max-width: 600px;
+      margin: 0 auto;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 20px 14px;
+      flex-shrink: 0;
+    }
+
+    .header-brand { display: flex; flex-direction: column; gap: 2px; }
+    .header-brand h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+    .header-brand p  { font-size: 13px; color: var(--text-dim); }
+
+    .status-dot {
+      width: 9px; height: 9px; border-radius: 50%;
+      background: var(--green); flex-shrink: 0;
+    }
+
+    /* ── Main ── */
+    main {
+      flex: 1;
+      padding: 8px 20px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+
+    /* ── Section ── */
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 10px;
+    }
+
+    /* ── Tool card ── */
+    .tools-list { display: flex; flex-direction: column; gap: 10px; }
+
+    .tool-card {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      text-decoration: none;
+      color: inherit;
+      transition: border-color 0.15s, background 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .tool-card.active {
+      cursor: pointer;
+      border-color: var(--border);
+    }
+    .tool-card.active:active {
+      background: var(--surface2);
+      border-color: var(--accent);
+    }
+
+    .tool-card.soon {
+      opacity: 0.45;
+      cursor: default;
+    }
+
+    .tool-icon {
+      width: 46px; height: 46px;
+      border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px;
+      background: var(--surface2);
+      flex-shrink: 0;
+    }
+    .tool-card.active .tool-icon { background: var(--accent); }
+
+    .tool-body { flex: 1; min-width: 0; }
+    .tool-name {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.2px;
+      margin-bottom: 3px;
+    }
+    .tool-desc {
+      font-size: 13px;
+      color: var(--text-dim);
+      line-height: 1.4;
+    }
+
+    .tool-meta { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+
+    .badge {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      padding: 3px 8px;
+      border-radius: 6px;
+    }
+    .badge.live { background: rgba(50,215,75,0.15); color: var(--green); }
+    .badge.soon { background: var(--surface2); color: var(--text-dim); }
+
+    .tool-arrow {
+      font-size: 20px;
+      color: var(--accent);
+      font-weight: 300;
+      line-height: 1;
+    }
+
+    /* ── Footer ── */
+    footer {
+      padding: 20px 20px 0;
+      font-size: 12px;
+      color: var(--text-dim);
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="header-brand">
+      <h1>art-rium</h1>
+      <p>AI art creation platform</p>
+    </div>
+    <div class="status-dot" id="status-dot" style="opacity:0"></div>
+  </header>
+
+  <main>
+
+    <section>
+      <div class="section-label">Generation</div>
+      <div class="tools-list">
+
+        <a class="tool-card active" href="/tools/z-image/">
+          <div class="tool-icon">⚡</div>
+          <div class="tool-body">
+            <div class="tool-name">z-Image</div>
+            <div class="tool-desc">Generate images with the z-image turbo workflow</div>
+          </div>
+          <div class="tool-meta">
+            <span class="badge live">Live</span>
+            <span class="tool-arrow">›</span>
+          </div>
+        </a>
+
+      </div>
+    </section>
+
+    <section>
+      <div class="section-label">Publishing</div>
+      <div class="tools-list">
+
+        <div class="tool-card soon">
+          <div class="tool-icon">🖼</div>
+          <div class="tool-body">
+            <div class="tool-name">Gallery</div>
+            <div class="tool-desc">Browse, rate, and tag generated images</div>
+          </div>
+          <div class="tool-meta">
+            <span class="badge soon">Soon</span>
+          </div>
+        </div>
+
+        <div class="tool-card soon">
+          <div class="tool-icon">📝</div>
+          <div class="tool-body">
+            <div class="tool-name">Articles</div>
+            <div class="tool-desc">Draft and publish WordPress articles</div>
+          </div>
+          <div class="tool-meta">
+            <span class="badge soon">Soon</span>
+          </div>
+        </div>
+
+        <div class="tool-card soon">
+          <div class="tool-icon">🛒</div>
+          <div class="tool-body">
+            <div class="tool-name">Shop Prep</div>
+            <div class="tool-desc">Prepare and submit Singulart listings</div>
+          </div>
+          <div class="tool-meta">
+            <span class="badge soon">Soon</span>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <footer>art-rium</footer>
+
+</div>
+
+<script>
+// Ping health to show server status dot
+(async () => {
+  const dot = document.getElementById('status-dot');
+  try {
+    const r = await fetch('/api/health');
+    if (r.ok) {
+      dot.style.background = 'var(--green)';
+      dot.style.opacity = '1';
+    }
+  } catch (_) {
+    dot.style.background = 'var(--red, #ff453a)';
+    dot.style.opacity = '1';
+  }
+})();
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+</script>
+
+</body>
+</html>

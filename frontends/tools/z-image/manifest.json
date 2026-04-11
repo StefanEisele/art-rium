@@ -1,0 +1,19 @@
+{
+  "name": "z-Image",
+  "short_name": "z-Image",
+  "description": "AI image generation — z-image turbo",
+  "start_url": "/tools/z-image/",
+  "scope": "/tools/z-image/",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

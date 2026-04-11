@@ -53,10 +53,15 @@ from routers import generate, images  # noqa: E402  (after app is created)
 app.include_router(generate.router)
 app.include_router(images.router)
 
-# ── Static frontend ───────────────────────────────────────────────────────────
-_static = Path(__file__).parent / "frontends" / "mobile"
-if _static.exists():
-    app.mount("/", StaticFiles(directory=str(_static), html=True), name="static")
+# ── Static frontends ──────────────────────────────────────────────────────────
+# Tools must be mounted before the root catch-all
+_z_image = Path(__file__).parent / "frontends" / "tools" / "z-image"
+if _z_image.exists():
+    app.mount("/tools/z-image", StaticFiles(directory=str(_z_image), html=True), name="z-image")
+
+_dashboard = Path(__file__).parent / "frontends" / "dashboard"
+if _dashboard.exists():
+    app.mount("/", StaticFiles(directory=str(_dashboard), html=True), name="dashboard")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":

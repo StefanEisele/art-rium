@@ -175,6 +175,9 @@ class ComfyListener:
             except Exception as e:
                 logger.error(f"Text forward failed ({msg_type}): {e}")
 
+        if msg_type == "executed":
+            logger.debug(f"Text job executed node={data.get('node')} output_keys={list(data.get('output', {}).keys())}")
+
         if msg_type == "executed" and data.get("node") == meta["output_node"]:
             text = ""
             output = data.get("output", {})

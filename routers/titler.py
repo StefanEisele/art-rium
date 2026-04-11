@@ -27,7 +27,7 @@ _WORKFLOW = json.loads(
 )
 
 COMFYUI_TIMEOUT = 20.0
-OUTPUT_NODE = "1"  # OllamaChat node that produces the text
+OUTPUT_NODE = "6"  # PreviewAny node — this is what fires the executed event with text
 
 
 def _build_workflow(image_b64: str) -> dict:

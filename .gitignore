@@ -15,6 +15,9 @@ storage/shop_prep/
 # Certs
 certs/
 
+# Cloudflare tunnel binary
+cloudflared*.exe
+
 # Alembic auto-generated (keep versions/, ignore cache)
 migrations/__pycache__/
 

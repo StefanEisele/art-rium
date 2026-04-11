@@ -76,7 +76,17 @@ echo   art-rium  ^|  Remote Access
 echo  =====================================
 echo.
 
-:: Stop any existing server on this port
+:: ── Start ComfyUI ────────────────────────────────────────────────────────────
+set COMFY_DIR=E:\00_comfy
+if exist "%COMFY_DIR%\venv\Scripts\activate.bat" (
+    echo  Starting ComfyUI...
+    start "ComfyUI" cmd /k cd /d "%COMFY_DIR%" ^&^& call venv\Scripts\activate.bat ^&^& python main.py
+    echo  ComfyUI starting in background...
+) else (
+    echo  WARNING: ComfyUI not found at %COMFY_DIR% — skipping.
+)
+
+:: ── Stop any existing art-rium server on this port ───────────────────────────
 echo  Checking for existing server on port %PORT%...
 for /f "tokens=5" %%p in ('netstat -ano ^| findstr ":%PORT%" ^| findstr "LISTENING" 2^>nul') do (
     echo  Stopping existing process ^(PID %%p^)...

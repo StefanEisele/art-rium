@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Gallery">
+  <title>Gallery — art-rium</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    :root {
+      --bg:         #111111;
+      --surface:    #1c1c1e;
+      --surface2:   #2c2c2e;
+      --surface3:   #3a3a3c;
+      --accent:     #f5a623;
+      --accent-tap: #d4901e;
+      --text:       #f2f2f7;
+      --text-dim:   #8e8e93;
+      --border:     #3a3a3c;
+      --green:      #32d74b;
+      --red:        #ff453a;
+      --radius:     14px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+      overscroll-behavior: none;
+    }
+
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      max-width: 700px;
+      margin: 0 auto;
+      padding-top: env(safe-area-inset-top);
+    }
+
+    /* ── Header ── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .back-btn {
+      background: none; border: none;
+      font-size: 22px; color: var(--accent);
+      cursor: pointer; padding: 0 4px 0 0;
+      -webkit-tap-highlight-color: transparent;
+      text-decoration: none;
+      display: flex; align-items: center; flex-shrink: 0;
+    }
+
+    header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex-shrink: 0; }
+
+    /* ── Search ── */
+    .search-wrap {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
+    .search-icon {
+      position: absolute; left: 11px;
+      font-size: 15px; color: var(--text-dim);
+      pointer-events: none;
+    }
+
+    #search-input {
+      width: 100%;
+      background: var(--surface2);
+      border: 1.5px solid transparent;
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 15px;
+      padding: 9px 34px 9px 34px;
+      outline: none;
+      font-family: inherit;
+      transition: border-color 0.2s;
+      -webkit-appearance: none;
+    }
+    #search-input:focus { border-color: var(--accent); }
+    #search-input::placeholder { color: var(--text-dim); }
+
+    .search-clear {
+      position: absolute; right: 10px;
+      background: none; border: none;
+      color: var(--text-dim); font-size: 16px;
+      cursor: pointer; padding: 0; display: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .search-clear.show { display: block; }
+
+    /* ── Filter bar ── */
+    .filter-bar {
+      display: flex;
+      gap: 8px;
+      padding: 10px 16px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .filter-bar::-webkit-scrollbar { display: none; }
+
+    .filter-chip {
+      flex-shrink: 0;
+      background: var(--surface2);
+      border: 1.5px solid var(--border);
+      border-radius: 20px;
+      color: var(--text-dim);
+      font-size: 13px;
+      font-weight: 500;
+      padding: 5px 13px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.15s;
+      -webkit-tap-highlight-color: transparent;
+      white-space: nowrap;
+    }
+    .filter-chip.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #000;
+    }
+
+    /* ── Grid ── */
+    .grid-wrap {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 12px 12px 0;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .grid-item {
+      position: relative;
+      cursor: pointer;
+      border-radius: 10px;
+      overflow: hidden;
+      background: var(--surface2);
+      aspect-ratio: 1;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .grid-item img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: opacity 0.2s;
+    }
+
+    .grid-item .overlay {
+      position: absolute; inset: 0;
+      background: linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 50%);
+      opacity: 0;
+      transition: opacity 0.2s;
+      display: flex; align-items: flex-end; padding: 8px;
+    }
+    .grid-item:active .overlay { opacity: 1; }
+
+    .grid-item .rating-badge {
+      position: absolute; top: 7px; right: 7px;
+      background: rgba(0,0,0,0.65);
+      border-radius: 8px;
+      padding: 2px 6px;
+      font-size: 11px;
+      color: var(--accent);
+      display: none;
+    }
+    .grid-item .rating-badge.show { display: block; }
+
+    /* ── Load more / empty / loading ── */
+    .grid-footer {
+      padding: 16px 0 calc(env(safe-area-inset-bottom) + 20px);
+      display: flex; justify-content: center;
+    }
+
+    .load-more-btn {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 15px; font-weight: 600;
+      padding: 12px 28px;
+      cursor: pointer; font-family: inherit;
+      transition: all 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .load-more-btn:active { background: var(--surface2); }
+    .load-more-btn:disabled { opacity: 0.4; cursor: default; }
+
+    .empty-state {
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 12px; padding: 60px 20px;
+      color: var(--text-dim); text-align: center;
+    }
+    .empty-state .emoji { font-size: 48px; }
+    .empty-state p { font-size: 15px; line-height: 1.5; }
+
+    /* ── Count bar ── */
+    .count-bar {
+      padding: 6px 16px;
+      font-size: 12px;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    /* ════════════════════════════════════════
+       MODAL
+    ════════════════════════════════════════ */
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.85);
+      z-index: 100;
+      display: none;
+      flex-direction: column;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .modal-backdrop.open { display: flex; }
+
+    .modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px;
+      flex-shrink: 0;
+    }
+
+    .modal-close {
+      background: var(--surface2); border: none;
+      color: var(--text); font-size: 18px;
+      width: 34px; height: 34px; border-radius: 50%;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .modal-nav {
+      display: flex; gap: 8px;
+    }
+
+    .nav-btn {
+      background: var(--surface2); border: none;
+      color: var(--text); font-size: 18px;
+      width: 34px; height: 34px; border-radius: 50%;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .nav-btn:disabled { opacity: 0.3; cursor: default; }
+
+    .modal-image-wrap {
+      flex-shrink: 0;
+      max-height: 42vh;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0 16px;
+      overflow: hidden;
+    }
+
+    .modal-image-wrap img {
+      max-width: 100%; max-height: 100%;
+      border-radius: 10px;
+      object-fit: contain;
+      display: block;
+    }
+
+    .modal-body {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 16px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+
+    /* ── Star rating ── */
+    .stars-row {
+      display: flex; gap: 6px;
+    }
+
+    .star {
+      font-size: 28px;
+      cursor: pointer;
+      transition: transform 0.1s;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      line-height: 1;
+    }
+    .star:active { transform: scale(0.88); }
+
+    /* ── Meta row ── */
+    .meta-row {
+      display: flex; gap: 10px; flex-wrap: wrap;
+    }
+
+    .meta-chip {
+      background: var(--surface2);
+      border-radius: 8px;
+      padding: 4px 10px;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    /* ── Prompt ── */
+    .prompt-block {
+      background: var(--surface);
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+
+    .prompt-label {
+      font-size: 10px; font-weight: 700;
+      color: var(--text-dim); text-transform: uppercase;
+      letter-spacing: 0.7px; margin-bottom: 6px;
+    }
+
+    .prompt-text {
+      font-size: 13px; line-height: 1.55;
+      color: var(--text);
+      display: -webkit-box;
+      -webkit-line-clamp: 4;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .prompt-text.expanded {
+      display: block;
+      -webkit-line-clamp: unset;
+    }
+
+    .expand-btn {
+      background: none; border: none;
+      color: var(--accent); font-size: 13px;
+      cursor: pointer; padding: 4px 0 0;
+      font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* ── Tags ── */
+    .section-label {
+      font-size: 10px; font-weight: 700;
+      color: var(--text-dim); text-transform: uppercase;
+      letter-spacing: 0.7px; margin-bottom: 8px;
+    }
+
+    .tags-wrap {
+      display: flex; flex-wrap: wrap; gap: 7px; align-items: center;
+    }
+
+    .tag-chip {
+      display: flex; align-items: center; gap: 5px;
+      background: var(--surface2); border-radius: 8px;
+      padding: 5px 10px;
+      font-size: 13px; color: var(--text);
+    }
+
+    .tag-remove {
+      background: none; border: none; color: var(--text-dim);
+      font-size: 14px; cursor: pointer; padding: 0; line-height: 1;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .tag-add-wrap {
+      display: flex; gap: 6px; align-items: center;
+    }
+
+    .tag-input {
+      background: var(--surface2);
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      color: var(--text); font-size: 14px;
+      padding: 6px 10px; outline: none;
+      font-family: inherit; width: 120px;
+      -webkit-appearance: none;
+    }
+    .tag-input:focus { border-color: var(--accent); }
+
+    .tag-add-btn {
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 8px; color: var(--text);
+      font-size: 18px; width: 34px; height: 34px;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* ── Notes ── */
+    .notes-textarea {
+      width: 100%;
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: 10px;
+      color: var(--text); font-size: 14px;
+      padding: 12px 14px; outline: none;
+      font-family: inherit; resize: none;
+      min-height: 80px; line-height: 1.5;
+      -webkit-appearance: none;
+      transition: border-color 0.2s;
+    }
+    .notes-textarea:focus { border-color: var(--accent); }
+
+    /* ── Action buttons ── */
+    .action-row {
+      display: flex; gap: 10px;
+    }
+
+    .btn {
+      flex: 1; padding: 14px;
+      border-radius: var(--radius); border: 1.5px solid var(--border);
+      background: var(--surface); color: var(--text);
+      font-size: 15px; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+      transition: all 0.13s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #000; }
+    .btn.danger  { background: none; border-color: var(--red); color: var(--red); }
+    .btn:active  { transform: scale(0.97); }
+    .btn:disabled { opacity: 0.4; cursor: default; transform: none; }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed; left: 16px; right: 16px;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
+      max-width: 560px; margin: 0 auto;
+      background: var(--surface2); color: var(--text); font-size: 14px;
+      padding: 12px 16px; border-radius: var(--radius);
+      transform: translateY(120px); opacity: 0;
+      transition: transform 0.3s ease, opacity 0.3s ease;
+      z-index: 999; pointer-events: none;
+      text-align: center;
+    }
+    #toast.show { transform: translateY(0); opacity: 1; }
+    #toast.error { background: var(--red); }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <a class="back-btn" href="/" title="Dashboard">‹</a>
+    <h1>Gallery</h1>
+    <div class="search-wrap">
+      <span class="search-icon">🔍</span>
+      <input id="search-input" type="search" placeholder="Search prompts…"
+             autocomplete="off" autocorrect="off" spellcheck="false">
+      <button class="search-clear" id="search-clear" onclick="clearSearch()">✕</button>
+    </div>
+  </header>
+
+  <div class="filter-bar" id="filter-bar">
+    <button class="filter-chip active" data-rating="" onclick="setRatingFilter(this)">All</button>
+    <button class="filter-chip" data-rating="5" onclick="setRatingFilter(this)">★ 5</button>
+    <button class="filter-chip" data-rating="4" onclick="setRatingFilter(this)">★ 4+</button>
+    <button class="filter-chip" data-rating="3" onclick="setRatingFilter(this)">★ 3+</button>
+    <button class="filter-chip" data-rating="unrated" onclick="setRatingFilter(this)">Unrated</button>
+  </div>
+
+  <div class="count-bar" id="count-bar"></div>
+
+  <div class="grid-wrap" id="grid-wrap">
+    <div class="grid" id="grid"></div>
+    <div class="grid-footer" id="grid-footer" style="display:none">
+      <button class="load-more-btn" id="load-more-btn" onclick="loadMore()">Load more</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Detail Modal ── -->
+<div class="modal-backdrop" id="modal">
+  <div class="modal-header">
+    <div class="modal-nav">
+      <button class="nav-btn" id="nav-prev" onclick="navigate(-1)" title="Previous">‹</button>
+      <button class="nav-btn" id="nav-next" onclick="navigate(1)"  title="Next">›</button>
+    </div>
+    <button class="modal-close" onclick="closeModal()">✕</button>
+  </div>
+
+  <div class="modal-image-wrap">
+    <img id="modal-img" src="" alt="">
+  </div>
+
+  <div class="modal-body">
+
+    <!-- Rating -->
+    <div>
+      <div class="section-label">Rating</div>
+      <div class="stars-row" id="stars-row">
+        <span class="star" data-v="1" onclick="setRating(1)">☆</span>
+        <span class="star" data-v="2" onclick="setRating(2)">☆</span>
+        <span class="star" data-v="3" onclick="setRating(3)">☆</span>
+        <span class="star" data-v="4" onclick="setRating(4)">☆</span>
+        <span class="star" data-v="5" onclick="setRating(5)">☆</span>
+      </div>
+    </div>
+
+    <!-- Prompt -->
+    <div class="prompt-block" id="prompt-block" style="display:none">
+      <div class="prompt-label">Prompt</div>
+      <div class="prompt-text" id="modal-prompt"></div>
+      <button class="expand-btn" id="expand-btn" onclick="togglePrompt()">Show more</button>
+    </div>
+
+    <!-- Meta -->
+    <div class="meta-row" id="modal-meta"></div>
+
+    <!-- Tags -->
+    <div>
+      <div class="section-label">Tags</div>
+      <div class="tags-wrap" id="tags-wrap">
+        <div class="tag-add-wrap">
+          <input class="tag-input" id="tag-input" placeholder="add tag…"
+                 autocomplete="off" autocorrect="off" spellcheck="false"
+                 onkeydown="onTagKey(event)">
+          <button class="tag-add-btn" onclick="addTag()" title="Add tag">+</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Notes -->
+    <div>
+      <div class="section-label">Notes</div>
+      <textarea class="notes-textarea" id="modal-notes" placeholder="Personal notes…"></textarea>
+    </div>
+
+    <!-- Actions -->
+    <div class="action-row">
+      <button class="btn danger" id="delete-btn" onclick="confirmDelete()">Delete</button>
+      <button class="btn primary" id="save-btn" onclick="saveModal()">Save</button>
+    </div>
+
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ══════════════════════════════════════════════════════════
+// CONFIG
+// ══════════════════════════════════════════════════════════
+const PAGE_SIZE = 50;
+
+// ══════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════
+const state = {
+  apiKey:      localStorage.getItem('z_apikey') || '',
+  images:      [],   // all loaded image records
+  offset:      0,
+  hasMore:     false,
+  loading:     false,
+  filters: {
+    search:    '',
+    ratingMin: '',    // '' | '3' | '4' | '5' | 'unrated'
+  },
+  modal: {
+    index:     -1,   // index into state.images
+    image:     null,
+    rating:    null,
+    tags:      [],
+    dirty:     false,
+  },
+};
+
+// ══════════════════════════════════════════════════════════
+// HELPERS
+// ══════════════════════════════════════════════════════════
+const $ = id => document.getElementById(id);
+
+let toastTimer;
+const toast = (msg, isError = false) => {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'show' + (isError ? ' error' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.className = '', 3000);
+};
+
+const getAuthHeaders = () => state.apiKey ? { 'X-API-Key': state.apiKey } : {};
+
+const apiFetch = async (url, opts = {}) => {
+  const r = await fetch(url, { ...opts, headers: { ...getAuthHeaders(), ...opts.headers } });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `Error ${r.status}`);
+  }
+  return r;
+};
+
+const withAuth = url => {
+  if (!state.apiKey) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'api_key=' + encodeURIComponent(state.apiKey);
+};
+
+const formatDate = iso => {
+  const d = new Date(iso);
+  return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' })
+    + ' ' + d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
+};
+
+// ══════════════════════════════════════════════════════════
+// API
+// ══════════════════════════════════════════════════════════
+const buildUrl = (offset) => {
+  const p = new URLSearchParams({ limit: PAGE_SIZE, offset });
+  if (state.filters.search) p.set('search', state.filters.search);
+  if (state.filters.ratingMin && state.filters.ratingMin !== 'unrated') {
+    p.set('rating_min', state.filters.ratingMin);
+  }
+  return '/api/images?' + p.toString();
+};
+
+const fetchImages = async (reset = false) => {
+  if (state.loading) return;
+  state.loading = true;
+
+  if (reset) {
+    state.images = [];
+    state.offset = 0;
+    $('grid').innerHTML = '';
+    $('grid-footer').style.display = 'none';
+  }
+
+  try {
+    const r = await apiFetch(buildUrl(state.offset));
+    let data = await r.json();
+
+    // Client-side filter for unrated
+    if (state.filters.ratingMin === 'unrated') {
+      data = data.filter(img => !img.rating);
+    }
+
+    state.images.push(...data);
+    state.offset += data.length;
+    state.hasMore = data.length === PAGE_SIZE;
+
+    renderImages(data, reset);
+    updateCountBar();
+
+    $('grid-footer').style.display = state.hasMore ? 'flex' : 'none';
+    $('load-more-btn').disabled = false;
+
+    if (reset && data.length === 0) renderEmpty();
+  } catch (e) {
+    toast('Failed to load images: ' + e.message, true);
+  } finally {
+    state.loading = false;
+  }
+};
+
+const patchImage = async (id, body) => {
+  const r = await apiFetch(`/api/images/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return r.json();
+};
+
+const deleteImageApi = async (id) => {
+  await apiFetch(`/api/images/${id}`, { method: 'DELETE' });
+};
+
+// ══════════════════════════════════════════════════════════
+// GRID RENDERING
+// ══════════════════════════════════════════════════════════
+const renderImages = (images, reset) => {
+  const grid = $('grid');
+  images.forEach((img, localIdx) => {
+    const globalIdx = reset ? localIdx : (state.images.length - images.length + localIdx);
+    grid.appendChild(makeGridItem(img, globalIdx));
+  });
+};
+
+const makeGridItem = (img, idx) => {
+  const div = document.createElement('div');
+  div.className = 'grid-item';
+  div.dataset.idx = idx;
+  div.onclick = () => openModal(idx);
+
+  const image = document.createElement('img');
+  image.src = withAuth(img.url);
+  image.alt = img.filename;
+  image.loading = 'lazy';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'overlay';
+
+  const badge = document.createElement('div');
+  badge.className = 'rating-badge' + (img.rating ? ' show' : '');
+  badge.textContent = img.rating ? '★'.repeat(img.rating) : '';
+
+  div.appendChild(image);
+  div.appendChild(overlay);
+  div.appendChild(badge);
+  return div;
+};
+
+const renderEmpty = () => {
+  const empty = document.createElement('div');
+  empty.className = 'empty-state';
+  empty.innerHTML = '<div class="emoji">🖼</div><p>No images found.<br>Try a different search or filter.</p>';
+  $('grid').appendChild(empty);
+};
+
+const updateCountBar = () => {
+  const bar = $('count-bar');
+  if (state.images.length === 0) { bar.textContent = ''; return; }
+  bar.textContent = state.hasMore
+    ? `Showing ${state.images.length} images`
+    : `${state.images.length} image${state.images.length === 1 ? '' : 's'}`;
+};
+
+// ══════════════════════════════════════════════════════════
+// FILTERS
+// ══════════════════════════════════════════════════════════
+let searchTimer;
+const onSearchInput = () => {
+  const val = $('search-input').value.trim();
+  $('search-clear').classList.toggle('show', val.length > 0);
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    state.filters.search = val;
+    fetchImages(true);
+  }, 400);
+};
+
+const clearSearch = () => {
+  $('search-input').value = '';
+  $('search-clear').classList.remove('show');
+  state.filters.search = '';
+  fetchImages(true);
+};
+
+const setRatingFilter = (btn) => {
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  btn.classList.add('active');
+  state.filters.ratingMin = btn.dataset.rating;
+  fetchImages(true);
+};
+
+const loadMore = () => {
+  $('load-more-btn').disabled = true;
+  fetchImages(false);
+};
+
+// ══════════════════════════════════════════════════════════
+// MODAL
+// ══════════════════════════════════════════════════════════
+const openModal = (idx) => {
+  state.modal.index = idx;
+  populateModal(state.images[idx]);
+  $('modal').classList.add('open');
+  document.body.style.overflow = 'hidden';
+};
+
+const closeModal = async () => {
+  if (state.modal.dirty) {
+    // Auto-save on close
+    await saveModal(true);
+  }
+  $('modal').classList.remove('open');
+  document.body.style.overflow = '';
+  state.modal.dirty = false;
+};
+
+const navigate = (dir) => {
+  if (state.modal.dirty) saveModal(true);
+  const next = state.modal.index + dir;
+  if (next < 0 || next >= state.images.length) return;
+  state.modal.dirty = false;
+  openModal(next);
+};
+
+const populateModal = (img) => {
+  state.modal.image  = img;
+  state.modal.rating = img.rating || null;
+  state.modal.tags   = img.tags ? [...img.tags] : [];
+
+  // Image
+  $('modal-img').src = withAuth(img.url);
+  $('modal-img').alt = img.filename;
+
+  // Rating stars
+  renderStars(state.modal.rating);
+
+  // Prompt
+  const promptEl = $('modal-prompt');
+  if (img.prompt) {
+    $('prompt-block').style.display = 'block';
+    promptEl.textContent = img.prompt;
+    promptEl.classList.remove('expanded');
+    $('expand-btn').textContent = 'Show more';
+  } else {
+    $('prompt-block').style.display = 'none';
+  }
+
+  // Meta
+  const meta = $('modal-meta');
+  meta.innerHTML = '';
+  const chips = [
+    img.width && img.height ? `${img.width}×${img.height}` : null,
+    img.seed !== null && img.seed !== undefined ? `seed ${img.seed}` : null,
+    img.workflow_name || null,
+    formatDate(img.created_at),
+  ].filter(Boolean);
+  chips.forEach(c => {
+    const chip = document.createElement('div');
+    chip.className = 'meta-chip';
+    chip.textContent = c;
+    meta.appendChild(chip);
+  });
+
+  // Tags
+  renderTags();
+
+  // Notes
+  $('modal-notes').value = img.notes || '';
+  $('modal-notes').oninput = () => { state.modal.dirty = true; };
+
+  // Nav buttons
+  $('nav-prev').disabled = state.modal.index <= 0;
+  $('nav-next').disabled = state.modal.index >= state.images.length - 1;
+};
+
+// ── Stars ──
+const renderStars = (rating) => {
+  document.querySelectorAll('.star').forEach(s => {
+    const v = parseInt(s.dataset.v);
+    s.textContent = rating && v <= rating ? '★' : '☆';
+    s.style.color = rating && v <= rating ? 'var(--accent)' : 'var(--text-dim)';
+  });
+};
+
+const setRating = async (value) => {
+  // Toggle off if same
+  const newRating = state.modal.rating === value ? null : value;
+  state.modal.rating = newRating;
+  renderStars(newRating);
+
+  // Save immediately
+  try {
+    const updated = await patchImage(state.modal.image.id, { rating: newRating });
+    state.modal.image.rating = updated.rating;
+    // Update grid badge
+    refreshGridItem(state.modal.index, updated);
+  } catch (e) {
+    toast('Could not save rating', true);
+  }
+};
+
+// ── Tags ──
+const renderTags = () => {
+  const wrap = $('tags-wrap');
+  // Remove existing tag chips (keep the add-wrap at the end)
+  wrap.querySelectorAll('.tag-chip').forEach(c => c.remove());
+
+  const addWrap = wrap.querySelector('.tag-add-wrap');
+  state.modal.tags.forEach(tag => {
+    const chip = document.createElement('div');
+    chip.className = 'tag-chip';
+    chip.innerHTML = `<span>${tag}</span>`;
+    const rm = document.createElement('button');
+    rm.className = 'tag-remove';
+    rm.textContent = '×';
+    rm.onclick = () => removeTag(tag);
+    chip.appendChild(rm);
+    wrap.insertBefore(chip, addWrap);
+  });
+};
+
+const addTag = () => {
+  const input = $('tag-input');
+  const val = input.value.trim().toLowerCase().replace(/\s+/g, '-');
+  if (!val || state.modal.tags.includes(val)) { input.value = ''; return; }
+  state.modal.tags.push(val);
+  state.modal.dirty = true;
+  input.value = '';
+  renderTags();
+};
+
+const removeTag = (tag) => {
+  state.modal.tags = state.modal.tags.filter(t => t !== tag);
+  state.modal.dirty = true;
+  renderTags();
+};
+
+const onTagKey = (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); addTag(); }
+};
+
+// ── Prompt expand ──
+const togglePrompt = () => {
+  const el = $('modal-prompt');
+  const btn = $('expand-btn');
+  el.classList.toggle('expanded');
+  btn.textContent = el.classList.contains('expanded') ? 'Show less' : 'Show more';
+};
+
+// ── Save ──
+const saveModal = async (silent = false) => {
+  const btn = $('save-btn');
+  btn.disabled = true;
+  try {
+    const updated = await patchImage(state.modal.image.id, {
+      tags:  state.modal.tags,
+      notes: $('modal-notes').value.trim() || null,
+    });
+    state.modal.image.tags  = updated.tags;
+    state.modal.image.notes = updated.notes;
+    state.modal.dirty = false;
+    refreshGridItem(state.modal.index, updated);
+    if (!silent) toast('Saved');
+  } catch (e) {
+    toast('Save failed: ' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// ── Delete ──
+const confirmDelete = async () => {
+  if (!confirm('Delete this image? This cannot be undone.')) return;
+
+  const btn = $('delete-btn');
+  btn.disabled = true;
+  try {
+    await deleteImageApi(state.modal.image.id);
+
+    // Remove from grid
+    const gridItem = $('grid').querySelector(`[data-idx="${state.modal.index}"]`);
+    if (gridItem) gridItem.remove();
+
+    // Remove from state and re-index remaining grid items
+    state.images.splice(state.modal.index, 1);
+    state.offset = Math.max(0, state.offset - 1);
+    reindexGrid();
+    updateCountBar();
+
+    // Navigate or close
+    if (state.images.length === 0) {
+      closeModal();
+      renderEmpty();
+    } else {
+      const nextIdx = Math.min(state.modal.index, state.images.length - 1);
+      state.modal.dirty = false;
+      openModal(nextIdx);
+    }
+    toast('Deleted');
+  } catch (e) {
+    toast('Delete failed: ' + e.message, true);
+    btn.disabled = false;
+  }
+};
+
+// Re-assign data-idx after deletion so navigation stays correct
+const reindexGrid = () => {
+  $('grid').querySelectorAll('.grid-item').forEach((el, i) => {
+    el.dataset.idx = i;
+    el.onclick = () => openModal(i);
+  });
+};
+
+const refreshGridItem = (idx, img) => {
+  const el = $('grid').querySelector(`[data-idx="${idx}"]`);
+  if (!el) return;
+  const badge = el.querySelector('.rating-badge');
+  if (badge) {
+    badge.className = 'rating-badge' + (img.rating ? ' show' : '');
+    badge.textContent = img.rating ? '★'.repeat(img.rating) : '';
+  }
+};
+
+// ══════════════════════════════════════════════════════════
+// KEYBOARD
+// ══════════════════════════════════════════════════════════
+document.addEventListener('keydown', e => {
+  if (!$('modal').classList.contains('open')) return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'Escape')      closeModal();
+  if (e.key === 'ArrowLeft')   navigate(-1);
+  if (e.key === 'ArrowRight')  navigate(1);
+});
+
+// ══════════════════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════════════════
+window.addEventListener('load', () => {
+  $('search-input').addEventListener('input', onSearchInput);
+  fetchImages(true);
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+});
+</script>
+</body>
+</html>

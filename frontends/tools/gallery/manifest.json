@@ -1,0 +1,19 @@
+{
+  "name": "Gallery",
+  "short_name": "Gallery",
+  "description": "Browse and curate generated images",
+  "start_url": "/tools/gallery/",
+  "scope": "/tools/gallery/",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

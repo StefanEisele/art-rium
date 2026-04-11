@@ -59,6 +59,10 @@ _z_image = Path(__file__).parent / "frontends" / "tools" / "z-image"
 if _z_image.exists():
     app.mount("/tools/z-image", StaticFiles(directory=str(_z_image), html=True), name="z-image")
 
+_gallery = Path(__file__).parent / "frontends" / "tools" / "gallery"
+if _gallery.exists():
+    app.mount("/tools/gallery", StaticFiles(directory=str(_gallery), html=True), name="gallery")
+
 _dashboard = Path(__file__).parent / "frontends" / "dashboard"
 if _dashboard.exists():
     app.mount("/", StaticFiles(directory=str(_dashboard), html=True), name="dashboard")

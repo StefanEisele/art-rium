@@ -1,9 +1,9 @@
 """
-Image gallery API — list, tag, rate, delete ingested images.
-Phase 1: read + update. Delete in Phase 2.
+Image gallery API — list, search, tag, rate, and delete ingested images.
 """
 import uuid
 import logging
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -12,6 +12,7 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import auth_ok
+from core.config import settings
 from core.db import get_db
 from core.models import Image
 
@@ -32,6 +33,8 @@ async def list_images(
     offset: int = Query(0, ge=0),
     tag: Optional[str] = None,
     workflow: Optional[str] = None,
+    search: Optional[str] = None,
+    rating_min: Optional[int] = Query(None, ge=1, le=5),
     db: AsyncSession = Depends(get_db),
 ):
     if not auth_ok(request):
@@ -42,6 +45,10 @@ async def list_images(
         stmt = stmt.where(Image.tags.contains([tag]))
     if workflow:
         stmt = stmt.where(Image.workflow_name == workflow)
+    if search:
+        stmt = stmt.where(Image.prompt.ilike(f"%{search}%"))
+    if rating_min is not None:
+        stmt = stmt.where(Image.rating >= rating_min)
 
     result = await db.execute(stmt)
     images = result.scalars().all()
@@ -80,6 +87,31 @@ async def update_image(
         img.notes = body.notes
     await db.commit()
     return _serialize(img)
+
+
+@router.delete("/{image_id}", status_code=204)
+async def delete_image(
+    image_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    if not auth_ok(request):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    # Remove file from managed storage
+    filepath = settings.storage_dir / img.filepath
+    if filepath.exists():
+        try:
+            filepath.unlink()
+        except Exception as e:
+            logger.warning(f"Could not delete file {filepath}: {e}")
+
+    await db.delete(img)
+    await db.commit()
+    logger.info(f"Deleted image {image_id}")
 
 
 def _serialize(img: Image) -> dict:

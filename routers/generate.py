@@ -7,11 +7,17 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth, ws_auth_ok
 from core.comfy import post_prompt
 from core.config import settings
+from core.db import get_db
+from core.models import Image
+from core.thumbnail import make_thumbnail, thumb_rel_path
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -80,13 +86,61 @@ async def generate(req: GenerateRequest, request: Request):
 @router.get("/api/image/{filename}", dependencies=[Depends(require_auth)])
 async def get_image(filename: str):
     safe_name = Path(filename).name
-    # Serve from managed storage; fall back to ComfyUI output dir
     for search_dir in [settings.images_dir, settings.comfyui_output_dir]:
         for candidate in search_dir.rglob(safe_name):
             if candidate.exists():
-                from fastapi.responses import FileResponse
                 return FileResponse(candidate, media_type="image/png")
     raise HTTPException(status_code=404, detail="Image not found")
+
+
+@router.get("/api/image/{filename}/thumb", dependencies=[Depends(require_auth)])
+async def get_image_thumb(filename: str, db: AsyncSession = Depends(get_db)):
+    """Serve the JPEG thumbnail; fall back to the full image if no thumbnail exists."""
+    safe_name = Path(filename).name
+
+    # Look up DB record to find stored thumbnail_path
+    result = await db.execute(select(Image).where(Image.filename == safe_name))
+    img = result.scalar_one_or_none()
+
+    if img and img.thumbnail_path:
+        thumb = settings.storage_dir / img.thumbnail_path
+        if thumb.exists():
+            return FileResponse(thumb, media_type="image/jpeg")
+
+    # Fall back: serve full image (same logic as get_image)
+    for search_dir in [settings.images_dir, settings.comfyui_output_dir]:
+        for candidate in search_dir.rglob(safe_name):
+            if candidate.exists():
+                return FileResponse(candidate, media_type="image/png")
+    raise HTTPException(status_code=404, detail="Image not found")
+
+
+@router.post("/api/images/backfill-thumbnails", dependencies=[Depends(require_auth)])
+async def backfill_thumbnails(db: AsyncSession = Depends(get_db)):
+    """
+    Generate missing thumbnails for all images that don't have one yet.
+    Safe to call multiple times — skips images that already have a thumbnail.
+    """
+    result = await db.execute(select(Image).where(Image.thumbnail_path.is_(None)))
+    images = result.scalars().all()
+
+    done, failed = 0, 0
+    for img in images:
+        src = settings.storage_dir / img.filepath
+        if not src.exists():
+            failed += 1
+            continue
+        rel = thumb_rel_path(img.filename)
+        dest = settings.storage_dir / rel
+        ok = await make_thumbnail(src, dest)
+        if ok:
+            img.thumbnail_path = rel
+            done += 1
+        else:
+            failed += 1
+
+    await db.commit()
+    return {"backfilled": done, "failed": failed, "total": len(images)}
 
 
 @router.post("/api/clear_pending_images/{client_id}", dependencies=[Depends(require_auth)])

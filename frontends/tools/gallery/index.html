@@ -32,7 +32,7 @@
 
     header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex-shrink: 0; }
 
-    /* ── Search ─�� */
+    /* ── Search ── */
     .search-wrap {
       flex: 1;
       position: relative;
@@ -71,6 +71,25 @@
     }
     .search-clear.show { display: block; }
 
+    /* ── Select-mode toggle ── */
+    .select-toggle-btn {
+      flex-shrink: 0;
+      background: var(--surface2);
+      border: 1.5px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-dim);
+      font-size: 13px; font-weight: 600;
+      padding: 7px 12px;
+      cursor: pointer; font-family: inherit;
+      transition: all 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .select-toggle-btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #000;
+    }
+
     /* ── Filter bar ── */
     .filter-bar {
       display: flex;
@@ -104,6 +123,15 @@
       color: #000;
     }
 
+    /* ── Count bar ── */
+    .count-bar {
+      padding: 6px 16px;
+      font-size: 12px;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
     /* ── Grid ── */
     .grid-wrap {
       flex: 1;
@@ -135,6 +163,11 @@
       background: var(--surface2);
       aspect-ratio: 1;
       flex-shrink: 0;
+      outline: 2.5px solid transparent;
+      transition: outline-color 0.15s;
+    }
+    .grid-item.selected .grid-img-wrap {
+      outline-color: var(--accent);
     }
 
     .grid-img-wrap img {
@@ -163,6 +196,20 @@
       display: none;
     }
     .grid-img-wrap .rating-badge.show { display: block; }
+
+    /* ── Select checkmark overlay ── */
+    .sel-check {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 32px;
+      opacity: 0;
+      transition: opacity 0.15s;
+      pointer-events: none;
+    }
+    .grid-item.selected .sel-check {
+      opacity: 1;
+      background: rgba(0,0,0,0.35);
+    }
 
     .grid-title {
       font-size: 12px;
@@ -204,13 +251,22 @@
     .empty-state .emoji { font-size: 48px; }
     .empty-state p { font-size: 15px; line-height: 1.5; }
 
-    /* ── Count bar ── */
-    .count-bar {
-      padding: 6px 16px;
-      font-size: 12px;
-      color: var(--text-dim);
-      border-bottom: 1px solid var(--border);
+    /* ── Bulk action bar (fixed bottom, select mode only) ── */
+    .bulk-bar {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px calc(env(safe-area-inset-bottom) + 12px);
+      background: var(--surface);
+      border-top: 1.5px solid var(--border);
       flex-shrink: 0;
+    }
+    .bulk-bar.show { display: flex; }
+
+    #bulk-count {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-dim);
     }
 
     /* ════════════════════════════════════════
@@ -434,6 +490,7 @@
              autocomplete="off" autocorrect="off" spellcheck="false">
       <button class="search-clear" id="search-clear" onclick="clearSearch()">✕</button>
     </div>
+    <button class="select-toggle-btn" id="select-btn" onclick="toggleSelectMode()">Select</button>
   </header>
 
   <div class="filter-bar" id="filter-bar">
@@ -451,6 +508,12 @@
     <div class="grid-footer" id="grid-footer" style="display:none">
       <button class="load-more-btn" id="load-more-btn" onclick="loadMore()">Load more</button>
     </div>
+  </div>
+
+  <!-- Bulk action bar — shown in select mode -->
+  <div class="bulk-bar" id="bulk-bar">
+    <span id="bulk-count">0 selected</span>
+    <button class="btn danger" id="bulk-delete-btn" onclick="bulkDelete()" disabled>Delete</button>
   </div>
 
 </div>
@@ -532,7 +595,7 @@
 
 <script src="/shared/shared.js"></script>
 <script>
-// ═══════════════════════════════════════════════════════��══
+// ══════════════════════════════════════════════════════════
 // CONFIG
 // ══════════════════════════════════════════════════════════
 const PAGE_SIZE = 50;
@@ -541,11 +604,13 @@ const PAGE_SIZE = 50;
 // STATE
 // ══════════════════════════════════════════════════════════
 const state = {
-  apiKey:  ArtRium.getApiKey(),
-  images:  [],
-  offset:  0,
-  hasMore: false,
-  loading: false,
+  apiKey:     ArtRium.getApiKey(),
+  images:     [],
+  offset:     0,
+  hasMore:    false,
+  loading:    false,
+  selectMode: false,
+  selection:  new Set(),   // Set of image IDs (strings)
   filters: {
     search:    '',
     ratingMin: '',
@@ -636,6 +701,14 @@ const deleteImageApi = async (id) => {
   await apiFetch(`/api/images/${id}`, { method: 'DELETE' });
 };
 
+const bulkDeleteApi = async (ids) => {
+  await apiFetch('/api/images', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+};
+
 // ══════════════════════════════════════════════════════════
 // GRID RENDERING
 // ══════════════════════════════════════════════════════════
@@ -651,13 +724,21 @@ const makeGridItem = (img, idx) => {
   const div = document.createElement('div');
   div.className = 'grid-item';
   div.dataset.idx = idx;
-  div.onclick = () => openModal(idx);
+  div.dataset.id  = img.id;
+  div.onclick = () => {
+    if (state.selectMode) {
+      toggleSelect(div, img.id);
+    } else {
+      openModal(idx);
+    }
+  };
 
   const wrap = document.createElement('div');
   wrap.className = 'grid-img-wrap';
 
   const image = document.createElement('img');
-  image.src = withAuth(img.url);
+  // Use thumbnail in grid; full image loaded only in modal
+  image.src = withAuth(img.thumb_url);
   image.alt = img.filename;
   image.loading = 'lazy';
 
@@ -668,9 +749,14 @@ const makeGridItem = (img, idx) => {
   badge.className = 'rating-badge' + (img.rating ? ' show' : '');
   badge.textContent = img.rating ? '★'.repeat(img.rating) : '';
 
+  const selCheck = document.createElement('div');
+  selCheck.className = 'sel-check';
+  selCheck.textContent = '✓';
+
   wrap.appendChild(image);
   wrap.appendChild(overlay);
   wrap.appendChild(badge);
+  wrap.appendChild(selCheck);
   div.appendChild(wrap);
 
   const titleEl = document.createElement('div');
@@ -694,6 +780,75 @@ const updateCountBar = () => {
   bar.textContent = state.hasMore
     ? `Showing ${state.images.length} images`
     : `${state.images.length} image${state.images.length === 1 ? '' : 's'}`;
+};
+
+// ══════════════════════════════════════════════════════════
+// SELECT MODE
+// ══════════════════════════════════════════════════════════
+const toggleSelectMode = () => {
+  state.selectMode = !state.selectMode;
+  state.selection.clear();
+
+  $('select-btn').classList.toggle('active', state.selectMode);
+  $('select-btn').textContent = state.selectMode ? 'Cancel' : 'Select';
+  $('bulk-bar').classList.toggle('show', state.selectMode);
+
+  // Clear selected styling from all items
+  $('grid').querySelectorAll('.grid-item').forEach(el => el.classList.remove('selected'));
+  updateBulkBar();
+};
+
+const toggleSelect = (el, id) => {
+  if (state.selection.has(id)) {
+    state.selection.delete(id);
+    el.classList.remove('selected');
+  } else {
+    state.selection.add(id);
+    el.classList.add('selected');
+  }
+  updateBulkBar();
+};
+
+const updateBulkBar = () => {
+  const n = state.selection.size;
+  $('bulk-count').textContent = n === 0 ? '0 selected' : `${n} selected`;
+  $('bulk-delete-btn').disabled = n === 0;
+};
+
+const bulkDelete = async () => {
+  const ids = [...state.selection];
+  if (ids.length === 0) return;
+  if (!confirm(`Delete ${ids.length} image${ids.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
+
+  const btn = $('bulk-delete-btn');
+  btn.disabled = true;
+
+  try {
+    await bulkDeleteApi(ids);
+
+    // Remove deleted images from state and DOM
+    const idSet = new Set(ids);
+    state.images = state.images.filter(img => !idSet.has(img.id));
+    state.offset = state.images.length;
+    state.selection.clear();
+
+    $('grid').querySelectorAll('.grid-item').forEach(el => {
+      if (idSet.has(el.dataset.id)) el.remove();
+    });
+
+    reindexGrid();
+    updateCountBar();
+    updateBulkBar();
+
+    if (state.images.length === 0) renderEmpty();
+
+    ArtRium.toast(`Deleted ${ids.length} image${ids.length === 1 ? '' : 's'}`);
+    // Exit select mode after bulk delete
+    toggleSelectMode();
+  } catch (e) {
+    ArtRium.toast('Delete failed: ' + e.message, true);
+    btn.disabled = false;
+  }
 };
 
 // ══════════════════════════════════════════════════════════
@@ -761,6 +916,7 @@ const populateModal = (img) => {
   state.modal.rating = img.rating || null;
   state.modal.tags   = img.tags ? [...img.tags] : [];
 
+  // Full-quality image in modal
   $('modal-img').src = withAuth(img.url);
   $('modal-img').alt = img.filename;
 
@@ -896,7 +1052,7 @@ const saveModal = async (silent = false) => {
   }
 };
 
-// ── Delete ──
+// ── Delete single (from modal) ──
 const confirmDelete = async () => {
   if (!confirm('Delete this image? This cannot be undone.')) return;
 
@@ -931,7 +1087,14 @@ const confirmDelete = async () => {
 const reindexGrid = () => {
   $('grid').querySelectorAll('.grid-item').forEach((el, i) => {
     el.dataset.idx = i;
-    el.onclick = () => openModal(i);
+    const img = state.images[i];
+    el.onclick = () => {
+      if (state.selectMode) {
+        toggleSelect(el, img.id);
+      } else {
+        openModal(i);
+      }
+    };
   });
 };
 

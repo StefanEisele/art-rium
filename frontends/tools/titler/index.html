@@ -387,7 +387,7 @@ const makePickerItem = (img, idx) => {
   div.dataset.idx = idx;
 
   const image = document.createElement('img');
-  image.src = withAuth(img.url);
+  image.src = withAuth(img.thumb_url);
   image.loading = 'lazy';
   image.alt = img.filename;
 
@@ -410,7 +410,7 @@ const selectImage = (idx) => {
   document.querySelector(`.picker-item[data-idx="${idx}"]`).classList.add('selected');
 
   const thumb = $('selected-thumb');
-  thumb.src = withAuth(img.url);
+  thumb.src = withAuth(img.thumb_url);
   thumb.classList.add('show');
 
   const btn = $('generate-btn');
@@ -464,7 +464,7 @@ const startTitling = async () => {
 
   switchView('results');
 
-  $('preview-thumb').src = withAuth(state.selected.url);
+  $('preview-thumb').src = withAuth(state.selected.thumb_url);
   const currentEl = $('preview-current');
   if (state.selected.title) {
     currentEl.textContent = state.selected.title;

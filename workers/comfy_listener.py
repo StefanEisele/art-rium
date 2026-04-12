@@ -22,6 +22,7 @@ from core.comfy import WORKFLOW_NAME
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import Image
+from core.thumbnail import make_thumbnail, thumb_rel_path
 
 logger = logging.getLogger(__name__)
 
@@ -306,12 +307,18 @@ class ComfyListener:
         # Relative path stored in DB (portable across machines)
         rel_path = dest.relative_to(settings.storage_dir)
 
+        # Generate JPEG thumbnail (512 px longest side)
+        thumb_rel = thumb_rel_path(dest_filename)
+        thumb_dest = settings.storage_dir / thumb_rel
+        thumb_ok = await make_thumbnail(dest, thumb_dest)
+
         try:
             async with AsyncSessionLocal() as session:
                 record = Image(
                     id=image_id,
                     filename=dest_filename,
                     filepath=str(rel_path),
+                    thumbnail_path=thumb_rel if thumb_ok else None,
                     prompt=meta.get("prompt_text"),
                     seed=meta.get("seed"),
                     width=meta.get("width"),

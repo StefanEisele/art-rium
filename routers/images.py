@@ -27,6 +27,10 @@ class ImageUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+class BulkDeleteRequest(BaseModel):
+    ids: list[uuid.UUID]
+
+
 @router.get("")
 async def list_images(
     limit: int = Query(50, le=200),
@@ -83,6 +87,26 @@ async def update_image(
     return _serialize(img)
 
 
+@router.delete("", status_code=204)
+async def bulk_delete_images(
+    body: BulkDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete multiple images by ID in one request."""
+    if not body.ids:
+        return
+
+    result = await db.execute(select(Image).where(Image.id.in_(body.ids)))
+    images = result.scalars().all()
+
+    for img in images:
+        _delete_files(img)
+        await db.delete(img)
+
+    await db.commit()
+    logger.info(f"Bulk deleted {len(images)} images")
+
+
 @router.delete("/{image_id}", status_code=204)
 async def delete_image(
     image_id: uuid.UUID,
@@ -92,17 +116,21 @@ async def delete_image(
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    # Remove file from managed storage
-    filepath = settings.storage_dir / img.filepath
-    if filepath.exists():
-        try:
-            filepath.unlink()
-        except Exception as e:
-            logger.warning(f"Could not delete file {filepath}: {e}")
-
+    _delete_files(img)
     await db.delete(img)
     await db.commit()
     logger.info(f"Deleted image {image_id}")
+
+
+def _delete_files(img: Image) -> None:
+    """Remove the full image and its thumbnail from disk (best-effort)."""
+    for rel in filter(None, [img.filepath, img.thumbnail_path]):
+        path = settings.storage_dir / rel
+        if path.exists():
+            try:
+                path.unlink()
+            except Exception as e:
+                logger.warning(f"Could not delete file {path}: {e}")
 
 
 def _serialize(img: Image) -> dict:
@@ -110,6 +138,7 @@ def _serialize(img: Image) -> dict:
         "id": str(img.id),
         "filename": img.filename,
         "url": f"/api/image/{img.filename}",
+        "thumb_url": f"/api/image/{img.filename}/thumb",
         "title": img.title,
         "prompt": img.prompt,
         "seed": img.seed,

@@ -62,9 +62,15 @@ async def run_titler(
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
 
-    filepath = settings.storage_dir / img.filepath
+    # Prefer thumbnail for analysis — smaller file is sufficient for Ollama
+    src_rel = img.thumbnail_path or img.filepath
+    filepath = settings.storage_dir / src_rel
     if not filepath.exists():
-        raise HTTPException(status_code=404, detail="Image file not found on disk")
+        # thumbnail missing but full image might exist — fall back gracefully
+        if img.thumbnail_path:
+            filepath = settings.storage_dir / img.filepath
+        if not filepath.exists():
+            raise HTTPException(status_code=404, detail="Image file not found on disk")
 
     image_b64 = await _read_b64(filepath)
     workflow = _build_workflow(image_b64)

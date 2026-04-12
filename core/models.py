@@ -43,6 +43,7 @@ class Image(Base):
     height: Mapped[int | None] = mapped_column(Integer)
     workflow_name: Mapped[str | None] = mapped_column(String(128))
     batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    thumbnail_path: Mapped[str | None] = mapped_column(Text)        # relative to storage_dir, JPEG 512 px
     title: Mapped[str | None] = mapped_column(String(512))          # chosen display title
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     rating: Mapped[int | None] = mapped_column(SmallInteger)       # 1–5, personal curation

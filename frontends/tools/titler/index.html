@@ -9,33 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="Titler">
   <title>Image Titler — art-rium</title>
   <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="/shared/shared.css">
   <style>
-    :root {
-      --bg:         #111111;
-      --surface:    #1c1c1e;
-      --surface2:   #2c2c2e;
-      --accent:     #f5a623;
-      --accent-tap: #d4901e;
-      --text:       #f2f2f7;
-      --text-dim:   #8e8e93;
-      --border:     #3a3a3c;
-      --green:      #32d74b;
-      --red:        #ff453a;
-      --radius:     14px;
-    }
-
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html, body {
-      height: 100%;
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      font-size: 16px;
-      -webkit-font-smoothing: antialiased;
-      overscroll-behavior: none;
-    }
-
     .app {
       display: flex;
       flex-direction: column;
@@ -55,22 +30,7 @@
       flex-shrink: 0;
     }
 
-    .back-btn {
-      font-size: 22px; color: var(--accent);
-      background: none; border: none; cursor: pointer;
-      padding: 0 4px 0 0; text-decoration: none;
-      -webkit-tap-highlight-color: transparent;
-    }
-
     header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex: 1; }
-
-    .dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: var(--red); flex-shrink: 0; transition: background 0.3s;
-    }
-    .dot.connected  { background: var(--green); }
-    .dot.connecting { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
 
     /* ══════════════ VIEWS ══════════════ */
     .view { display: none; flex-direction: column; flex: 1; overflow: hidden; }
@@ -209,7 +169,7 @@
     .prog-label { font-size: 14px; font-weight: 600; }
     .prog-sub   { font-size: 12px; color: var(--text-dim); }
 
-    .prog-track { height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+    /* prog-track comes from shared.css */
     .prog-bar-inner {
       height: 100%; background: var(--accent); border-radius: 2px;
       width: 0%; transition: width 0.35s ease;
@@ -272,20 +232,6 @@
     }
     .save-btn:disabled { opacity: 0.35; cursor: default; }
     .save-btn:active:not(:disabled) { background: var(--accent-tap); }
-
-    /* ── Toast ── */
-    #toast {
-      position: fixed; left: 16px; right: 16px;
-      bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
-      max-width: 560px; margin: 0 auto;
-      background: var(--surface2); color: var(--text); font-size: 14px;
-      padding: 12px 16px; border-radius: var(--radius);
-      transform: translateY(120px); opacity: 0;
-      transition: transform 0.3s ease, opacity 0.3s ease;
-      z-index: 999; pointer-events: none; text-align: center;
-    }
-    #toast.show { transform: translateY(0); opacity: 1; }
-    #toast.error { background: var(--red); }
 
     /* ── Load more in picker ── */
     .load-more-btn {
@@ -370,6 +316,7 @@
 
 <div id="toast"></div>
 
+<script src="/shared/shared.js"></script>
 <script>
 // ══════════════════════════════════════════════════════════
 // CONFIG & STATE
@@ -377,19 +324,13 @@
 const PAGE_SIZE = 60;
 
 const state = {
-  apiKey:   localStorage.getItem('z_apikey') || '',
-  clientId: (() => {
-    let id = localStorage.getItem('z_client_id');
-    if (!id) { id = crypto.randomUUID(); localStorage.setItem('z_client_id', id); }
-    return id;
-  })(),
-  ws:        null,
-  wsReady:   false,
-  images:    [],
-  offset:    0,
-  hasMore:   false,
-  selected:  null,   // full image record
-  titles:    [],
+  apiKey:   ArtRium.getApiKey(),
+  clientId: ArtRium.getClientId(),
+  images:   [],
+  offset:   0,
+  hasMore:  false,
+  selected: null,
+  titles:   [],
   chosenTitle: null,
 };
 
@@ -398,28 +339,8 @@ const state = {
 // ══════════════════════════════════════════════════════════
 const $ = id => document.getElementById(id);
 
-let toastTimer;
-const toast = (msg, isError = false) => {
-  const el = $('toast');
-  el.textContent = msg;
-  el.className = 'show' + (isError ? ' error' : '');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.className = '', 3500);
-};
-
-const getAuthHeaders = () => state.apiKey ? { 'X-API-Key': state.apiKey } : {};
-
-const withAuth = url =>
-  state.apiKey ? url + (url.includes('?') ? '&' : '?') + 'api_key=' + encodeURIComponent(state.apiKey) : url;
-
-const apiFetch = async (url, opts = {}) => {
-  const r = await fetch(url, { ...opts, headers: { ...getAuthHeaders(), ...opts.headers } });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.detail || `Error ${r.status}`);
-  }
-  return r;
-};
+const withAuth = (url) => ArtRium.withAuth(url, state.apiKey);
+const apiFetch = (url, opts = {}) => ArtRium.apiFetch(url, opts, state.apiKey);
 
 // ══════════════════════════════════════════════════════════
 // VIEW SWITCHING
@@ -456,7 +377,7 @@ const loadImages = async (reset = false) => {
     $('picker-footer').style.display = state.hasMore ? 'flex' : 'none';
     $('picker-load-more').disabled = false;
   } catch (e) {
-    toast('Failed to load images: ' + e.message, true);
+    ArtRium.toast('Failed to load images: ' + e.message, true);
   }
 };
 
@@ -481,7 +402,6 @@ const makePickerItem = (img, idx) => {
 };
 
 const selectImage = (idx) => {
-  // Deselect previous
   document.querySelectorAll('.picker-item.selected').forEach(el => el.classList.remove('selected'));
 
   const img = state.images[idx];
@@ -489,7 +409,6 @@ const selectImage = (idx) => {
 
   document.querySelector(`.picker-item[data-idx="${idx}"]`).classList.add('selected');
 
-  // Update bottom bar
   const thumb = $('selected-thumb');
   thumb.src = withAuth(img.url);
   thumb.classList.add('show');
@@ -507,27 +426,7 @@ const loadMoreImages = () => {
 // ══════════════════════════════════════════════════════════
 // WEBSOCKET
 // ══════════════════════════════════════════════════════════
-const setDot = (status) => {
-  $('dot').className = 'dot ' + status;
-};
-
-const connectWs = () => {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const key = state.apiKey ? `?api_key=${encodeURIComponent(state.apiKey)}` : '';
-  state.ws = new WebSocket(`${proto}//${location.host}/ws/${state.clientId}${key}`);
-  setDot('connecting');
-
-  state.ws.onopen  = () => { state.wsReady = true;  setDot('connected'); };
-  state.ws.onerror = () => state.ws.close();
-  state.ws.onclose = (e) => {
-    state.wsReady = false;
-    setDot('disconnected');
-    if (e.code !== 4001) setTimeout(connectWs, 3500);
-  };
-  state.ws.onmessage = (e) => {
-    try { handleWsMsg(JSON.parse(e.data)); } catch (_) {}
-  };
-};
+let wsConn;
 
 // ══════════════════════════════════════════════════════════
 // WS MESSAGE HANDLING
@@ -540,11 +439,10 @@ const handleWsMsg = (msg) => {
 
   if (msg.type === 'execution_error') {
     hideProgress();
-    toast('Ollama workflow failed: ' + (msg.data?.message || 'unknown error'), true);
+    ArtRium.toast('Ollama workflow failed: ' + (msg.data?.message || 'unknown error'), true);
     return;
   }
 
-  // Show progress for known executing nodes
   if (msg.type === 'executing' && msg.data?.node) {
     const nodeLabels = {
       '12': 'Loading image…',
@@ -562,12 +460,10 @@ const handleWsMsg = (msg) => {
 // ══════════════════════════════════════════════════════════
 const startTitling = async () => {
   if (!state.selected) return;
-  if (!state.wsReady) { toast('Not connected — please wait.'); return; }
+  if (!wsConn.ready) { ArtRium.toast('Not connected — please wait.'); return; }
 
-  // Switch to results view
   switchView('results');
 
-  // Update preview row
   $('preview-thumb').src = withAuth(state.selected.url);
   const currentEl = $('preview-current');
   if (state.selected.title) {
@@ -578,7 +474,6 @@ const startTitling = async () => {
     currentEl.classList.add('placeholder');
   }
 
-  // Reset results
   $('titles-section').style.display = 'none';
   $('titles-list').innerHTML = '';
   state.titles = [];
@@ -586,7 +481,6 @@ const startTitling = async () => {
   $('save-btn').disabled = true;
   $('save-btn').textContent = 'Select a title to save';
 
-  // Show progress
   showProgress('Sending to Ollama…', 'This may take 30–60 seconds');
 
   try {
@@ -597,7 +491,7 @@ const startTitling = async () => {
     });
   } catch (e) {
     hideProgress();
-    toast('Failed to start: ' + e.message, true);
+    ArtRium.toast('Failed to start: ' + e.message, true);
   }
 };
 
@@ -605,23 +499,20 @@ const startTitling = async () => {
 // TITLE DISPLAY & PARSING
 // ══════════════════════════════════════════════════════════
 const parseTitles = (text) => {
-  // Strip <think>...</think> blocks (just in case)
   const clean = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
   const titles = [];
   for (const line of clean.split('\n')) {
-    // Match "1. Title", "1) Title", "- Title", "* Title"
     const m = line.match(/^(?:\d+[.)]\s+|[-*]\s+)\*{0,2}(.+?)\*{0,2}\s*$/);
     if (m) titles.push(m[1].trim());
   }
-  // Fallback: non-empty lines that look like titles (≤10 words, no punctuation-only lines)
   if (titles.length === 0) {
     for (const line of clean.split('\n')) {
       const t = line.replace(/^\s*[-*\d.)]+\s*/, '').replace(/\*\*/g, '').trim();
       if (t && t.split(' ').length <= 12 && t.length > 3) titles.push(t);
     }
   }
-  return [...new Set(titles)];  // dedupe
+  return [...new Set(titles)];
 };
 
 const onTitlesReceived = (text) => {
@@ -629,7 +520,7 @@ const onTitlesReceived = (text) => {
   state.titles = parseTitles(text);
 
   if (state.titles.length === 0) {
-    toast('Could not parse titles from response. Raw output logged to console.');
+    ArtRium.toast('Could not parse titles from response. Raw output logged to console.');
     console.log('Raw LLM output:', text);
     return;
   }
@@ -637,7 +528,6 @@ const onTitlesReceived = (text) => {
   renderTitleCards();
   $('titles-section').style.display = 'block';
 
-  // Scroll to titles
   setTimeout(() => {
     $('titles-section').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, 100);
@@ -690,16 +580,15 @@ const saveTitle = async () => {
     const updated = await r.json();
     state.selected.title = updated.title;
 
-    // Update preview
     const currentEl = $('preview-current');
     currentEl.textContent = updated.title;
     currentEl.classList.remove('placeholder');
 
     btn.textContent = 'Saved ✓';
-    toast('Title saved');
+    ArtRium.toast('Title saved');
     setTimeout(() => { btn.textContent = 'Save Title'; btn.disabled = false; }, 2000);
   } catch (e) {
-    toast('Save failed: ' + e.message, true);
+    ArtRium.toast('Save failed: ' + e.message, true);
     btn.disabled = false;
     btn.textContent = 'Save Title';
   }
@@ -723,7 +612,16 @@ const hideProgress = () => {
 // ══════════════════════════════════════════════════════════
 window.addEventListener('load', () => {
   loadImages(true);
-  connectWs();
+
+  wsConn = ArtRium.connectWs({
+    clientId:      state.clientId,
+    getApiKey:     () => state.apiKey,
+    onMessage:     handleWsMsg,
+    onConnecting:  () => ArtRium.setDot('connecting'),
+    onConnected:   () => ArtRium.setDot('connected'),
+    onDisconnected:() => ArtRium.setDot('disconnected'),
+  });
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }

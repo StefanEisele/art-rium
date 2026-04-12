@@ -9,33 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="z-Image">
   <title>z-Image — art-rium</title>
   <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="/shared/shared.css">
   <style>
-    :root {
-      --bg:         #111111;
-      --surface:    #1c1c1e;
-      --surface2:   #2c2c2e;
-      --accent:     #f5a623;
-      --accent-tap: #d4901e;
-      --text:       #f2f2f7;
-      --text-dim:   #8e8e93;
-      --border:     #3a3a3c;
-      --green:      #32d74b;
-      --red:        #ff453a;
-      --radius:     14px;
-    }
-
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html, body {
-      height: 100%;
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      font-size: 16px;
-      -webkit-font-smoothing: antialiased;
-      overscroll-behavior: none;
-    }
-
     .app {
       display: flex;
       flex-direction: column;
@@ -58,28 +33,9 @@
 
     .header-left { display: flex; align-items: center; gap: 10px; }
 
-    .back-btn {
-      background: none; border: none;
-      font-size: 22px; line-height: 1;
-      color: var(--accent); cursor: pointer;
-      padding: 0 4px 0 0;
-      -webkit-tap-highlight-color: transparent;
-      text-decoration: none;
-      display: flex; align-items: center;
-    }
-
     header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; }
 
     .status { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-dim); }
-
-    .dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: var(--red); flex-shrink: 0; transition: background 0.3s;
-    }
-    .dot.connected  { background: var(--green); }
-    .dot.connecting { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
-
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
 
     /* ── Main scroll ── */
     main {
@@ -200,8 +156,7 @@
     #prog-batch  { font-weight: 600; color: var(--text); }
     #prog-steps  { color: var(--text-dim); font-variant-numeric: tabular-nums; }
 
-    .prog-track { height: 3px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
-    #prog-bar   { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; transition: width 0.35s ease; }
+    #prog-bar { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; transition: width 0.35s ease; }
 
     #prog-node { font-size: 12px; color: var(--text-dim); }
 
@@ -250,28 +205,6 @@
 
     /* Bottom action row */
     .btn-row { display: flex; gap: 10px; }
-    .btn {
-      flex: 1; padding: 14px; border-radius: var(--radius);
-      border: 1.5px solid var(--border); background: var(--surface);
-      color: var(--text); font-size: 15px; font-weight: 600;
-      cursor: pointer; font-family: inherit; transition: all 0.13s;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .btn.primary { background: var(--accent); border-color: var(--accent); color: #000; }
-    .btn:active { transform: scale(0.97); }
-
-    /* ── Toast ── */
-    #toast {
-      position: fixed; left: 20px; right: 20px;
-      bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
-      max-width: 560px; margin: 0 auto;
-      background: var(--red); color: #fff; font-size: 14px;
-      padding: 13px 16px; border-radius: var(--radius);
-      transform: translateY(120px); opacity: 0;
-      transition: transform 0.3s ease, opacity 0.3s ease;
-      z-index: 999; pointer-events: none;
-    }
-    #toast.show { transform: translateY(0); opacity: 1; }
 
     /* ── Icon buttons (header) ── */
     .icon-btn {
@@ -391,15 +324,15 @@
 
 <div id="toast"></div>
 
+<script src="/shared/shared.js"></script>
 <script>
 // ═══════════════════════════════════════════════════════════════════════════
-// CONFIGURATION & CONSTANTS (SSOT - Single Source of Truth)
+// CONFIGURATION & CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════
 const CONFIG = {
   maxPromptLength: 2000,
   maxBatchCount: 10,
   maxBatchMin: 1,
-  toastDuration: 4500,
   wsReconnectDelay: 3500,
   defaultSize: { width: 1024, height: 1024 },
 };
@@ -436,22 +369,10 @@ const EVENTS = {
   error: 'error',
 };
 
-const NODE_LABELS = {
-  '39': 'Loading CLIP…',
-  '40': 'Loading VAE…',
-  '41': 'Preparing latent…',
-  '42': 'Zeroing conditions…',
-  '44': 'Sampling…',
-  '45': 'Encoding prompt…',
-  '46': 'Loading model…',
-  '47': 'Setting sampler…',
-  '51': 'Loading LoRA…',
-  '9':  'Decoding image…',
-};
-
+// z-image keeps its own STORAGE_KEYS because it adds the `images` entry;
+// clientId and apiKey values intentionally match ArtRium.STORAGE_KEYS.
 const STORAGE_KEYS = {
-  clientId: 'z_client_id',
-  apiKey: 'z_apikey',
+  ...ArtRium.STORAGE_KEYS,
   images: 'z_generated_images',
 };
 
@@ -493,17 +414,14 @@ const PROMPT_TEMPLATES = [
 // STATE
 // ═══════════════════════════════════════════════════════════════════════════
 const state = {
-  clientId: (() => { let id = localStorage.getItem(STORAGE_KEYS.clientId); if (!id) { id = crypto.randomUUID(); localStorage.setItem(STORAGE_KEYS.clientId, id); } return id; })(),
-  apiKey: localStorage.getItem(STORAGE_KEYS.apiKey) || '',
-  ws: null,
-  wsReady: false,
-  imgWidth: CONFIG.defaultSize.width,
+  clientId:  ArtRium.getClientId(),
+  apiKey:    ArtRium.getApiKey(),
+  imgWidth:  CONFIG.defaultSize.width,
   imgHeight: CONFIG.defaultSize.height,
   batchCount: 1,
   batchTotal: 1,
   doneCount: 0,
   generatedImages: [],
-  toastTimer: null,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -514,44 +432,28 @@ const $ = (id) => document.getElementById(id);
 const setText = (id, text) => { const el = $(id); if (el) el.textContent = text; };
 const toggleClass = (id, className) => { const el = $(id); if (el) el.classList.toggle(className); };
 
-const withAuth = (url) => {
-  if (!state.apiKey) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return url + sep + 'api_key=' + encodeURIComponent(state.apiKey);
-};
-
-const getAuthHeaders = () => state.apiKey ? { 'X-API-Key': state.apiKey } : {};
+// Thin wrappers so callers don't pass apiKey everywhere
+const withAuth      = (url)         => ArtRium.withAuth(url, state.apiKey);
+const getAuthHeaders = ()           => ArtRium.getAuthHeaders(state.apiKey);
 
 const selectButton = (selector, activeBtn) => {
   document.querySelectorAll(selector).forEach(b => b.classList.remove('active'));
   activeBtn.classList.add('active');
 };
 
-const apiFetch = async (endpoint, opts = {}) => {
-  const r = await fetch(endpoint, {
-    ...opts,
-    headers: { ...getAuthHeaders(), ...opts.headers },
-  });
-  if (r.status === 401) {
-    state.apiKey = '';
-    localStorage.removeItem(STORAGE_KEYS.apiKey);
+const apiFetch = (url, opts = {}) =>
+  ArtRium.apiFetch(url, opts, state.apiKey, () => {
+    ArtRium.clearApiKey();
     location.href = '/';
-    throw new Error('Authentication required');
-  }
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.detail || err.error || `Server error ${r.status}`);
-  }
-  return r;
-};
+  });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STORAGE HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 
 const storage = {
-  saveImages: () => localStorage.setItem(STORAGE_KEYS.images, JSON.stringify(state.generatedImages)),
-  loadImages: () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.images)) || []; } catch { return []; } },
+  saveImages:  () => localStorage.setItem(STORAGE_KEYS.images, JSON.stringify(state.generatedImages)),
+  loadImages:  () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.images)) || []; } catch { return []; } },
   clearImages: () => localStorage.removeItem(STORAGE_KEYS.images),
 };
 
@@ -559,19 +461,10 @@ const storage = {
 // UI HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 
-const toast = (msg) => {
-  const el = $(DOM_IDS.toast);
-  el.textContent = msg;
-  el.classList.add('show');
-  clearTimeout(state.toastTimer);
-  state.toastTimer = setTimeout(() => el.classList.remove('show'), CONFIG.toastDuration);
-};
-
 const setStatus = (status) => {
-  const dot = $(DOM_IDS.dot);
-  dot.className = 'dot ' + status;
+  ArtRium.setDot(status);
   setText(DOM_IDS.statusLabel,
-    status === 'connected' ? 'connected' :
+    status === 'connected'  ? 'connected' :
     status === 'connecting' ? 'connecting…' : 'disconnected'
   );
 };
@@ -681,7 +574,7 @@ const progress = {
   },
 
   setNode: (nodeId) => {
-    setText(DOM_IDS.progNode, NODE_LABELS[nodeId] || `Node ${nodeId}`);
+    setText(DOM_IDS.progNode, ArtRium.NODE_LABELS[nodeId] || `Node ${nodeId}`);
   },
 };
 
@@ -712,7 +605,7 @@ const messageHandlers = {
   },
 
   [EVENTS.executionError]: (data) => {
-    toast(`Image ${data.batch_index}/${data.batch_total} failed: ${data.message}`);
+    ArtRium.toast(`Image ${data.batch_index}/${data.batch_total} failed: ${data.message}`, true);
     onBatchDone(() => {
       progress.reset();
       updateShareButton();
@@ -720,7 +613,7 @@ const messageHandlers = {
   },
 
   [EVENTS.error]: (data) => {
-    toast(data.message || 'An error occurred.');
+    ArtRium.toast(data.message || 'An error occurred.', true);
     progress.reset();
   },
 };
@@ -734,35 +627,7 @@ const handleMsg = (msg) => {
 // WEBSOCKET
 // ═══════════════════════════════════════════════════════════════════════════
 
-const connectWs = () => {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const key = state.apiKey ? `?api_key=${encodeURIComponent(state.apiKey)}` : '';
-  state.ws = new WebSocket(`${proto}//${location.host}/ws/${state.clientId}${key}`);
-  setStatus('connecting');
-
-  state.ws.onopen = () => {
-    state.wsReady = true;
-    setStatus('connected');
-  };
-
-  state.ws.onerror = () => state.ws.close();
-
-  state.ws.onclose = (e) => {
-    state.wsReady = false;
-    setStatus('disconnected');
-    if (e.code === 4001) {
-      state.apiKey = '';
-      localStorage.removeItem(STORAGE_KEYS.apiKey);
-      location.href = '/';
-      return;
-    }
-    setTimeout(connectWs, CONFIG.wsReconnectDelay);
-  };
-
-  state.ws.onmessage = (e) => {
-    try { handleMsg(JSON.parse(e.data)); } catch (_) {}
-  };
-};
+let wsConn;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // API CALLS
@@ -781,8 +646,8 @@ const onBatchDone = (onComplete) => {
 
 const generate = async () => {
   const promptText = $(DOM_IDS.prompt).value.trim();
-  if (!promptText) { toast('Please enter a prompt.'); return; }
-  if (!state.wsReady) { toast('Not connected yet — please wait.'); return; }
+  if (!promptText) { ArtRium.toast('Please enter a prompt.'); return; }
+  if (!wsConn.ready) { ArtRium.toast('Not connected yet — please wait.'); return; }
 
   state.batchTotal = state.batchCount;
   state.doneCount = 0;
@@ -816,13 +681,13 @@ const generate = async () => {
       d.batch_count > 1 ? `Image 1 / ${d.batch_count}` : 'Waiting for GPU…'
     );
   } catch (e) {
-    toast(e.message || 'Failed to reach server.');
+    ArtRium.toast(e.message || 'Failed to reach server.', true);
     progress.reset();
   }
 };
 
 const shareInstagram = async () => {
-  if (!state.generatedImages.length) { toast('No images available to share.'); return; }
+  if (!state.generatedImages.length) { ArtRium.toast('No images available to share.'); return; }
 
   const btn = $(DOM_IDS.shareInstagramBtn);
   btn.disabled = true;
@@ -838,11 +703,11 @@ const shareInstagram = async () => {
       }),
     });
 
-    toast('Shared to Instagram successfully.');
+    ArtRium.toast('Shared to Instagram successfully.');
     btn.textContent = 'Shared';
     setTimeout(updateShareButton, 2500);
   } catch (err) {
-    toast('Instagram share failed: ' + err.message);
+    ArtRium.toast('Instagram share failed: ' + err.message, true);
     btn.disabled = false;
     btn.textContent = 'Share to Instagram';
   }
@@ -863,7 +728,7 @@ const saveImage = async (url, filename) => {
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
     }
   } catch (e) {
-    if (e.name !== 'AbortError') toast('Could not save: ' + e.message);
+    if (e.name !== 'AbortError') ArtRium.toast('Could not save: ' + e.message, true);
   }
 };
 
@@ -906,8 +771,8 @@ const updateShareButton = () => {
 const refreshSession = () => {
   state.generatedImages = storage.loadImages();
   gallery.render();
-  if (!state.wsReady) connectWs();
-  toast(state.generatedImages.length ? 'Session images refreshed.' : 'Session restored.');
+  if (!wsConn.ready) wsConn.reconnect();
+  ArtRium.toast(state.generatedImages.length ? 'Session images refreshed.' : 'Session restored.');
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -974,7 +839,21 @@ window.addEventListener('load', async () => {
   buildHeaderButtons();
   state.generatedImages = storage.loadImages();
   gallery.render();
-  connectWs();
+
+  wsConn = ArtRium.connectWs({
+    clientId:      state.clientId,
+    getApiKey:     () => state.apiKey,
+    onMessage:     handleMsg,
+    onConnecting:  () => setStatus('connecting'),
+    onConnected:   () => setStatus('connected'),
+    onDisconnected:() => setStatus('disconnected'),
+    on4001: () => {
+      state.apiKey = '';
+      ArtRium.clearApiKey();
+      location.href = '/';
+    },
+  });
+
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }

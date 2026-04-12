@@ -9,34 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="Gallery">
   <title>Gallery — art-rium</title>
   <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="/shared/shared.css">
   <style>
-    :root {
-      --bg:         #111111;
-      --surface:    #1c1c1e;
-      --surface2:   #2c2c2e;
-      --surface3:   #3a3a3c;
-      --accent:     #f5a623;
-      --accent-tap: #d4901e;
-      --text:       #f2f2f7;
-      --text-dim:   #8e8e93;
-      --border:     #3a3a3c;
-      --green:      #32d74b;
-      --red:        #ff453a;
-      --radius:     14px;
-    }
-
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html, body {
-      height: 100%;
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      font-size: 16px;
-      -webkit-font-smoothing: antialiased;
-      overscroll-behavior: none;
-    }
-
     .app {
       display: flex;
       flex-direction: column;
@@ -56,18 +30,9 @@
       flex-shrink: 0;
     }
 
-    .back-btn {
-      background: none; border: none;
-      font-size: 22px; color: var(--accent);
-      cursor: pointer; padding: 0 4px 0 0;
-      -webkit-tap-highlight-color: transparent;
-      text-decoration: none;
-      display: flex; align-items: center; flex-shrink: 0;
-    }
-
     header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex-shrink: 0; }
 
-    /* ── Search ── */
+    /* ── Search ─�� */
     .search-wrap {
       flex: 1;
       position: relative;
@@ -455,35 +420,6 @@
     .action-row {
       display: flex; gap: 10px;
     }
-
-    .btn {
-      flex: 1; padding: 14px;
-      border-radius: var(--radius); border: 1.5px solid var(--border);
-      background: var(--surface); color: var(--text);
-      font-size: 15px; font-weight: 600;
-      cursor: pointer; font-family: inherit;
-      transition: all 0.13s;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .btn.primary { background: var(--accent); border-color: var(--accent); color: #000; }
-    .btn.danger  { background: none; border-color: var(--red); color: var(--red); }
-    .btn:active  { transform: scale(0.97); }
-    .btn:disabled { opacity: 0.4; cursor: default; transform: none; }
-
-    /* ── Toast ── */
-    #toast {
-      position: fixed; left: 16px; right: 16px;
-      bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
-      max-width: 560px; margin: 0 auto;
-      background: var(--surface2); color: var(--text); font-size: 14px;
-      padding: 12px 16px; border-radius: var(--radius);
-      transform: translateY(120px); opacity: 0;
-      transition: transform 0.3s ease, opacity 0.3s ease;
-      z-index: 999; pointer-events: none;
-      text-align: center;
-    }
-    #toast.show { transform: translateY(0); opacity: 1; }
-    #toast.error { background: var(--red); }
   </style>
 </head>
 <body>
@@ -594,8 +530,9 @@
 
 <div id="toast"></div>
 
+<script src="/shared/shared.js"></script>
 <script>
-// ══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════��══
 // CONFIG
 // ══════════════════════════════════════════════════════════
 const PAGE_SIZE = 50;
@@ -604,21 +541,21 @@ const PAGE_SIZE = 50;
 // STATE
 // ══════════════════════════════════════════════════════════
 const state = {
-  apiKey:      localStorage.getItem('z_apikey') || '',
-  images:      [],   // all loaded image records
-  offset:      0,
-  hasMore:     false,
-  loading:     false,
+  apiKey:  ArtRium.getApiKey(),
+  images:  [],
+  offset:  0,
+  hasMore: false,
+  loading: false,
   filters: {
     search:    '',
-    ratingMin: '',    // '' | '3' | '4' | '5' | 'unrated'
+    ratingMin: '',
   },
   modal: {
-    index:     -1,   // index into state.images
-    image:     null,
-    rating:    null,
-    tags:      [],
-    dirty:     false,
+    index:  -1,
+    image:  null,
+    rating: null,
+    tags:   [],
+    dirty:  false,
   },
 };
 
@@ -627,30 +564,8 @@ const state = {
 // ══════════════════════════════════════════════════════════
 const $ = id => document.getElementById(id);
 
-let toastTimer;
-const toast = (msg, isError = false) => {
-  const el = $('toast');
-  el.textContent = msg;
-  el.className = 'show' + (isError ? ' error' : '');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.className = '', 3000);
-};
-
-const getAuthHeaders = () => state.apiKey ? { 'X-API-Key': state.apiKey } : {};
-
-const apiFetch = async (url, opts = {}) => {
-  const r = await fetch(url, { ...opts, headers: { ...getAuthHeaders(), ...opts.headers } });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    throw new Error(err.detail || `Error ${r.status}`);
-  }
-  return r;
-};
-
-const withAuth = url => {
-  if (!state.apiKey) return url;
-  return url + (url.includes('?') ? '&' : '?') + 'api_key=' + encodeURIComponent(state.apiKey);
-};
+const withAuth  = (url) => ArtRium.withAuth(url, state.apiKey);
+const apiFetch  = (url, opts = {}) => ArtRium.apiFetch(url, opts, state.apiKey);
 
 const formatDate = iso => {
   const d = new Date(iso);
@@ -702,7 +617,7 @@ const fetchImages = async (reset = false) => {
 
     if (reset && data.length === 0) renderEmpty();
   } catch (e) {
-    toast('Failed to load images: ' + e.message, true);
+    ArtRium.toast('Failed to load images: ' + e.message, true);
   } finally {
     state.loading = false;
   }
@@ -738,7 +653,6 @@ const makeGridItem = (img, idx) => {
   div.dataset.idx = idx;
   div.onclick = () => openModal(idx);
 
-  // Image wrapper (keeps aspect-ratio + overflow)
   const wrap = document.createElement('div');
   wrap.className = 'grid-img-wrap';
 
@@ -759,7 +673,6 @@ const makeGridItem = (img, idx) => {
   wrap.appendChild(badge);
   div.appendChild(wrap);
 
-  // Title below the image
   const titleEl = document.createElement('div');
   titleEl.className = 'grid-title';
   titleEl.textContent = img.title || '';
@@ -828,7 +741,6 @@ const openModal = (idx) => {
 
 const closeModal = async () => {
   if (state.modal.dirty) {
-    // Auto-save on close
     await saveModal(true);
   }
   $('modal').classList.remove('open');
@@ -849,14 +761,11 @@ const populateModal = (img) => {
   state.modal.rating = img.rating || null;
   state.modal.tags   = img.tags ? [...img.tags] : [];
 
-  // Image
   $('modal-img').src = withAuth(img.url);
   $('modal-img').alt = img.filename;
 
-  // Rating stars
   renderStars(state.modal.rating);
 
-  // Prompt
   const promptEl = $('modal-prompt');
   if (img.prompt) {
     $('prompt-block').style.display = 'block';
@@ -867,7 +776,6 @@ const populateModal = (img) => {
     $('prompt-block').style.display = 'none';
   }
 
-  // Meta
   const meta = $('modal-meta');
   meta.innerHTML = '';
   const chips = [
@@ -883,18 +791,14 @@ const populateModal = (img) => {
     meta.appendChild(chip);
   });
 
-  // Tags
   renderTags();
 
-  // Title
   $('modal-title').value = img.title || '';
   $('modal-title').oninput = () => { state.modal.dirty = true; };
 
-  // Notes
   $('modal-notes').value = img.notes || '';
   $('modal-notes').oninput = () => { state.modal.dirty = true; };
 
-  // Nav buttons
   $('nav-prev').disabled = state.modal.index <= 0;
   $('nav-next').disabled = state.modal.index >= state.images.length - 1;
 };
@@ -909,26 +813,22 @@ const renderStars = (rating) => {
 };
 
 const setRating = async (value) => {
-  // Toggle off if same
   const newRating = state.modal.rating === value ? null : value;
   state.modal.rating = newRating;
   renderStars(newRating);
 
-  // Save immediately
   try {
     const updated = await patchImage(state.modal.image.id, { rating: newRating });
     state.modal.image.rating = updated.rating;
-    // Update grid badge
     refreshGridItem(state.modal.index, updated);
   } catch (e) {
-    toast('Could not save rating', true);
+    ArtRium.toast('Could not save rating', true);
   }
 };
 
 // ── Tags ──
 const renderTags = () => {
   const wrap = $('tags-wrap');
-  // Remove existing tag chips (keep the add-wrap at the end)
   wrap.querySelectorAll('.tag-chip').forEach(c => c.remove());
 
   const addWrap = wrap.querySelector('.tag-add-wrap');
@@ -988,9 +888,9 @@ const saveModal = async (silent = false) => {
     state.modal.image.notes = updated.notes;
     state.modal.dirty = false;
     refreshGridItem(state.modal.index, updated);
-    if (!silent) toast('Saved');
+    if (!silent) ArtRium.toast('Saved');
   } catch (e) {
-    toast('Save failed: ' + e.message, true);
+    ArtRium.toast('Save failed: ' + e.message, true);
   } finally {
     btn.disabled = false;
   }
@@ -1005,17 +905,14 @@ const confirmDelete = async () => {
   try {
     await deleteImageApi(state.modal.image.id);
 
-    // Remove from grid
     const gridItem = $('grid').querySelector(`[data-idx="${state.modal.index}"]`);
     if (gridItem) gridItem.remove();
 
-    // Remove from state and re-index remaining grid items
     state.images.splice(state.modal.index, 1);
     state.offset = Math.max(0, state.offset - 1);
     reindexGrid();
     updateCountBar();
 
-    // Navigate or close
     if (state.images.length === 0) {
       closeModal();
       renderEmpty();
@@ -1024,14 +921,13 @@ const confirmDelete = async () => {
       state.modal.dirty = false;
       openModal(nextIdx);
     }
-    toast('Deleted');
+    ArtRium.toast('Deleted');
   } catch (e) {
-    toast('Delete failed: ' + e.message, true);
+    ArtRium.toast('Delete failed: ' + e.message, true);
     btn.disabled = false;
   }
 };
 
-// Re-assign data-idx after deletion so navigation stays correct
 const reindexGrid = () => {
   $('grid').querySelectorAll('.grid-item').forEach((el, i) => {
     el.dataset.idx = i;

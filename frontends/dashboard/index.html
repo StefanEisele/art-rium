@@ -9,31 +9,8 @@
   <meta name="apple-mobile-web-app-title" content="art-rium">
   <title>art-rium</title>
   <link rel="manifest" href="manifest.json">
+  <link rel="stylesheet" href="/shared/shared.css">
   <style>
-    :root {
-      --bg:         #111111;
-      --surface:    #1c1c1e;
-      --surface2:   #2c2c2e;
-      --accent:     #f5a623;
-      --text:       #f2f2f7;
-      --text-dim:   #8e8e93;
-      --border:     #3a3a3c;
-      --green:      #32d74b;
-      --radius:     14px;
-    }
-
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-    html, body {
-      height: 100%;
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      font-size: 16px;
-      -webkit-font-smoothing: antialiased;
-      overscroll-behavior: none;
-    }
-
     .app {
       display: flex;
       flex-direction: column;
@@ -56,11 +33,6 @@
     .header-brand { display: flex; flex-direction: column; gap: 2px; }
     .header-brand h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
     .header-brand p  { font-size: 13px; color: var(--text-dim); }
-
-    .status-dot {
-      width: 9px; height: 9px; border-radius: 50%;
-      background: var(--green); flex-shrink: 0;
-    }
 
     /* ── Main ── */
     main {
@@ -163,10 +135,6 @@
       text-align: center;
     }
 
-    /* ── Status dot animation ── */
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
-    .dot-connecting { animation: blink 1.2s ease-in-out infinite; }
-
     /* ── Comfy progress strip ── */
     #comfy-strip {
       display: none;
@@ -232,7 +200,7 @@
       <h1>art-rium</h1>
       <p>AI art creation platform</p>
     </div>
-    <div class="status-dot" id="status-dot" style="opacity:0"></div>
+    <div class="dot" id="dot" style="opacity:0"></div>
   </header>
 
   <!-- Comfy progress strip — visible during active generation -->
@@ -343,58 +311,29 @@
 
 </div>
 
+<script src="/shared/shared.js"></script>
 <script>
-// ── Shared localStorage keys (same as z-image tool) ────────────────────────
-const STORAGE_KEYS = { clientId: 'z_client_id', apiKey: 'z_apikey' };
-
-const NODE_LABELS = {
-  '39': 'Loading CLIP…', '40': 'Loading VAE…', '41': 'Preparing latent…',
-  '42': 'Zeroing conditions…', '44': 'Sampling…', '45': 'Encoding prompt…',
-  '46': 'Loading model…', '47': 'Setting sampler…', '51': 'Loading LoRA…',
-  '9': 'Decoding image…',
-};
-
-const state = {
-  clientId: (() => {
-    let id = localStorage.getItem(STORAGE_KEYS.clientId);
-    if (!id) { id = crypto.randomUUID(); localStorage.setItem(STORAGE_KEYS.clientId, id); }
-    return id;
-  })(),
-  apiKey: localStorage.getItem(STORAGE_KEYS.apiKey) || '',
-  ws: null,
-  wsReady: false,
-};
-
-// ── Helpers ─────────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 const setText = (id, t) => { const el = $(id); if (el) el.textContent = t; };
 
-const setDot = (status) => {
-  const dot = $('status-dot');
-  dot.style.opacity = '1';
-  dot.classList.remove('dot-connecting');
-  if (status === 'connected') {
-    dot.style.background = 'var(--green)';
-  } else if (status === 'connecting') {
-    dot.style.background = 'var(--accent)';
-    dot.classList.add('dot-connecting');
-  } else {
-    dot.style.background = '#ff453a';
-  }
+const state = {
+  clientId: ArtRium.getClientId(),
+  apiKey:   ArtRium.getApiKey(),
 };
 
 // ── Auth panel ───────────────────────────────────────────────────────────────
 const showAuthPanel = () => $('auth-panel').classList.add('show');
 const hideAuthPanel = () => $('auth-panel').classList.remove('show');
 
+let wsConn;
+
 const saveApiKey = () => {
   const val = $('api-key-input').value.trim();
   if (!val) return;
   state.apiKey = val;
-  localStorage.setItem(STORAGE_KEYS.apiKey, state.apiKey);
+  ArtRium.saveApiKey(val);
   hideAuthPanel();
-  if (state.ws) state.ws.close();
-  connectWs();
+  wsConn.reconnect();
 };
 
 // ── Comfy progress strip ─────────────────────────────────────────────────────
@@ -430,38 +369,13 @@ const handleMsg = (msg) => {
     strip.setSteps(`${data.value} / ${data.max}`);
   } else if (type === 'executing') {
     strip.show();
-    if (data.node) strip.setLabel(NODE_LABELS[data.node] || 'Generating…');
+    if (data.node) strip.setLabel(ArtRium.NODE_LABELS[data.node] || 'Generating…');
   } else if (type === 'image_ready' || type === 'text_ready') {
     strip.done();
   } else if (type === 'execution_error') {
     strip.setLabel('Generation failed');
     strip.hide(3000);
   }
-};
-
-// ── WebSocket ────────────────────────────────────────────────────────────────
-const connectWs = () => {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const key = state.apiKey ? `?api_key=${encodeURIComponent(state.apiKey)}` : '';
-  state.ws = new WebSocket(`${proto}//${location.host}/ws/${state.clientId}${key}`);
-  setDot('connecting');
-
-  state.ws.onopen = () => { state.wsReady = true; setDot('connected'); };
-  state.ws.onerror = () => state.ws.close();
-  state.ws.onclose = (e) => {
-    state.wsReady = false;
-    setDot('disconnected');
-    if (e.code === 4001) {
-      state.apiKey = '';
-      localStorage.removeItem(STORAGE_KEYS.apiKey);
-      showAuthPanel();
-      return;
-    }
-    setTimeout(connectWs, 3500);
-  };
-  state.ws.onmessage = (e) => {
-    try { handleMsg(JSON.parse(e.data)); } catch (_) {}
-  };
 };
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -476,7 +390,22 @@ window.addEventListener('load', async () => {
     }
   } catch (_) {}
 
-  connectWs();
+  const dot = $('dot');
+  dot.style.opacity = '1';
+
+  wsConn = ArtRium.connectWs({
+    clientId:      state.clientId,
+    getApiKey:     () => state.apiKey,
+    onMessage:     handleMsg,
+    onConnecting:  () => ArtRium.setDot('connecting'),
+    onConnected:   () => ArtRium.setDot('connected'),
+    onDisconnected:() => ArtRium.setDot('disconnected'),
+    on4001: () => {
+      state.apiKey = '';
+      ArtRium.clearApiKey();
+      showAuthPanel();
+    },
+  });
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});

@@ -10,24 +10,25 @@ import logging
 import uuid
 from pathlib import Path
 
-import httpx
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.auth import auth_ok
+from core.auth import require_auth
+from core.comfy import post_prompt
 from core.config import settings
-from core.db import AsyncSessionLocal
+from core.db import get_db
 from core.models import Image
 
 logger = logging.getLogger(__name__)
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 _WORKFLOW = json.loads(
     (Path(__file__).parent.parent / "workflows" / "qwen_3_5_image_titler.json").read_text()
 )
 
-COMFYUI_TIMEOUT = 20.0
 OUTPUT_NODE = "6"  # PreviewAny node — this is what fires the executed event with text
+_TITLER_TIMEOUT = 20.0  # Ollama inference is slow
 
 
 def _build_workflow(image_b64: str) -> dict:
@@ -49,20 +50,19 @@ class TitlerRequest(BaseModel):
 
 
 @router.post("/api/titler/run")
-async def run_titler(req: TitlerRequest, request: Request):
-    if not auth_ok(request):
-        raise HTTPException(status_code=401, detail="Invalid API key")
+async def run_titler(
+    req: TitlerRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        img = await db.get(Image, uuid.UUID(req.image_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid image_id")
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
 
-    # Load image record
-    async with AsyncSessionLocal() as session:
-        try:
-            img = await session.get(Image, uuid.UUID(req.image_id))
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid image_id")
-        if not img:
-            raise HTTPException(status_code=404, detail="Image not found")
-        filepath = settings.storage_dir / img.filepath
-
+    filepath = settings.storage_dir / img.filepath
     if not filepath.exists():
         raise HTTPException(status_code=404, detail="Image file not found on disk")
 
@@ -70,20 +70,7 @@ async def run_titler(req: TitlerRequest, request: Request):
     workflow = _build_workflow(image_b64)
     listener = request.app.state.comfy_listener
 
-    try:
-        async with httpx.AsyncClient(timeout=COMFYUI_TIMEOUT) as client:
-            resp = await client.post(
-                f"http://{settings.comfyui_host}/prompt",
-                json={"prompt": workflow, "client_id": listener.client_id},
-            )
-            resp.raise_for_status()
-            result = resp.json()
-    except httpx.ConnectError:
-        raise HTTPException(status_code=503, detail=f"ComfyUI unreachable: {settings.comfyui_host}")
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=500, detail=f"ComfyUI error {exc.response.status_code}")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    result = await post_prompt(workflow, listener.client_id, timeout=_TITLER_TIMEOUT)
 
     prompt_id = result.get("prompt_id")
     if not prompt_id:

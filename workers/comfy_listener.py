@@ -7,6 +7,7 @@ Responsibilities:
   3. On execution_success: copy image to managed storage + write DB record
 """
 import asyncio
+import json
 import logging
 import shutil
 import uuid
@@ -17,6 +18,7 @@ from typing import Any
 import websockets
 from fastapi import WebSocket
 
+from core.comfy import WORKFLOW_NAME
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import Image
@@ -114,7 +116,6 @@ class ComfyListener:
                         if isinstance(raw, bytes):
                             continue  # Skip binary preview frames
                         try:
-                            import json
                             msg = json.loads(raw)
                             await self._route(msg)
                         except Exception:
@@ -315,7 +316,7 @@ class ComfyListener:
                     seed=meta.get("seed"),
                     width=meta.get("width"),
                     height=meta.get("height"),
-                    workflow_name="z-image_turbo",
+                    workflow_name=WORKFLOW_NAME,
                     batch_id=uuid.UUID(meta["batch_id"]) if meta.get("batch_id") else None,
                     created_at=now,
                 )

@@ -6,10 +6,11 @@ import uuid
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from core.auth import auth_ok, ws_auth_ok
+from core.auth import require_auth, ws_auth_ok
+from core.comfy import post_prompt
 from core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -19,8 +20,6 @@ router = APIRouter()
 _TEMPLATE = json.loads(
     (Path(__file__).parent.parent / "workflows" / "z-image_turbo.json").read_text()
 )
-
-COMFYUI_TIMEOUT = 10.0
 
 
 def _build_workflow(prompt: str, seed: int, width: int, height: int) -> dict:
@@ -41,10 +40,8 @@ class GenerateRequest(BaseModel):
     batch_count: int = 1
 
 
-@router.post("/api/generate")
+@router.post("/api/generate", dependencies=[Depends(require_auth)])
 async def generate(req: GenerateRequest, request: Request):
-    if not auth_ok(request):
-        raise HTTPException(status_code=401, detail="Invalid API key")
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt is required")
 
@@ -57,20 +54,7 @@ async def generate(req: GenerateRequest, request: Request):
         seed = (req.seed + i) if req.seed >= 0 else random.randint(0, 2**32 - 1)
         workflow = _build_workflow(req.prompt, seed, req.width, req.height)
 
-        try:
-            async with httpx.AsyncClient(timeout=COMFYUI_TIMEOUT) as client:
-                resp = await client.post(
-                    f"http://{settings.comfyui_host}/prompt",
-                    json={"prompt": workflow, "client_id": listener.client_id},
-                )
-                resp.raise_for_status()
-                result = resp.json()
-        except httpx.ConnectError:
-            raise HTTPException(status_code=503, detail=f"ComfyUI unreachable: {settings.comfyui_host}")
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=500, detail=f"ComfyUI error: {exc.response.status_code}")
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+        result = await post_prompt(workflow, listener.client_id)
 
         prompt_id = result.get("prompt_id")
         if not prompt_id:
@@ -93,10 +77,8 @@ async def generate(req: GenerateRequest, request: Request):
     return {"batch_id": batch_id, "prompt_ids": prompt_ids, "batch_count": batch_count}
 
 
-@router.get("/api/image/{filename}")
-async def get_image(filename: str, request: Request):
-    if not auth_ok(request):
-        raise HTTPException(status_code=401, detail="Invalid API key")
+@router.get("/api/image/{filename}", dependencies=[Depends(require_auth)])
+async def get_image(filename: str):
     safe_name = Path(filename).name
     # Serve from managed storage; fall back to ComfyUI output dir
     for search_dir in [settings.images_dir, settings.comfyui_output_dir]:
@@ -107,10 +89,8 @@ async def get_image(filename: str, request: Request):
     raise HTTPException(status_code=404, detail="Image not found")
 
 
-@router.post("/api/clear_pending_images/{client_id}")
+@router.post("/api/clear_pending_images/{client_id}", dependencies=[Depends(require_auth)])
 async def clear_pending_images(client_id: str, request: Request):
-    if not auth_ok(request):
-        raise HTTPException(status_code=401, detail="Invalid API key")
     listener = request.app.state.comfy_listener
     count = len(listener._pending.get(client_id, []))
     listener._pending.pop(client_id, None)
@@ -118,7 +98,7 @@ async def clear_pending_images(client_id: str, request: Request):
 
 
 @router.get("/api/health")
-async def health(request: Request):
+async def health():
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             r = await client.get(f"http://{settings.comfyui_host}/system_stats")

@@ -1,13 +1,14 @@
 import logging
 
-from fastapi import Request, WebSocket
+from fastapi import HTTPException, Request, WebSocket
 
 from core.config import settings
 
 logger = logging.getLogger(__name__)
 
 _LOCAL_PREFIXES = ("127.", "192.168.", "10.")
-_172_RANGE = (16, 31)
+_172_OCTET_MIN = 16
+_172_OCTET_MAX = 31
 
 
 def is_local_ip(ip: str) -> bool:
@@ -16,7 +17,7 @@ def is_local_ip(ip: str) -> bool:
     if ip.startswith("172."):
         try:
             second = int(ip.split(".")[1])
-            return _172_RANGE[0] <= second <= _172_RANGE[1]
+            return _172_OCTET_MIN <= second <= _172_OCTET_MAX
         except (ValueError, IndexError):
             pass
     return False
@@ -31,6 +32,12 @@ def auth_ok(request: Request) -> bool:
         return True
     key = request.headers.get("X-API-Key") or request.query_params.get("api_key", "")
     return key == settings.api_key
+
+
+def require_auth(request: Request) -> None:
+    """FastAPI dependency — raises 401 when auth_ok() returns False."""
+    if not auth_ok(request):
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
 
 def ws_auth_ok(websocket: WebSocket) -> bool:

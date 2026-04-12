@@ -55,6 +55,11 @@ app.include_router(images.router)
 app.include_router(titler.router)
 
 # ── Static frontends ──────────────────────────────────────────────────────────
+# Shared assets (CSS / JS) must be mounted before tool and root catch-alls
+_shared = Path(__file__).parent / "frontends" / "shared"
+if _shared.exists():
+    app.mount("/shared", StaticFiles(directory=str(_shared)), name="shared")
+
 # Tools must be mounted before the root catch-all
 _z_image = Path(__file__).parent / "frontends" / "tools" / "z-image"
 if _z_image.exists():

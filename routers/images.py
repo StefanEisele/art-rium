@@ -6,18 +6,18 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.auth import auth_ok
+from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
 from core.models import Image
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/images")
+router = APIRouter(prefix="/api/images", dependencies=[Depends(require_auth)])
 
 
 class ImageUpdate(BaseModel):
@@ -29,7 +29,6 @@ class ImageUpdate(BaseModel):
 
 @router.get("")
 async def list_images(
-    request: Request,
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
     tag: Optional[str] = None,
@@ -38,9 +37,6 @@ async def list_images(
     rating_min: Optional[int] = Query(None, ge=1, le=5),
     db: AsyncSession = Depends(get_db),
 ):
-    if not auth_ok(request):
-        raise HTTPException(status_code=401, detail="Invalid API key")
-
     stmt = select(Image).order_by(desc(Image.created_at)).offset(offset).limit(limit)
     if tag:
         stmt = stmt.where(Image.tags.contains([tag]))
@@ -57,9 +53,7 @@ async def list_images(
 
 
 @router.get("/{image_id}")
-async def get_image_meta(image_id: uuid.UUID, request: Request, db: AsyncSession = Depends(get_db)):
-    if not auth_ok(request):
-        raise HTTPException(status_code=401, detail="Invalid API key")
+async def get_image_meta(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     img = await db.get(Image, image_id)
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
@@ -70,11 +64,8 @@ async def get_image_meta(image_id: uuid.UUID, request: Request, db: AsyncSession
 async def update_image(
     image_id: uuid.UUID,
     body: ImageUpdate,
-    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    if not auth_ok(request):
-        raise HTTPException(status_code=401, detail="Invalid API key")
     img = await db.get(Image, image_id)
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
@@ -95,11 +86,8 @@ async def update_image(
 @router.delete("/{image_id}", status_code=204)
 async def delete_image(
     image_id: uuid.UUID,
-    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    if not auth_ok(request):
-        raise HTTPException(status_code=401, detail="Invalid API key")
     img = await db.get(Image, image_id)
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")

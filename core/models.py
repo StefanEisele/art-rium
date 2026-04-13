@@ -55,6 +55,9 @@ class Image(Base):
     shop_listings: Mapped[list["ShopListing"]] = relationship(
         back_populates="image", cascade="all, delete-orphan"
     )
+    instagram_posts: Mapped[list["InstagramPost"]] = relationship(
+        back_populates="image", cascade="all, delete-orphan"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -107,3 +110,34 @@ class ShopListing(Base):
     )
 
     image: Mapped["Image"] = relationship(back_populates="shop_listings")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Instagram scheduled posts
+# ─────────────────────────────────────────────────────────────────────────────
+
+class InstagramPost(Base):
+    __tablename__ = "instagram_posts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    image_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("images.id"), nullable=False
+    )
+    caption: Mapped[str | None] = mapped_column(Text)
+    scheduled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="scheduled"
+    )                                                               # scheduled | posted | cancelled
+    instagram_media_id: Mapped[str | None] = mapped_column(String(128))  # filled after posting
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+    image: Mapped["Image"] = relationship(back_populates="instagram_posts")

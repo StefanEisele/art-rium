@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     image_share_token: str = ""
     instagram_graph_api_base: str = "https://graph.facebook.com/v18.0"
 
+    # ── Public URL (needed for Instagram to fetch images) ────────────────────
+    public_base_url: str = ""  # e.g. https://xyz.trycloudflare.com
+
     @property
     def images_dir(self) -> Path:
         return self.storage_dir / "images"

@@ -48,11 +48,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="art-rium", lifespan=lifespan)
 
 # ── Routers ──────────────────────────────────────────────────────────────────
-from routers import generate, images, titler  # noqa: E402  (after app is created)
+from routers import generate, images, titler, instagram  # noqa: E402  (after app is created)
 
 app.include_router(generate.router)
 app.include_router(images.router)
 app.include_router(titler.router)
+app.include_router(instagram.router)
 
 # ── Static frontends ──────────────────────────────────────────────────────────
 # Shared assets (CSS / JS) must be mounted before tool and root catch-alls
@@ -72,6 +73,10 @@ if _gallery.exists():
 _titler = Path(__file__).parent / "frontends" / "tools" / "titler"
 if _titler.exists():
     app.mount("/tools/titler", StaticFiles(directory=str(_titler), html=True), name="titler")
+
+_instagram = Path(__file__).parent / "frontends" / "tools" / "instagram"
+if _instagram.exists():
+    app.mount("/tools/instagram", StaticFiles(directory=str(_instagram), html=True), name="instagram")
 
 _dashboard = Path(__file__).parent / "frontends" / "dashboard"
 if _dashboard.exists():

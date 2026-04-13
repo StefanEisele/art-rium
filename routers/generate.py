@@ -83,6 +83,20 @@ async def generate(req: GenerateRequest, request: Request):
     return {"batch_id": batch_id, "prompt_ids": prompt_ids, "batch_count": batch_count}
 
 
+@router.get("/share/image/{filename}")
+async def get_shared_image(filename: str, token: str = ""):
+    """Public image endpoint for external services (e.g. Instagram).
+    Protected by IMAGE_SHARE_TOKEN instead of the regular API key."""
+    if settings.image_share_token and token != settings.image_share_token:
+        raise HTTPException(status_code=403, detail="Invalid share token")
+    safe_name = Path(filename).name
+    for search_dir in [settings.images_dir, settings.comfyui_output_dir]:
+        for candidate in search_dir.rglob(safe_name):
+            if candidate.exists():
+                return FileResponse(candidate, media_type="image/png")
+    raise HTTPException(status_code=404, detail="Image not found")
+
+
 @router.get("/api/image/{filename}", dependencies=[Depends(require_auth)])
 async def get_image(filename: str):
     safe_name = Path(filename).name

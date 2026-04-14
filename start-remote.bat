@@ -46,30 +46,6 @@ if "%HAS_KEY%"=="0" (
     echo.
 )
 
-:: ── Find cloudflared exe (current folder or PATH) ────────────────────────────
-set CF=
-
-if exist "%~dp0cloudflared.exe"                    set CF=%~dp0cloudflared.exe
-if not defined CF if exist "%~dp0cloudflared-windows-386.exe"    set CF=%~dp0cloudflared-windows-386.exe
-if not defined CF if exist "%~dp0cloudflared-windows-amd64.exe"  set CF=%~dp0cloudflared-windows-amd64.exe
-if not defined CF if exist "%~dp0cloudflared-windows-arm64.exe"  set CF=%~dp0cloudflared-windows-arm64.exe
-
-:: Fall back to PATH
-if not defined CF (
-    for /f "delims=" %%p in ('where cloudflared 2^>nul') do if not defined CF set CF=%%p
-)
-
-if not defined CF (
-    echo.
-    echo  cloudflared not found.
-    echo  Download it from: https://github.com/cloudflare/cloudflared/releases
-    echo  Save any cloudflared .exe into this folder and re-run.
-    echo.
-    pause & exit /b 1
-)
-
-echo  Using: %CF%
-
 echo.
 echo  =====================================
 echo   art-rium  ^|  Remote Access
@@ -115,14 +91,9 @@ echo  Still waiting ^(%TRIES%/15^)...
 goto wait_loop
 :server_ready
 
-echo  Starting cloudflared tunnel...
-echo  The public HTTPS URL will appear below once ready.
+echo  Cloudflare tunnel: https://art-rium.stefaneisele.com
+echo  (cloudflared runs as a Windows service — always on)
 echo.
-echo  NOTE: Free quick tunnels give a NEW URL each time you restart.
-echo  For a permanent URL, set up a named tunnel at dash.cloudflare.com.
-echo.
-echo  Tunnel URL (copy this to your phone):
-echo.
-"%CF%" tunnel --url http://127.0.0.1:%PORT%
+pause
 
 pause

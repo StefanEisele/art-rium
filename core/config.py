@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     # ── Public URL (needed for Instagram to fetch images) ────────────────────
     public_base_url: str = ""  # e.g. https://xyz.trycloudflare.com
 
+    # ── ffmpeg (needed for Reel video generation) ─────────────────────────────
+    ffmpeg_path: str = "ffmpeg"  # override if ffmpeg is not on PATH
+
     @property
     def images_dir(self) -> Path:
         return self.storage_dir / "images"
@@ -42,6 +45,10 @@ class Settings(BaseSettings):
     @property
     def shop_prep_dir(self) -> Path:
         return self.storage_dir / "shop_prep"
+
+    @property
+    def reels_dir(self) -> Path:
+        return self.storage_dir / "reels"
 
 
 settings = Settings()

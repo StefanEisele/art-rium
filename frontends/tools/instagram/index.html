@@ -78,20 +78,40 @@
     .post-row:last-child { border-bottom: none; }
     .post-row:active { background: var(--surface2); border-radius: 10px; margin: 0 -8px; padding-left: 8px; padding-right: 8px; }
 
-    .post-thumb {
+    /* Thumbnail stack for timeline */
+    .thumb-stack {
+      position: relative;
+      width: 60px; height: 60px;
+      flex-shrink: 0;
+    }
+    .thumb-stack img, .thumb-stack .thumb-placeholder {
+      position: absolute;
       width: 60px; height: 60px;
       border-radius: 8px;
       object-fit: cover;
       background: var(--surface2);
-      flex-shrink: 0;
     }
-    .post-thumb-placeholder {
-      width: 60px; height: 60px;
-      border-radius: 8px;
-      background: var(--surface2);
-      flex-shrink: 0;
+    .thumb-stack .thumb-back {
+      top: -4px; left: 4px;
+      opacity: 0.5;
+      border-radius: 6px;
+    }
+    .thumb-stack .thumb-front {
+      top: 0; left: 0;
+    }
+    .thumb-placeholder {
       display: flex; align-items: center; justify-content: center;
       font-size: 22px;
+    }
+    .carousel-count-badge {
+      position: absolute;
+      bottom: 4px; right: 4px;
+      background: rgba(0,0,0,0.7);
+      color: #fff;
+      font-size: 10px; font-weight: 700;
+      border-radius: 5px;
+      padding: 1px 5px;
+      line-height: 1.4;
     }
 
     .post-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
@@ -112,6 +132,20 @@
     .status-scheduled { background: rgba(10,132,255,0.15); color: var(--accent); }
     .status-posted    { background: rgba(50,215,75,0.15);  color: var(--green); }
     .status-cancelled { background: var(--surface2); color: var(--text-dim); }
+    .status-failed    { background: rgba(255,69,58,0.15); color: var(--red); }
+
+    /* Companion post badges (story / reel) */
+    .companion-row {
+      display: flex; gap: 5px; flex-wrap: wrap; margin-top: 2px;
+    }
+    .companion-badge {
+      font-size: 10px; font-weight: 600;
+      padding: 1px 6px; border-radius: 4px;
+      display: inline-flex; align-items: center; gap: 3px;
+    }
+    .companion-pending  { background: var(--surface2); color: var(--text-dim); }
+    .companion-posted   { background: rgba(50,215,75,0.12); color: var(--green); }
+    .companion-failed   { background: rgba(255,69,58,0.12); color: var(--red); }
 
     /* ─────────────────────────────────────────────
        NEW POST PANEL
@@ -137,39 +171,71 @@
       font-size: 15px; font-weight: 700;
     }
 
-    /* Image picker area */
-    .image-pick-area {
+    /* Selected images strip */
+    .selected-images-strip {
       display: flex;
-      gap: 12px;
-      align-items: flex-start;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: none;
+      min-height: 72px;
     }
+    .selected-images-strip::-webkit-scrollbar { display: none; }
 
-    .picked-thumb {
+    .sel-img-wrap {
+      position: relative;
+      flex-shrink: 0;
+      width: 72px; height: 72px;
+    }
+    .sel-img-wrap img {
       width: 72px; height: 72px;
       border-radius: 10px;
       object-fit: cover;
-      background: var(--surface2);
-      flex-shrink: 0;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 26px;
-      cursor: pointer;
-      border: 1.5px dashed var(--border);
-      transition: border-color 0.15s;
+      display: block;
     }
-    .picked-thumb.has-image { border-style: solid; border-color: var(--border); cursor: default; }
-    .picked-thumb img { width: 100%; height: 100%; object-fit: cover; border-radius: 9px; }
-
-    .pick-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; justify-content: center; }
-    .pick-title { font-size: 13px; color: var(--text); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .pick-btn {
-      align-self: flex-start;
-      padding: 7px 14px; border-radius: 8px;
-      border: 1.5px solid var(--border); background: var(--surface2);
-      color: var(--text); font-size: 13px; font-weight: 600;
-      cursor: pointer; font-family: inherit;
+    .sel-img-remove {
+      position: absolute;
+      top: -6px; right: -6px;
+      width: 20px; height: 20px;
+      border-radius: 50%;
+      background: var(--red);
+      color: #fff;
+      border: none;
+      font-size: 13px; font-weight: 700;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      line-height: 1;
       -webkit-tap-highlight-color: transparent;
     }
-    .pick-btn:active { background: var(--surface); }
+    .sel-img-order {
+      position: absolute;
+      bottom: 4px; left: 4px;
+      background: rgba(0,0,0,0.65);
+      color: #fff;
+      font-size: 10px; font-weight: 700;
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+
+    .add-image-btn {
+      flex-shrink: 0;
+      width: 72px; height: 72px;
+      border-radius: 10px;
+      border: 1.5px dashed var(--border);
+      background: var(--surface2);
+      color: var(--text-dim);
+      font-size: 26px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+      transition: border-color 0.15s;
+    }
+    .add-image-btn:active { border-color: var(--accent); }
+
+    .images-hint {
+      font-size: 12px; color: var(--text-dim);
+    }
 
     /* Caption */
     textarea#caption-input {
@@ -239,6 +305,22 @@
       flex-shrink: 0;
     }
     .picker-header h2 { font-size: 17px; font-weight: 700; flex: 1; }
+    .picker-done-btn {
+      background: var(--accent); border: none;
+      color: #000; font-size: 14px; font-weight: 700;
+      padding: 7px 16px; border-radius: 8px;
+      cursor: pointer; font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .picker-count-badge {
+      background: var(--accent);
+      color: #000;
+      font-size: 12px; font-weight: 700;
+      border-radius: 10px;
+      padding: 2px 8px;
+      display: none;
+    }
+    .picker-count-badge.show { display: inline-block; }
 
     .picker-search {
       padding: 10px 16px;
@@ -266,7 +348,7 @@
     .picker-cell {
       position: relative;
       height: 0;
-      padding-bottom: 100%;   /* forces square based on column width */
+      padding-bottom: 100%;
       cursor: pointer;
       overflow: hidden;
       border-radius: 4px;
@@ -281,6 +363,28 @@
       transition: opacity 0.15s;
     }
     .picker-cell:active img { opacity: 0.7; }
+
+    /* Selection overlay on picker cell */
+    .picker-cell .sel-overlay {
+      position: absolute; inset: 0;
+      background: rgba(10,132,255,0.35);
+      display: none; align-items: center; justify-content: center;
+      font-size: 28px; color: #fff;
+    }
+    .picker-cell.selected .sel-overlay { display: flex; }
+    .picker-cell.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
+
+    .picker-cell .order-badge {
+      position: absolute;
+      top: 5px; left: 5px;
+      background: var(--accent);
+      color: #000;
+      font-size: 11px; font-weight: 700;
+      border-radius: 50%;
+      width: 20px; height: 20px;
+      display: none; align-items: center; justify-content: center;
+    }
+    .picker-cell.selected .order-badge { display: flex; }
 
     /* ─────────────────────────────────────────────
        POST DETAIL MODAL (edit/delete)
@@ -299,18 +403,26 @@
       border-radius: 20px 20px 0 0;
       padding: 20px 20px calc(env(safe-area-inset-bottom) + 24px);
       display: flex; flex-direction: column; gap: 14px;
+      max-height: 85dvh;
+      overflow-y: auto;
     }
 
     .detail-sheet h2 { font-size: 16px; font-weight: 700; }
 
-    .detail-thumb-row {
-      display: flex; gap: 14px; align-items: flex-start;
+    /* Carousel thumbnail strip in detail modal */
+    .detail-thumb-strip {
+      display: flex; gap: 8px; overflow-x: auto;
+      scrollbar-width: none; -webkit-overflow-scrolling: touch;
     }
-    .detail-thumb {
-      width: 80px; height: 80px; border-radius: 10px; object-fit: cover;
+    .detail-thumb-strip::-webkit-scrollbar { display: none; }
+
+    .detail-thumb-strip img {
+      width: 72px; height: 72px;
+      border-radius: 10px; object-fit: cover;
       flex-shrink: 0; background: var(--surface2);
     }
-    .detail-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+
+    .detail-meta { display: flex; flex-direction: column; gap: 4px; }
     .detail-meta .detail-date { font-size: 14px; font-weight: 600; }
     .detail-meta .detail-title { font-size: 13px; color: var(--text-dim); }
 
@@ -374,16 +486,12 @@
     <div class="new-post-card">
       <h2>Schedule a Post</h2>
 
-      <!-- Image picker -->
-      <div class="image-pick-area">
-        <div class="picked-thumb" id="picked-thumb-wrap" onclick="openPicker()">
-          <span id="picked-thumb-icon">📷</span>
-          <img id="picked-thumb-img" src="" alt="" style="display:none">
+      <!-- Selected images strip -->
+      <div>
+        <div class="selected-images-strip" id="selected-images-strip">
+          <button class="add-image-btn" id="add-image-btn" onclick="openPicker()">+</button>
         </div>
-        <div class="pick-meta">
-          <div class="pick-title" id="pick-title-text">No image selected</div>
-          <button class="pick-btn" onclick="openPicker()">Choose from Gallery</button>
-        </div>
+        <div class="images-hint" id="images-hint">Tap + to add images. Add multiple for a carousel (up to 10).</div>
       </div>
 
       <!-- Caption -->
@@ -409,7 +517,9 @@
 <div id="picker-modal">
   <div class="picker-header">
     <button class="back-btn" onclick="closePicker()">✕</button>
-    <h2>Choose Image</h2>
+    <h2>Choose Images</h2>
+    <span class="picker-count-badge" id="picker-count-badge">0</span>
+    <button class="picker-done-btn" onclick="closePicker()">Done</button>
   </div>
   <div class="picker-search">
     <input type="search" id="picker-search-input" placeholder="Search by prompt or title…"
@@ -423,13 +533,13 @@
   <div class="detail-sheet" onclick="event.stopPropagation()">
     <h2>Edit Scheduled Post</h2>
 
-    <div class="detail-thumb-row">
-      <img class="detail-thumb" id="detail-thumb" src="" alt="">
-      <div class="detail-meta">
-        <div class="detail-date" id="detail-date"></div>
-        <div class="detail-title" id="detail-title-text"></div>
-        <div id="detail-status-badge"></div>
-      </div>
+    <!-- Thumbnail strip (single or carousel) -->
+    <div class="detail-thumb-strip" id="detail-thumb-strip"></div>
+
+    <div class="detail-meta">
+      <div class="detail-date" id="detail-date"></div>
+      <div class="detail-title" id="detail-title-text"></div>
+      <div id="detail-status-badge"></div>
     </div>
 
     <textarea id="detail-caption" placeholder="Caption…" rows="3"></textarea>
@@ -443,6 +553,9 @@
       <button class="detail-btn cancel-post" onclick="cancelPost()">Cancel</button>
       <button class="detail-btn delete" onclick="deletePost()">Delete</button>
     </div>
+    <div class="detail-actions" id="detail-retry-row" style="display:none">
+      <button class="detail-btn save" id="detail-retry-btn" onclick="retryPost()" style="display:none">Retry (reschedule)</button>
+    </div>
   </div>
 </div>
 
@@ -453,7 +566,8 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
   apiKey:     ArtRium.getApiKey(),
-  pickedImage: null,    // {id, filename, title, thumb_url}
+  // Selected images for new post — ordered array of {id, filename, title, thumb_url}
+  selectedImages: [],
   lastPostDate: null,   // ISO string or null
   posts: [],            // array of post objects from API
   activePost: null,     // post being edited in detail modal
@@ -462,9 +576,12 @@ const state = {
   pickerPage: 0,
   pickerLoading: false,
   pickerDone: false,
+  // Map of image_id → order (1-based) for currently-open picker session
+  pickerSelection: new Map(),  // id -> order
 };
 
 const PICKER_LIMIT = 30;
+const MAX_CAROUSEL = 10;
 
 // ── API helpers ───────────────────────────────────────────────────────────────
 const api      = (url, opts = {}) => ArtRium.apiFetch(url, opts, state.apiKey);
@@ -484,8 +601,9 @@ const fmtMonth = (iso) => {
   return d.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 };
 
-const statusLabel = (s) => ({ scheduled: 'Scheduled', posted: 'Posted', cancelled: 'Cancelled' }[s] || s);
+const statusLabel = (s) => ({ scheduled: 'Scheduled', posted: 'Posted', cancelled: 'Cancelled', failed: 'Failed' }[s] || s);
 const statusClass = (s) => `status-badge status-${s}`;
+const _companionIcon = (s) => s === 'posted' ? '✓' : s === 'failed' ? '✕' : '…';
 
 // ── Timeline rendering ────────────────────────────────────────────────────────
 function renderTimeline() {
@@ -514,15 +632,47 @@ function renderTimeline() {
       row.className = 'post-row';
       row.onclick = () => openDetail(p);
 
-      const thumbHTML = p.image?.thumb_url
-        ? `<img class="post-thumb" src="${withAuth(p.image.thumb_url)}" alt="">`
-        : `<div class="post-thumb-placeholder">🖼</div>`;
+      // Build thumbnail stack
+      const imgs = p.carousel_images || [];
+      const isCarousel = p.is_carousel && imgs.length > 1;
+      let thumbHTML;
+      if (isCarousel) {
+        const front = imgs[0];
+        const back  = imgs[1];
+        thumbHTML = `
+          <div class="thumb-stack">
+            <img class="thumb-back" src="${withAuth(back.thumb_url)}" alt="">
+            <img class="thumb-front" src="${withAuth(front.thumb_url)}" alt="">
+            <span class="carousel-count-badge">${imgs.length}</span>
+          </div>`;
+      } else if (imgs.length === 1) {
+        thumbHTML = `<div class="thumb-stack"><img class="thumb-front" src="${withAuth(imgs[0].thumb_url)}" alt=""></div>`;
+      } else {
+        thumbHTML = `<div class="thumb-stack"><div class="thumb-front thumb-placeholder">🖼</div></div>`;
+      }
 
       const captionPreview = p.caption
         ? p.caption.replace(/\n/g, ' ')
         : '<em>No caption</em>';
-
       const titleText = p.image?.title || p.image?.filename || '';
+
+      // Companion badges (story + reel) — only shown once feed post is live
+      let companionHTML = '';
+      if (p.status === 'posted') {
+        const storyClass = p.story_status === 'posted' ? 'companion-posted'
+                         : p.story_status === 'failed' ? 'companion-failed'
+                         : p.story_status === 'pending' ? 'companion-pending' : '';
+        const reelClass  = p.reel_status  === 'posted' ? 'companion-posted'
+                         : p.reel_status  === 'failed' ? 'companion-failed'
+                         : p.reel_status  === 'pending' ? 'companion-pending' : '';
+        const storyBadge = storyClass
+          ? `<span class="companion-badge ${storyClass}">Story ${_companionIcon(p.story_status)}</span>` : '';
+        const reelBadge  = reelClass
+          ? `<span class="companion-badge ${reelClass}">Reel ${_companionIcon(p.reel_status)}</span>`  : '';
+        if (storyBadge || reelBadge) {
+          companionHTML = `<div class="companion-row">${storyBadge}${reelBadge}</div>`;
+        }
+      }
 
       row.innerHTML = `
         ${thumbHTML}
@@ -531,8 +681,9 @@ function renderTimeline() {
             ${fmtDate(p.scheduled_at)}
             <span class="${statusClass(p.status)}">${statusLabel(p.status)}</span>
           </div>
-          ${titleText ? `<div class="post-title">${titleText}</div>` : ''}
+          ${titleText ? `<div class="post-title">${isCarousel ? '📸 ' : ''}${titleText}</div>` : ''}
           <div class="post-caption">${captionPreview}</div>
+          ${companionHTML}
         </div>
       `;
       grp.appendChild(row);
@@ -569,32 +720,82 @@ function updateComputedDate() {
   if (state.lastPostDate) {
     base = new Date(state.lastPostDate);
   } else {
-    base = new Date(); // right now if no post exists yet
-    base.setHours(9, 0, 0, 0); // default to 9am
+    base = new Date();
+    base.setHours(9, 0, 0, 0);
   }
 
   const target = new Date(base.getTime() + offsetDays * 86400000);
-  const line = $('computed-date-line');
   const label = state.lastPostDate ? 'Last post' : 'No posts yet — starts';
-  line.innerHTML = `${label}: will post on <strong>${fmtDate(target.toISOString())}</strong>`;
-
-  // Store computed date for submission
+  $('computed-date-line').innerHTML = `${label}: will post on <strong>${fmtDate(target.toISOString())}</strong>`;
   state.computedDate = target.toISOString();
   updateScheduleBtn();
 }
 
 function updateScheduleBtn() {
-  $('schedule-btn').disabled = !state.pickedImage;
+  $('schedule-btn').disabled = state.selectedImages.length === 0;
+}
+
+// ── Selected images strip (new post form) ─────────────────────────────────────
+function renderSelectedStrip() {
+  const strip = $('selected-images-strip');
+  // Remove all sel-img-wrap elements
+  strip.querySelectorAll('.sel-img-wrap').forEach(el => el.remove());
+
+  const addBtn = $('add-image-btn');
+
+  state.selectedImages.forEach((img, idx) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'sel-img-wrap';
+    wrap.innerHTML = `
+      <img src="${withAuth(img.thumb_url)}" alt="">
+      <span class="sel-img-order">${idx + 1}</span>
+      <button class="sel-img-remove" onclick="removeSelectedImage(${idx})">×</button>
+    `;
+    strip.insertBefore(wrap, addBtn);
+  });
+
+  // Hide add button if at max
+  addBtn.style.display = state.selectedImages.length >= MAX_CAROUSEL ? 'none' : '';
+
+  // Update hint
+  const n = state.selectedImages.length;
+  $('images-hint').textContent = n === 0
+    ? 'Tap + to add images. Add multiple for a carousel (up to 10).'
+    : n === 1
+      ? '1 image selected. Add more for a carousel.'
+      : `${n} images — carousel post.`;
+
+  updateScheduleBtn();
+}
+
+function removeSelectedImage(idx) {
+  state.selectedImages.splice(idx, 1);
+  renderSelectedStrip();
 }
 
 // ── Image picker ──────────────────────────────────────────────────────────────
 function openPicker() {
+  // Seed picker selection from current selectedImages
+  state.pickerSelection = new Map(state.selectedImages.map((img, i) => [img.id, i + 1]));
   $('picker-modal').classList.add('show');
   if (!state.pickerImages.length) loadPickerImages(true);
+  else refreshPickerCellSelections();
+  updatePickerBadge();
 }
 
 function closePicker() {
   $('picker-modal').classList.remove('show');
+  // Sync pickerSelection → selectedImages (preserving order)
+  // Build ordered array from pickerSelection
+  const ordered = [...state.pickerSelection.entries()]
+    .sort((a, b) => a[1] - b[1])
+    .map(([id]) => state.pickerImages.find(img => img.id === id))
+    .filter(Boolean);
+  // Preserve any previously-selected images not in current grid
+  const inGrid = new Set(state.pickerImages.map(i => i.id));
+  const preserved = state.selectedImages.filter(img => !inGrid.has(img.id));
+  state.selectedImages = [...ordered, ...preserved];
+  renderSelectedStrip();
 }
 
 async function loadPickerImages(reset = false) {
@@ -632,32 +833,54 @@ function appendPickerCells(imgs) {
   for (const img of imgs) {
     const cell = document.createElement('div');
     cell.className = 'picker-cell';
-    cell.innerHTML = `<img src="${withAuth(img.thumb_url)}" alt="">`;
-    cell.onclick = () => pickImage(img);
+    cell.dataset.id = img.id;
+    const order = state.pickerSelection.get(img.id);
+    if (order !== undefined) cell.classList.add('selected');
+    cell.innerHTML = `
+      <img src="${withAuth(img.thumb_url)}" alt="">
+      <div class="sel-overlay">✓</div>
+      <div class="order-badge">${order || ''}</div>
+    `;
+    cell.onclick = () => togglePickerCell(cell, img);
     grid.appendChild(cell);
   }
 }
 
-function pickImage(img) {
-  state.pickedImage = img;
-  closePicker();
-
-  // Update UI
-  const wrap = $('picked-thumb-wrap');
-  const icon = $('picked-thumb-icon');
-  const thumbImg = $('picked-thumb-img');
-  icon.style.display = 'none';
-  thumbImg.src = withAuth(img.thumb_url);
-  thumbImg.style.display = 'block';
-  wrap.classList.add('has-image');
-  $('pick-title-text').textContent = img.title || img.filename || 'Untitled';
-
-  // Pre-fill caption from title if empty
-  if (!$('caption-input').value && img.title) {
-    $('caption-input').value = img.title;
+function togglePickerCell(cell, img) {
+  if (state.pickerSelection.has(img.id)) {
+    // Deselect
+    const removedOrder = state.pickerSelection.get(img.id);
+    state.pickerSelection.delete(img.id);
+    // Re-number remaining
+    const sorted = [...state.pickerSelection.entries()].sort((a, b) => a[1] - b[1]);
+    state.pickerSelection = new Map(sorted.map(([id], i) => [id, i + 1]));
+  } else {
+    // Select (if under limit)
+    if (state.pickerSelection.size >= MAX_CAROUSEL) {
+      ArtRium.toast(`Maximum ${MAX_CAROUSEL} images per post`, true);
+      return;
+    }
+    state.pickerSelection.set(img.id, state.pickerSelection.size + 1);
   }
+  refreshPickerCellSelections();
+  updatePickerBadge();
+}
 
-  updateScheduleBtn();
+function refreshPickerCellSelections() {
+  $('picker-grid').querySelectorAll('.picker-cell').forEach(cell => {
+    const id = cell.dataset.id;
+    const order = state.pickerSelection.get(id);
+    cell.classList.toggle('selected', order !== undefined);
+    const badge = cell.querySelector('.order-badge');
+    if (badge) badge.textContent = order !== undefined ? order : '';
+  });
+}
+
+function updatePickerBadge() {
+  const n = state.pickerSelection.size;
+  const badge = $('picker-count-badge');
+  badge.textContent = n;
+  badge.classList.toggle('show', n > 0);
 }
 
 // Picker search (debounced)
@@ -678,34 +901,36 @@ $('picker-grid').addEventListener('scroll', () => {
 
 // ── Schedule new post ─────────────────────────────────────────────────────────
 async function schedulePost() {
-  if (!state.pickedImage) return;
+  if (state.selectedImages.length === 0) return;
   const btn = $('schedule-btn');
   btn.disabled = true;
   btn.textContent = 'Scheduling…';
 
+  const [primary, ...rest] = state.selectedImages;
+
   try {
     const body = {
-      image_id: state.pickedImage.id,
-      caption: $('caption-input').value.trim() || null,
-      scheduled_at: state.computedDate,
+      image_id:           primary.id,
+      carousel_image_ids: rest.length > 0 ? rest.map(img => img.id) : null,
+      caption:            $('caption-input').value.trim() || null,
+      scheduled_at:       state.computedDate,
     };
     await api('/api/instagram/posts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    ArtRium.toast('Post scheduled ✓');
+    ArtRium.toast(rest.length > 0 ? `Carousel (${state.selectedImages.length} images) scheduled ✓` : 'Post scheduled ✓');
 
     // Reset form
-    state.pickedImage = null;
-    $('picked-thumb-icon').style.display = '';
-    $('picked-thumb-img').style.display = 'none';
-    $('picked-thumb-img').src = '';
-    $('picked-thumb-wrap').classList.remove('has-image');
-    $('pick-title-text').textContent = 'No image selected';
+    state.selectedImages = [];
+    state.pickerImages = [];
+    state.pickerPage = 0;
+    state.pickerDone = false;
+    $('picker-grid').innerHTML = '';
     $('caption-input').value = '';
+    renderSelectedStrip();
 
-    // Reload both timeline and last-post date
     await loadTimeline();
     await loadLastPost();
   } catch (e) {
@@ -721,16 +946,34 @@ async function schedulePost() {
 function openDetail(post) {
   state.activePost = post;
 
-  $('detail-thumb').src = post.image?.thumb_url ? withAuth(post.image.thumb_url) : '';
+  // Build thumbnail strip
+  const strip = $('detail-thumb-strip');
+  strip.innerHTML = '';
+  const imgs = post.carousel_images || [];
+  if (imgs.length === 0 && post.image) {
+    imgs.push(post.image);
+  }
+  for (const img of imgs) {
+    const el = document.createElement('img');
+    el.src = withAuth(img.thumb_url);
+    el.alt = '';
+    strip.appendChild(el);
+  }
+
   $('detail-date').textContent = fmtDate(post.scheduled_at);
-  $('detail-title-text').textContent = post.image?.title || post.image?.filename || '';
+  const titleText = post.image?.title || post.image?.filename || '';
+  $('detail-title-text').textContent = post.is_carousel
+    ? `Carousel · ${imgs.length} images${titleText ? ' · ' + titleText : ''}`
+    : titleText;
   $('detail-status-badge').innerHTML = `<span class="${statusClass(post.status)}">${statusLabel(post.status)}</span>`;
   $('detail-caption').value = post.caption || '';
 
   const isPosted = post.status === 'posted';
-  // Hide post-now + mark-posted once already published
+  const isFailed = post.status === 'failed';
   $('detail-post-now').style.display    = isPosted ? 'none' : '';
   $('detail-mark-posted').style.display = isPosted ? 'none' : '';
+  $('detail-retry-row').style.display = isFailed ? '' : 'none';
+  $('detail-retry-btn').style.display = isFailed ? '' : 'none';
 
   $('detail-modal').classList.add('show');
 }
@@ -809,6 +1052,22 @@ async function cancelPost() {
   }
 }
 
+async function retryPost() {
+  if (!state.activePost) return;
+  try {
+    await api(`/api/instagram/posts/${state.activePost.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'scheduled' }),
+    });
+    ArtRium.toast('Re-queued — will post within 1 minute');
+    closeDetail();
+    await Promise.all([loadTimeline(), loadLastPost()]);
+  } catch (e) {
+    ArtRium.toast(e.message || 'Failed', true);
+  }
+}
+
 async function deletePost() {
   if (!state.activePost) return;
   try {
@@ -829,7 +1088,6 @@ window.addEventListener('load', async () => {
   dot.style.opacity = '1';
   ArtRium.setDot('connecting');
 
-  // Connect WS (for live dot status — no events needed for this tool)
   ArtRium.connectWs({
     clientId:       ArtRium.getClientId(),
     getApiKey:      () => state.apiKey,
@@ -839,6 +1097,7 @@ window.addEventListener('load', async () => {
     onDisconnected: () => ArtRium.setDot('disconnected'),
   });
 
+  renderSelectedStrip();
   await Promise.all([loadTimeline(), loadLastPost()]);
 });
 </script>

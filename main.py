@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from core.config import settings
 from workers.comfy_listener import ComfyListener
+from workers.instagram_scheduler import InstagramScheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -33,16 +34,22 @@ async def lifespan(app: FastAPI):
 
     # Start ComfyUI WebSocket listener
     listener = ComfyListener(app.state)
-    task = asyncio.create_task(listener.run())
+    comfy_task = asyncio.create_task(listener.run())
     app.state.comfy_listener = listener
+
+    # Start Instagram auto-poster
+    scheduler = InstagramScheduler()
+    scheduler_task = asyncio.create_task(scheduler.run())
 
     yield
 
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
+    comfy_task.cancel()
+    scheduler_task.cancel()
+    for t in (comfy_task, scheduler_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="art-rium", lifespan=lifespan)

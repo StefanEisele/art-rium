@@ -372,7 +372,19 @@
       font-size: 10px; font-weight: 700;
       color: var(--text-dim); text-transform: uppercase;
       letter-spacing: 0.7px; margin-bottom: 6px;
+      display: flex; align-items: center; justify-content: space-between;
     }
+
+    .copy-prompt-btn {
+      background: none; border: none;
+      color: var(--text-dim); font-size: 13px;
+      cursor: pointer; padding: 0;
+      -webkit-tap-highlight-color: transparent;
+      transition: color 0.15s;
+      text-transform: none; letter-spacing: 0;
+      font-weight: 400;
+    }
+    .copy-prompt-btn:active { color: var(--accent); }
 
     .prompt-text {
       font-size: 13px; line-height: 1.55;
@@ -555,7 +567,10 @@
 
     <!-- Prompt -->
     <div class="prompt-block" id="prompt-block" style="display:none">
-      <div class="prompt-label">Prompt</div>
+      <div class="prompt-label">
+        <span>Prompt</span>
+        <button class="copy-prompt-btn" onclick="copyPrompt()" title="Copy prompt">Copy</button>
+      </div>
       <div class="prompt-text" id="modal-prompt"></div>
       <button class="expand-btn" id="expand-btn" onclick="togglePrompt()">Show more</button>
     </div>
@@ -1027,6 +1042,22 @@ const togglePrompt = () => {
   const btn = $('expand-btn');
   el.classList.toggle('expanded');
   btn.textContent = el.classList.contains('expanded') ? 'Show less' : 'Show more';
+};
+
+// ── Copy prompt ──
+const copyPrompt = async () => {
+  const text = state.modal.image?.prompt;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    const btn = document.querySelector('.copy-prompt-btn');
+    const prev = btn.textContent;
+    btn.textContent = 'Copied!';
+    btn.style.color = 'var(--accent)';
+    setTimeout(() => { btn.textContent = prev; btn.style.color = ''; }, 1500);
+  } catch {
+    ArtRium.toast('Could not copy to clipboard', true);
+  }
 };
 
 // ── Save ──

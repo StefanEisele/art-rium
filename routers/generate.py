@@ -28,12 +28,24 @@ _TEMPLATE = json.loads(
 )
 
 
-def _build_workflow(prompt: str, seed: int, width: int, height: int) -> dict:
+_ALLOWED_LORAS = {
+    "rustorangeanddimblue_lora_copy.safetensors",
+    "art_vision_ZIG.safetensors",
+    "zImageT_zidiusArt_melancholy.safetensors",
+}
+
+
+def _build_workflow(
+    prompt: str, seed: int, width: int, height: int,
+    lora_name: str, lora_strength: float,
+) -> dict:
     wf = copy.deepcopy(_TEMPLATE)
     wf["45"]["inputs"]["text"] = prompt
     wf["44"]["inputs"]["seed"] = seed if seed >= 0 else random.randint(0, 2**32 - 1)
     wf["41"]["inputs"]["width"] = width
     wf["41"]["inputs"]["height"] = height
+    wf["51"]["inputs"]["lora_name"] = lora_name
+    wf["51"]["inputs"]["strength_model"] = round(max(0.0, min(1.0, lora_strength)), 3)
     return wf
 
 
@@ -44,12 +56,16 @@ class GenerateRequest(BaseModel):
     height: int = 1024
     client_id: str
     batch_count: int = 1
+    lora_name: str = "rustorangeanddimblue_lora_copy.safetensors"
+    lora_strength: float = 0.5
 
 
 @router.post("/api/generate", dependencies=[Depends(require_auth)])
 async def generate(req: GenerateRequest, request: Request):
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt is required")
+    if req.lora_name not in _ALLOWED_LORAS:
+        raise HTTPException(status_code=400, detail=f"Unknown LoRA: {req.lora_name}")
 
     listener = request.app.state.comfy_listener
     batch_count = max(1, min(10, req.batch_count))
@@ -58,7 +74,7 @@ async def generate(req: GenerateRequest, request: Request):
 
     for i in range(batch_count):
         seed = (req.seed + i) if req.seed >= 0 else random.randint(0, 2**32 - 1)
-        workflow = _build_workflow(req.prompt, seed, req.width, req.height)
+        workflow = _build_workflow(req.prompt, seed, req.width, req.height, req.lora_name, req.lora_strength)
 
         result = await post_prompt(workflow, listener.client_id)
 
@@ -95,6 +111,19 @@ async def get_shared_image(filename: str, token: str = ""):
             if candidate.exists():
                 return FileResponse(candidate, media_type="image/png")
     raise HTTPException(status_code=404, detail="Image not found")
+
+
+@router.get("/share/reel/{filename}")
+async def get_shared_reel(filename: str, token: str = ""):
+    """Public video endpoint for Reel uploads to Instagram Graph API.
+    Protected by IMAGE_SHARE_TOKEN (same token as images)."""
+    if settings.image_share_token and token != settings.image_share_token:
+        raise HTTPException(status_code=403, detail="Invalid share token")
+    safe_name = Path(filename).name
+    candidate = settings.reels_dir / safe_name
+    if candidate.exists():
+        return FileResponse(candidate, media_type="video/mp4")
+    raise HTTPException(status_code=404, detail="Reel not found")
 
 
 @router.get("/api/image/{filename}", dependencies=[Depends(require_auth)])

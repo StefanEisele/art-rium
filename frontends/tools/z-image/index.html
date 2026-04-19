@@ -113,6 +113,70 @@
     .size-btn.active { background: var(--accent); border-color: var(--accent); color: #000; }
     .size-btn.active strong { color: #000; }
 
+    /* ── LoRA picker ── */
+    .lora-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+
+    .lora-btn {
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 10px; color: var(--text-dim);
+      font-size: 13px; font-weight: 600; padding: 10px 8px;
+      cursor: pointer; text-align: center;
+      transition: all 0.15s; font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
+      line-height: 1.3;
+    }
+    .lora-btn small { display: block; font-size: 10px; font-weight: 400; margin-top: 2px; opacity: 0.7; }
+    .lora-btn.active { background: var(--accent); border-color: var(--accent); color: #000; }
+    .lora-btn.active small { opacity: 0.7; }
+
+    /* ── Strength slider ── */
+    .strength-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    input[type="range"] {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--border);
+      outline: none;
+      cursor: pointer;
+      border: none;
+      padding: 0;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 20px; height: 20px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      border: none;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 20px; height: 20px;
+      border-radius: 50%;
+      background: var(--accent);
+      cursor: pointer;
+      border: none;
+    }
+
+    .strength-val {
+      min-width: 36px;
+      text-align: right;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
     /* ── Batch selector ── */
     .batch-row {
       display: flex;
@@ -288,6 +352,38 @@
         <div class="batch-row" id="batch-row"></div>
       </div>
 
+      <!-- LoRA -->
+      <div class="field">
+        <label>LoRA Style</label>
+        <div class="lora-row">
+          <button class="lora-btn active" id="lora-btn-rust"
+                  onclick="setLora('rustorangeanddimblue_lora_copy.safetensors', this)">
+            Rust &amp; Blue
+            <small>rustorange…</small>
+          </button>
+          <button class="lora-btn" id="lora-btn-art"
+                  onclick="setLora('art_vision_ZIG.safetensors', this)">
+            Art Vision
+            <small>art_vision_ZIG</small>
+          </button>
+          <button class="lora-btn" id="lora-btn-zidius"
+                  onclick="setLora('zImageT_zidiusArt_melancholy.safetensors', this)">
+            Melancholy
+            <small>zidiusArt</small>
+          </button>
+        </div>
+      </div>
+
+      <!-- LoRA Strength -->
+      <div class="field">
+        <label>LoRA Strength</label>
+        <div class="strength-row">
+          <input type="range" id="lora-strength" min="0" max="1" step="0.05" value="0.5"
+                 oninput="onLoraStrength(this.value)">
+          <span class="strength-val" id="lora-strength-val">0.50</span>
+        </div>
+      </div>
+
     </div>
 
     <!-- Generate -->
@@ -422,6 +518,8 @@ const state = {
   batchTotal: 1,
   doneCount: 0,
   generatedImages: [],
+  loraName:     'rustorangeanddimblue_lora_copy.safetensors',
+  loraStrength: 0.5,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -673,6 +771,8 @@ const generate = async () => {
         height: state.imgHeight,
         client_id: state.clientId,
         batch_count: state.batchCount,
+        lora_name: state.loraName,
+        lora_strength: state.loraStrength,
       }),
     });
 
@@ -754,6 +854,36 @@ const setSize = (w, h, btn) => {
 const setBatch = (n, btn) => {
   state.batchCount = n;
   selectButton('.batch-btn', btn);
+};
+
+const LORA_TRIGGERS = {
+  'rustorangeanddimblue_lora_copy.safetensors': 'rustorangeanddimblue',
+  'art_vision_ZIG.safetensors':                 'art_vision',
+  'zImageT_zidiusArt_melancholy.safetensors':   'zidiusArt',
+};
+
+const setLora = (name, btn) => {
+  const promptEl  = $(DOM_IDS.prompt);
+  const oldTrigger = LORA_TRIGGERS[state.loraName] || '';
+  const newTrigger = LORA_TRIGGERS[name] || '';
+
+  // Strip old trigger from the start of the prompt (if present)
+  let text = promptEl.value;
+  if (oldTrigger && text.startsWith(oldTrigger)) {
+    text = text.slice(oldTrigger.length).replace(/^[\s,]+/, '');
+  }
+
+  // Prepend new trigger
+  promptEl.value = newTrigger ? (text ? `${newTrigger} ${text}` : newTrigger) : text;
+  onPromptInput();
+
+  state.loraName = name;
+  selectButton('.lora-btn', btn);
+};
+
+const onLoraStrength = (val) => {
+  state.loraStrength = parseFloat(val);
+  setText('lora-strength-val', state.loraStrength.toFixed(2));
 };
 
 const updateShareButton = () => {
@@ -839,6 +969,13 @@ window.addEventListener('load', async () => {
   buildHeaderButtons();
   state.generatedImages = storage.loadImages();
   gallery.render();
+
+  // Prepend default LoRA trigger word if prompt is empty
+  const promptEl = $(DOM_IDS.prompt);
+  if (!promptEl.value.trim()) {
+    promptEl.value = LORA_TRIGGERS[state.loraName] || '';
+    onPromptInput();
+  }
 
   wsConn = ArtRium.connectWs({
     clientId:      state.clientId,

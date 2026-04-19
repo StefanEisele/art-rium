@@ -53,10 +53,10 @@ class Image(Base):
     )
 
     shop_listings: Mapped[list["ShopListing"]] = relationship(
-        back_populates="image", cascade="all, delete-orphan"
+        back_populates="image", cascade="all, delete-orphan", lazy="selectin"
     )
     instagram_posts: Mapped[list["InstagramPost"]] = relationship(
-        back_populates="image", cascade="all, delete-orphan"
+        back_populates="image", cascade="all, delete-orphan", lazy="selectin"
     )
 
 
@@ -125,6 +125,9 @@ class InstagramPost(Base):
     image_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("images.id"), nullable=False
     )
+    carousel_image_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True))
+    )                                                               # null = single post; set = carousel (additional images after image_id)
     caption: Mapped[str | None] = mapped_column(Text)
     scheduled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -133,6 +136,11 @@ class InstagramPost(Base):
         String(32), nullable=False, default="scheduled"
     )                                                               # scheduled | posted | cancelled
     instagram_media_id: Mapped[str | None] = mapped_column(String(128))  # filled after posting
+    # Companion posts (auto-created alongside the feed post)
+    story_status: Mapped[str | None] = mapped_column(String(32))          # pending | posted | failed
+    story_media_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String(128)))  # one per image
+    reel_status: Mapped[str | None] = mapped_column(String(32))           # pending | posted | failed
+    reel_media_id: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

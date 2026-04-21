@@ -7,10 +7,8 @@ via Cloudflare tunnel). Use the /post-now endpoint once that is configured.
 """
 import uuid
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
-
-import asyncio
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -22,7 +20,7 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
 from core.models import InstagramPost, Image
-from workers.instagram_companion import publish_companion_posts
+from workers.instagram_companion import publish_stories, publish_reel
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/instagram", dependencies=[Depends(require_auth)])
@@ -35,6 +33,10 @@ class PostCreate(BaseModel):
     carousel_image_ids: Optional[list[uuid.UUID]] = None  # additional images (2nd…10th)
     caption: Optional[str] = None
     scheduled_at: datetime          # client computes this (incl. offset logic)
+    story_delay_minutes: Optional[int] = None  # null = off; N = N min after feed
+    reel_delay_minutes:  Optional[int] = None  # null = off; N = N min after feed
+    companion_time: Optional[str] = "18:23"    # "HH:MM" — day+ delays snap to this time
+    reel_video_id: Optional[uuid.UUID] = None  # use an existing generated video for the Reel
 
 
 class PostUpdate(BaseModel):
@@ -42,9 +44,25 @@ class PostUpdate(BaseModel):
     scheduled_at: Optional[datetime] = None
     status: Optional[str] = None    # scheduled | posted | cancelled
     carousel_image_ids: Optional[list[uuid.UUID]] = None
+    story_delay_minutes: Optional[int] = None  # use model_fields_set to detect explicit null
+    reel_delay_minutes:  Optional[int] = None
+    companion_time: Optional[str] = None
+    reel_video_id: Optional[uuid.UUID] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _companion_at(published_at: datetime, delay_minutes: int, companion_time: str | None) -> datetime:
+    """Compute companion scheduled_at. Day+ delays snap to the HH:MM target time."""
+    dt = published_at + timedelta(minutes=delay_minutes)
+    if delay_minutes >= 1440 and companion_time:
+        try:
+            h, m = map(int, companion_time.split(':'))
+            dt = dt.replace(hour=h, minute=m, second=0, microsecond=0)
+        except (ValueError, AttributeError):
+            pass
+    return dt
+
 
 def _all_image_ids(post: InstagramPost) -> list[uuid.UUID]:
     """Return ordered list of all image IDs for a post (primary first)."""
@@ -65,10 +83,16 @@ def _serialize(post: InstagramPost, images: dict[uuid.UUID, "Image"] | None = No
         "scheduled_at": post.scheduled_at.isoformat(),
         "status": post.status,
         "instagram_media_id": post.instagram_media_id,
+        "story_delay_minutes":  post.story_delay_minutes,
+        "reel_delay_minutes":   post.reel_delay_minutes,
+        "companion_time":       post.companion_time,
+        "story_scheduled_at":   post.story_scheduled_at.isoformat() if post.story_scheduled_at else None,
+        "reel_scheduled_at":    post.reel_scheduled_at.isoformat() if post.reel_scheduled_at else None,
         "story_status":    post.story_status,
         "story_media_ids": post.story_media_ids,
         "reel_status":     post.reel_status,
         "reel_media_id":   post.reel_media_id,
+        "reel_video_id":   str(post.reel_video_id) if post.reel_video_id else None,
         "created_at": post.created_at.isoformat(),
         "updated_at": post.updated_at.isoformat(),
     }
@@ -164,6 +188,10 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
         caption=body.caption,
         scheduled_at=scheduled_at,
         status="scheduled",
+        story_delay_minutes=body.story_delay_minutes,
+        reel_delay_minutes=body.reel_delay_minutes,
+        companion_time=body.companion_time,
+        reel_video_id=body.reel_video_id,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -203,6 +231,14 @@ async def update_post(
         post.status = body.status
     if body.carousel_image_ids is not None:
         post.carousel_image_ids = body.carousel_image_ids or None
+    if "story_delay_minutes" in body.model_fields_set:
+        post.story_delay_minutes = body.story_delay_minutes
+    if "reel_delay_minutes" in body.model_fields_set:
+        post.reel_delay_minutes = body.reel_delay_minutes
+    if "companion_time" in body.model_fields_set:
+        post.companion_time = body.companion_time
+    if "reel_video_id" in body.model_fields_set:
+        post.reel_video_id = body.reel_video_id
 
     post.updated_at = datetime.now(timezone.utc)
     await db.commit()
@@ -341,12 +377,19 @@ async def post_now(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         logger.info(f"Published — media_id={media_id}")
 
     # ── Update DB ────────────────────────────────────────────────────────────
-    post.status = "posted"
+    published_at            = datetime.now(timezone.utc)
+    post.status             = "posted"
     post.instagram_media_id = media_id
-    post.updated_at = datetime.now(timezone.utc)
-    await db.commit()
+    post.updated_at         = published_at
 
-    # ── Companion posts (stories + reel) ─────────────────────────────────────
-    asyncio.create_task(publish_companion_posts(post_id))
+    # Schedule companion posts according to per-post delay settings
+    if post.story_delay_minutes is not None:
+        post.story_status       = "pending"
+        post.story_scheduled_at = _companion_at(published_at, post.story_delay_minutes, post.companion_time)
+    if post.reel_delay_minutes is not None:
+        post.reel_status       = "pending"
+        post.reel_scheduled_at = _companion_at(published_at, post.reel_delay_minutes, post.companion_time)
+
+    await db.commit()
 
     return {"media_id": media_id, "status": "posted"}

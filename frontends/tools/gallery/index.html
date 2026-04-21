@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#111111">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -488,6 +489,77 @@
     .action-row {
       display: flex; gap: 10px;
     }
+
+    /* ── Video grid items ── */
+    .video-grid-item {
+      cursor: pointer;
+      border-radius: 10px;
+      -webkit-tap-highlight-color: transparent;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .video-thumb-wrap {
+      position: relative;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #000;
+      aspect-ratio: 1;
+    }
+    .video-thumb-wrap img {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .video-thumb-wrap .play-badge {
+      position: absolute;
+      inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.28);
+      border-radius: 10px;
+    }
+    .play-circle {
+      width: 38px; height: 38px;
+      background: rgba(255,255,255,0.88);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; padding-left: 3px;
+    }
+    .video-grid-item .grid-title { font-size: 12px; color: var(--text-dim); padding: 0 2px 4px; }
+    /* Placeholder when no thumb */
+    .video-thumb-no-thumb {
+      width: 100%; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px; background: var(--surface2);
+    }
+
+    /* ── Video detail sheet ── */
+    #video-detail-modal {
+      display: none;
+      position: fixed; inset: 0; z-index: 200;
+      background: rgba(0,0,0,0.7);
+      align-items: flex-end;
+    }
+    #video-detail-modal.show { display: flex; }
+    .video-detail-sheet {
+      width: 100%; max-width: 700px; margin: 0 auto;
+      background: var(--surface);
+      border-radius: 20px 20px 0 0;
+      padding: 20px 20px calc(env(safe-area-inset-bottom) + 24px);
+      display: flex; flex-direction: column; gap: 14px;
+      max-height: 90dvh; overflow-y: auto;
+    }
+    .vd-header { display: flex; justify-content: space-between; align-items: center; }
+    .vd-header h2 { font-size: 16px; font-weight: 700; }
+    .vd-close { background: var(--surface2); border: none; color: var(--text); font-size: 16px; width: 32px; height: 32px; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+    video.vd-player { width: 100%; border-radius: 12px; background: #000; max-height: 340px; }
+    .vd-chips { display: flex; gap: 7px; flex-wrap: wrap; }
+    .vd-chip { background: var(--surface2); border-radius: 8px; padding: 4px 10px; font-size: 12px; color: var(--text-dim); }
+    .vd-prompt { background: var(--surface2); border-radius: 10px; padding: 11px 13px; font-size: 13px; color: var(--text); line-height: 1.55; }
+    .vd-actions { display: flex; gap: 8px; }
+    .vd-btn { flex: 1; padding: 11px; border-radius: 10px; border: none; font-size: 14px; font-weight: 700; cursor: pointer; font-family: inherit; text-align: center; text-decoration: none; }
+    .vd-btn.download { background: var(--surface2); color: var(--text); border: 1.5px solid var(--border); }
+    .vd-btn.delete { background: rgba(255,69,58,0.1); color: var(--red); border: 1.5px solid rgba(255,69,58,0.2); }
   </style>
 </head>
 <body>
@@ -511,6 +583,7 @@
     <button class="filter-chip" data-rating="4" onclick="setRatingFilter(this)">★ 4+</button>
     <button class="filter-chip" data-rating="3" onclick="setRatingFilter(this)">★ 3+</button>
     <button class="filter-chip" data-rating="unrated" onclick="setRatingFilter(this)">Unrated</button>
+    <button class="filter-chip" id="videos-chip" data-rating="" onclick="toggleVideoMode(this)">▶ Videos</button>
   </div>
 
   <div class="count-bar" id="count-bar"></div>
@@ -603,6 +676,24 @@
       <button class="btn primary" id="save-btn" onclick="saveModal()">Save</button>
     </div>
 
+  </div>
+</div>
+
+<!-- ── Video Detail Sheet ── -->
+<div id="video-detail-modal" onclick="closeVideoDetail(event)">
+  <div class="video-detail-sheet" onclick="event.stopPropagation()">
+    <div class="vd-header">
+      <h2>Video</h2>
+      <button class="vd-close" onclick="closeVideoDetail()">✕</button>
+    </div>
+    <video class="vd-player" id="vd-player" controls playsinline preload="metadata"></video>
+    <div class="vd-chips" id="vd-chips"></div>
+    <div class="vd-prompt" id="vd-prompt" style="display:none"></div>
+    <div style="font-size:12px;color:var(--text-dim)" id="vd-date"></div>
+    <div class="vd-actions">
+      <a class="vd-btn download" id="vd-download" href="#">Download</a>
+      <button class="vd-btn delete" id="vd-delete" onclick="deleteActiveVideo()">Delete</button>
+    </div>
   </div>
 </div>
 
@@ -888,6 +979,7 @@ const clearSearch = () => {
 };
 
 const setRatingFilter = (btn) => {
+  if (videoMode) { videoMode = false; $('vd-player') && ($('vd-player').src = ''); }
   document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
   btn.classList.add('active');
   state.filters.ratingMin = btn.dataset.rating;
@@ -1140,6 +1232,139 @@ const refreshGridItem = (idx, img) => {
   const titleEl = el.querySelector('.grid-title');
   if (titleEl) titleEl.textContent = img.title || '';
 };
+
+// ══════════════════════════════════════════════════════════
+// VIDEO MODE
+// ══════════════════════════════════════════════════════════
+let videoMode = false;
+let videos = [];
+let activeVideo = null;
+
+async function toggleVideoMode(btn) {
+  videoMode = !videoMode;
+  // De-activate all rating chips when entering video mode
+  document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  if (videoMode) {
+    btn.classList.add('active');
+    await loadVideos();
+  } else {
+    // Return to images mode
+    document.querySelector('.filter-chip[data-rating=""]').classList.add('active');
+    state.filters.ratingMin = '';
+    fetchImages(true);
+  }
+}
+
+async function loadVideos() {
+  try {
+    const r = await apiFetch('/api/video');
+    videos = await r.json();
+    renderVideoGrid();
+  } catch(e) {
+    ArtRium.toast('Failed to load videos: ' + e.message, true);
+  }
+}
+
+function renderVideoGrid() {
+  const grid = $('grid');
+  grid.innerHTML = '';
+  $('grid-footer').style.display = 'none';
+  $('count-bar').textContent = videos.length
+    ? `${videos.length} video${videos.length === 1 ? '' : 's'}`
+    : '';
+
+  if (!videos.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.style.gridColumn = '1/-1';
+    empty.innerHTML = '<div class="emoji">🎬</div><p>No videos yet.<br>Generate some in the Video tool.</p>';
+    grid.appendChild(empty);
+    return;
+  }
+
+  for (const v of videos) {
+    grid.appendChild(makeVideoGridItem(v));
+  }
+}
+
+function makeVideoGridItem(v) {
+  const div = document.createElement('div');
+  div.className = 'video-grid-item';
+  div.onclick = () => openVideoDetail(v);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'video-thumb-wrap';
+
+  if (v.thumb_url) {
+    wrap.innerHTML = `
+      <img src="${withAuth(v.thumb_url)}" alt="" loading="lazy">
+      <div class="play-badge"><div class="play-circle">▶</div></div>`;
+  } else {
+    wrap.innerHTML = `<div class="video-thumb-no-thumb">🎬</div><div class="play-badge"><div class="play-circle">▶</div></div>`;
+  }
+
+  const fmtRes = v.width && v.height ? `${v.width}×${v.height}` : '';
+  const titleEl = document.createElement('div');
+  titleEl.className = 'grid-title';
+  titleEl.textContent = v.prompt || fmtRes;
+
+  div.appendChild(wrap);
+  div.appendChild(titleEl);
+  return div;
+}
+
+function openVideoDetail(v) {
+  activeVideo = v;
+  const player = $('vd-player');
+  player.src = withAuth(v.url);
+  player.load();
+
+  // Chips: resolution, n_images, frames, fps
+  const chips = [
+    v.width && v.height ? `${v.width}×${v.height}` : null,
+    v.n_images ? `${v.n_images} key frames` : null,
+    v.frame_count ? `${v.frame_count} fr/transition` : null,
+    v.fps ? `${v.fps} fps` : null,
+  ].filter(Boolean);
+  $('vd-chips').innerHTML = chips.map(c => `<span class="vd-chip">${c}</span>`).join('');
+
+  const promptEl = $('vd-prompt');
+  if (v.prompt) { promptEl.textContent = v.prompt; promptEl.style.display = ''; }
+  else            { promptEl.style.display = 'none'; }
+
+  $('vd-date').textContent = new Date(v.created_at).toLocaleDateString('de-DE', {
+    day: '2-digit', month: '2-digit', year: '2-digit',
+    hour: '2-digit', minute: '2-digit',
+  });
+  $('vd-download').href = withAuth(v.url);
+  $('vd-download').download = v.filename || 'video.mp4';
+
+  $('video-detail-modal').classList.add('show');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeVideoDetail(e) {
+  if (e && e.target !== $('video-detail-modal')) return;
+  $('video-detail-modal').classList.remove('show');
+  document.body.style.overflow = '';
+  const player = $('vd-player');
+  player.pause();
+  player.src = '';
+  activeVideo = null;
+}
+
+async function deleteActiveVideo() {
+  if (!activeVideo) return;
+  if (!confirm('Delete this video? This cannot be undone.')) return;
+  try {
+    await apiFetch(`/api/video/${activeVideo.id}`, { method: 'DELETE' });
+    ArtRium.toast('Deleted');
+    closeVideoDetail();
+    await loadVideos();
+  } catch(e) {
+    ArtRium.toast('Delete failed: ' + e.message, true);
+  }
+}
 
 // ══════════════════════════════════════════════════════════
 // KEYBOARD

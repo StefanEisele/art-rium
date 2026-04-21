@@ -50,5 +50,9 @@ class Settings(BaseSettings):
     def reels_dir(self) -> Path:
         return self.storage_dir / "reels"
 
+    @property
+    def videos_dir(self) -> Path:
+        return self.storage_dir / "videos"
+
 
 settings = Settings()

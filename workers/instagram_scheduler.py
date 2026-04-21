@@ -9,7 +9,7 @@ On failure:  status → 'failed' after MAX_ATTEMPTS retries; error logged.
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
@@ -17,12 +17,24 @@ from sqlalchemy import select
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import Image, InstagramPost
-from workers.instagram_companion import publish_companion_posts
+from workers.instagram_companion import publish_stories, publish_reel
 
 logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL = 60   # seconds between scans
 MAX_ATTEMPTS   = 3    # how many times to try before marking 'failed'
+
+
+def _companion_at(published_at: datetime, delay_minutes: int, companion_time: str | None) -> datetime:
+    """Compute companion scheduled_at. Day+ delays snap to the HH:MM target time."""
+    dt = published_at + timedelta(minutes=delay_minutes)
+    if delay_minutes >= 1440 and companion_time:
+        try:
+            h, m = map(int, companion_time.split(':'))
+            dt = dt.replace(hour=h, minute=m, second=0, microsecond=0)
+        except (ValueError, AttributeError):
+            pass
+    return dt
 
 
 class InstagramScheduler:
@@ -42,25 +54,56 @@ class InstagramScheduler:
     async def _tick(self) -> None:
         now = datetime.now(timezone.utc)
 
+        # ── Feed posts ────────────────────────────────────────────────────────
         async with AsyncSessionLocal() as db:
-            stmt = (
+            result = await db.execute(
                 select(InstagramPost)
                 .where(InstagramPost.status == "scheduled")
                 .where(InstagramPost.scheduled_at <= now)
             )
-            result = await db.execute(stmt)
-            due = result.scalars().all()
+            due_feed = result.scalars().all()
 
-        if not due:
-            return
+        if due_feed:
+            logger.info("InstagramScheduler: %d feed post(s) due", len(due_feed))
+            for post in due_feed:
+                try:
+                    await self._publish(post.id)
+                except Exception as exc:
+                    logger.error("Failed to publish post %s: %s", post.id, exc)
 
-        logger.info("InstagramScheduler: %d post(s) due", len(due))
+        # ── Story companions ──────────────────────────────────────────────────
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(InstagramPost)
+                .where(InstagramPost.story_status == "pending")
+                .where(InstagramPost.story_scheduled_at <= now)
+            )
+            due_stories = result.scalars().all()
+            for post in due_stories:
+                post.story_status = "processing"
+            if due_stories:
+                await db.commit()
 
-        for post in due:
-            try:
-                await self._publish(post.id)
-            except Exception as exc:
-                logger.error("Failed to publish post %s: %s", post.id, exc)
+        for post in due_stories:
+            logger.info("InstagramScheduler: launching story for post %s", post.id)
+            asyncio.create_task(publish_stories(post.id))
+
+        # ── Reel companions ───────────────────────────────────────────────────
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(InstagramPost)
+                .where(InstagramPost.reel_status == "pending")
+                .where(InstagramPost.reel_scheduled_at <= now)
+            )
+            due_reels = result.scalars().all()
+            for post in due_reels:
+                post.reel_status = "processing"
+            if due_reels:
+                await db.commit()
+
+        for post in due_reels:
+            logger.info("InstagramScheduler: launching reel for post %s", post.id)
+            asyncio.create_task(publish_reel(post.id))
 
     async def _publish(self, post_id) -> None:
         missing = [k for k, v in {
@@ -118,14 +161,21 @@ class InstagramScheduler:
 
                     media_id = await _publish_container(client, graph, uid, token, container_id)
 
+                published_at            = datetime.now(timezone.utc)
                 post.status             = "posted"
                 post.instagram_media_id = media_id
-                post.updated_at         = datetime.now(timezone.utc)
+                post.updated_at         = published_at
+
+                # Schedule companion posts according to per-post delay settings
+                if post.story_delay_minutes is not None:
+                    post.story_status       = "pending"
+                    post.story_scheduled_at = _companion_at(published_at, post.story_delay_minutes, post.companion_time)
+                if post.reel_delay_minutes is not None:
+                    post.reel_status       = "pending"
+                    post.reel_scheduled_at = _companion_at(published_at, post.reel_delay_minutes, post.companion_time)
+
                 await db.commit()
                 logger.info("Auto-posted %s → media_id=%s", post_id, media_id)
-
-                # Companion posts run concurrently; errors are caught inside
-                asyncio.create_task(publish_companion_posts(post_id))
 
             except Exception as exc:
                 # Mark as failed so we don't retry forever

@@ -31,6 +31,7 @@ async def lifespan(app: FastAPI):
     # Ensure storage dirs exist
     settings.images_dir.mkdir(parents=True, exist_ok=True)
     settings.shop_prep_dir.mkdir(parents=True, exist_ok=True)
+    settings.videos_dir.mkdir(parents=True, exist_ok=True)
 
     # Start ComfyUI WebSocket listener
     listener = ComfyListener(app.state)
@@ -54,13 +55,25 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="art-rium", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def no_cache_html(request, call_next):
+    response = await call_next(request)
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 # ── Routers ──────────────────────────────────────────────────────────────────
-from routers import generate, images, titler, instagram  # noqa: E402  (after app is created)
+from routers import generate, images, titler, instagram, video  # noqa: E402  (after app is created)
 
 app.include_router(generate.router)
 app.include_router(images.router)
 app.include_router(titler.router)
 app.include_router(instagram.router)
+app.include_router(video.router)
 
 # ── Static frontends ──────────────────────────────────────────────────────────
 # Shared assets (CSS / JS) must be mounted before tool and root catch-alls
@@ -84,6 +97,10 @@ if _titler.exists():
 _instagram = Path(__file__).parent / "frontends" / "tools" / "instagram"
 if _instagram.exists():
     app.mount("/tools/instagram", StaticFiles(directory=str(_instagram), html=True), name="instagram")
+
+_video = Path(__file__).parent / "frontends" / "tools" / "video"
+if _video.exists():
+    app.mount("/tools/video", StaticFiles(directory=str(_video), html=True), name="video")
 
 _dashboard = Path(__file__).parent / "frontends" / "dashboard"
 if _dashboard.exists():

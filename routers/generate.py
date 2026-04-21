@@ -126,6 +126,18 @@ async def get_shared_reel(filename: str, token: str = ""):
     raise HTTPException(status_code=404, detail="Reel not found")
 
 
+@router.get("/share/video/{filename}")
+async def get_shared_video(filename: str, token: str = ""):
+    """Public endpoint for serving generated videos to Instagram Graph API."""
+    if settings.image_share_token and token != settings.image_share_token:
+        raise HTTPException(status_code=403, detail="Invalid share token")
+    safe_name = Path(filename).name
+    candidate = settings.videos_dir / safe_name
+    if candidate.exists():
+        return FileResponse(candidate, media_type="video/mp4")
+    raise HTTPException(status_code=404, detail="Video not found")
+
+
 @router.get("/api/image/{filename}", dependencies=[Depends(require_auth)])
 async def get_image(filename: str):
     safe_name = Path(filename).name

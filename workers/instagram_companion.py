@@ -20,7 +20,7 @@ from sqlalchemy import select
 
 from core.config import settings
 from core.db import AsyncSessionLocal
-from core.models import Image, InstagramPost
+from core.models import Image, InstagramPost, Video
 from workers.video_generator import generate_slideshow
 
 logger = logging.getLogger(__name__)
@@ -31,30 +31,22 @@ REEL_POLL_TIMEOUT  = 300  # seconds before giving up
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
-async def publish_companion_posts(post_id: uuid.UUID) -> None:
-    """
-    Publish Stories and a Reel for the given (already-published) feed post.
-    All errors are caught internally and written to the DB.
-    """
-    missing = [k for k, v in {
-        "INSTAGRAM_USER_ID":    settings.instagram_user_id,
+def _check_config() -> list[str]:
+    return [k for k, v in {
+        "INSTAGRAM_USER_ID":      settings.instagram_user_id,
         "INSTAGRAM_ACCESS_TOKEN": settings.instagram_access_token,
-        "PUBLIC_BASE_URL":      settings.public_base_url,
+        "PUBLIC_BASE_URL":        settings.public_base_url,
     }.items() if not v]
-    if missing:
-        logger.warning("Companion posts skipped — missing config: %s", ", ".join(missing))
-        return
-
-    await asyncio.gather(
-        _publish_stories(post_id),
-        _publish_reel(post_id),
-        return_exceptions=True,   # log but don't raise
-    )
 
 
 # ── Stories ───────────────────────────────────────────────────────────────────
 
-async def _publish_stories(post_id: uuid.UUID) -> None:
+async def publish_stories(post_id: uuid.UUID) -> None:
+    missing = _check_config()
+    if missing:
+        logger.warning("Stories skipped for %s — missing config: %s", post_id, ", ".join(missing))
+        return
+
     graph = settings.instagram_graph_api_base
     uid   = settings.instagram_user_id
     token = settings.instagram_access_token
@@ -111,7 +103,12 @@ async def _publish_stories(post_id: uuid.UUID) -> None:
 
 # ── Reel ──────────────────────────────────────────────────────────────────────
 
-async def _publish_reel(post_id: uuid.UUID) -> None:
+async def publish_reel(post_id: uuid.UUID) -> None:
+    missing = _check_config()
+    if missing:
+        logger.warning("Reel skipped for %s — missing config: %s", post_id, ", ".join(missing))
+        return
+
     graph = settings.instagram_graph_api_base
     uid   = settings.instagram_user_id
     token = settings.instagram_access_token
@@ -126,28 +123,39 @@ async def _publish_reel(post_id: uuid.UUID) -> None:
         caption = post.caption or ""
 
     video_path: Path | None = None
+    video_is_temp = True  # False when reusing an existing generated video
     reel_media_id: str | None = None
     status = "failed"
 
     try:
-        # ── 1. Build ordered image file paths ────────────────────────────────
-        image_paths: list[Path] = []
-        for img_id in all_ids:
-            img = images.get(img_id)
-            if not img:
-                raise ValueError(f"Reel: image {img_id} not found in DB")
-            image_paths.append(settings.storage_dir / img.filepath)
+        if post.reel_video_id:
+            # ── Use an existing generated video ───────────────────────────────
+            async with AsyncSessionLocal() as db2:
+                vid = await db2.get(Video, post.reel_video_id)
+            if not vid or vid.status != "done" or not vid.filepath:
+                raise ValueError(f"Referenced video {post.reel_video_id} is not ready")
+            video_path = settings.storage_dir / vid.filepath
+            video_is_temp = False
+            logger.info("Reel: using existing video %s for post %s", vid.filename, post_id)
+        else:
+            # ── 1. Build ordered image file paths ─────────────────────────────
+            image_paths: list[Path] = []
+            for img_id in all_ids:
+                img = images.get(img_id)
+                if not img:
+                    raise ValueError(f"Reel: image {img_id} not found in DB")
+                image_paths.append(settings.storage_dir / img.filepath)
 
-        # ── 2. Generate slideshow video ───────────────────────────────────────
-        settings.reels_dir.mkdir(parents=True, exist_ok=True)
-        video_path = await generate_slideshow(
-            image_paths,
-            settings.reels_dir,
-            ffmpeg_path=settings.ffmpeg_path,
-        )
+            # ── 2. Generate slideshow video ────────────────────────────────────
+            settings.reels_dir.mkdir(parents=True, exist_ok=True)
+            video_path = await generate_slideshow(
+                image_paths,
+                settings.reels_dir,
+                ffmpeg_path=settings.ffmpeg_path,
+            )
 
         # ── 3. Create Reel container ──────────────────────────────────────────
-        video_url = _reel_url(video_path.name)
+        video_url = _video_share_url(video_path.name, existing=not video_is_temp)
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(f"{graph}/{uid}/media", data={
                 "media_type":    "REELS",
@@ -181,8 +189,8 @@ async def _publish_reel(post_id: uuid.UUID) -> None:
         status = "failed"
 
     finally:
-        # Clean up temp video regardless of outcome
-        if video_path and video_path.exists():
+        # Only delete temp (slideshow-generated) files, never the user's stored videos
+        if video_is_temp and video_path and video_path.exists():
             try:
                 video_path.unlink()
             except Exception as e:
@@ -210,6 +218,16 @@ def _image_url(filename: str) -> str:
 def _reel_url(filename: str) -> str:
     base = settings.public_base_url.rstrip("/")
     url  = f"{base}/share/reel/{filename}"
+    if settings.image_share_token:
+        url += f"?token={settings.image_share_token}"
+    return url
+
+
+def _video_share_url(filename: str, existing: bool = False) -> str:
+    """Public URL for a video file — uses /share/video/ for stored videos, /share/reel/ for temp slideshow."""
+    base = settings.public_base_url.rstrip("/")
+    path = "video" if existing else "reel"
+    url  = f"{base}/share/{path}/{filename}"
     if settings.image_share_token:
         url += f"?token={settings.image_share_token}"
     return url

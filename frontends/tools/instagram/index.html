@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#111111">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -38,6 +39,7 @@
     /* ── Main scroll area ── */
     main {
       flex: 1;
+      min-height: 160px;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
     }
@@ -121,7 +123,8 @@
     }
     .post-caption {
       font-size: 13px; color: var(--text-dim); line-height: 1.4;
-      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      overflow: hidden;
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
     }
     .post-title { font-size: 12px; color: var(--text-dim); font-style: italic; }
 
@@ -143,9 +146,77 @@
       padding: 1px 6px; border-radius: 4px;
       display: inline-flex; align-items: center; gap: 3px;
     }
-    .companion-pending  { background: var(--surface2); color: var(--text-dim); }
-    .companion-posted   { background: rgba(50,215,75,0.12); color: var(--green); }
-    .companion-failed   { background: rgba(255,69,58,0.12); color: var(--red); }
+    .companion-planned   { background: rgba(255,159,10,0.12); color: #ff9f0a; }
+    .companion-pending   { background: var(--surface2); color: var(--text-dim); }
+    .companion-posted    { background: rgba(50,215,75,0.12); color: var(--green); }
+    .companion-failed    { background: rgba(255,69,58,0.12); color: var(--red); }
+
+    /* Video selector for Reel */
+    .reel-video-row {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding-top: 2px;
+    }
+    .reel-video-label {
+      font-size: 11px; font-weight: 700; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.6px;
+      flex-shrink: 0;
+    }
+    .sel-video-btn {
+      font-size: 12px; font-weight: 600;
+      padding: 4px 12px; border-radius: 6px;
+      border: 1.5px dashed var(--border);
+      background: var(--surface2); color: var(--text-dim);
+      cursor: pointer; font-family: inherit;
+      transition: all 0.13s;
+    }
+    .sel-video-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .sel-video-thumb {
+      width: 36px; height: 36px; border-radius: 6px; object-fit: cover;
+      background: var(--surface2); flex-shrink: 0;
+    }
+    .sel-video-name {
+      font-size: 12px; color: var(--text); font-weight: 500;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      max-width: 140px;
+    }
+    .sel-video-clear {
+      background: none; border: none; color: var(--text-dim);
+      font-size: 16px; cursor: pointer; padding: 0; line-height: 1;
+      flex-shrink: 0;
+    }
+
+    /* Delay chip selector */
+    .companion-delay-section {
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .companion-delay-row {
+      display: flex; align-items: center; gap: 10px;
+    }
+    .companion-delay-label {
+      font-size: 11px; font-weight: 700; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.6px;
+      width: 38px; flex-shrink: 0;
+    }
+    .delay-chips { display: flex; gap: 5px; flex-wrap: wrap; }
+    .delay-chip {
+      font-size: 12px; font-weight: 600;
+      padding: 4px 10px; border-radius: 6px;
+      border: 1.5px solid var(--border);
+      background: var(--surface2); color: var(--text-dim);
+      cursor: pointer; font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
+      transition: all 0.13s;
+    }
+    .delay-chip.active {
+      background: var(--accent); border-color: var(--accent); color: #000;
+    }
+    .companion-time-input {
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 8px; color: var(--text); font-size: 14px; font-weight: 600;
+      padding: 4px 8px; outline: none; font-family: inherit;
+      transition: border-color 0.2s; -webkit-appearance: none;
+    }
+    .companion-time-input:focus { border-color: var(--accent); }
 
     /* ─────────────────────────────────────────────
        NEW POST PANEL
@@ -155,6 +226,9 @@
       border-top: 1px solid var(--border);
       flex-shrink: 0;
       background: var(--bg);
+      max-height: 52dvh;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
     }
 
     .new-post-card {
@@ -387,6 +461,39 @@
     .picker-cell.selected .order-badge { display: flex; }
 
     /* ─────────────────────────────────────────────
+       VIDEO PICKER MODAL
+    ───────────────────────────────────────────── */
+    #video-picker-modal {
+      display: none;
+      position: fixed; inset: 0; z-index: 150;
+      background: var(--bg);
+      flex-direction: column;
+      padding-top: env(safe-area-inset-top);
+    }
+    #video-picker-modal.show { display: flex; }
+    #vp-grid {
+      flex: 1; min-height: 0; overflow-y: auto;
+      display: grid; grid-template-columns: repeat(2, 1fr);
+      gap: 8px; padding: 12px;
+    }
+    .vp-item {
+      background: var(--surface); border: 1.5px solid var(--border);
+      border-radius: 10px; overflow: hidden; cursor: pointer;
+      display: flex; flex-direction: column; gap: 0;
+      transition: border-color 0.13s;
+    }
+    .vp-item:active, .vp-item.selected { border-color: var(--accent); }
+    .vp-thumb-wrap { position: relative; aspect-ratio: 1; background: #000; }
+    .vp-thumb-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .vp-thumb-wrap .vp-play { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.28); }
+    .vp-play-circle { width: 30px; height: 30px; background: rgba(255,255,255,0.85); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; padding-left: 2px; }
+    .vp-no-thumb { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 28px; }
+    .vp-info { padding: 8px 10px; }
+    .vp-meta { font-size: 11px; color: var(--text-dim); }
+    .vp-prompt { font-size: 12px; color: var(--text); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .vp-empty { text-align: center; padding: 40px 20px; color: var(--text-dim); font-size: 14px; grid-column: 1/-1; }
+
+    /* ─────────────────────────────────────────────
        POST DETAIL MODAL (edit/delete)
     ───────────────────────────────────────────── */
     #detail-modal {
@@ -505,6 +612,44 @@
       </div>
       <div class="computed-date" id="computed-date-line">—</div>
 
+      <!-- Companion scheduling -->
+      <div class="companion-delay-section">
+        <div class="companion-delay-row">
+          <span class="companion-delay-label">Story</span>
+          <div class="delay-chips" id="story-chips">
+            <button class="delay-chip active" data-value="off"   onclick="setNewPostDelay('story','off')">Off</button>
+            <button class="delay-chip"        data-value="60"    onclick="setNewPostDelay('story','60')">+1h</button>
+            <button class="delay-chip"        data-value="1440"  onclick="setNewPostDelay('story','1440')">+1day</button>
+            <button class="delay-chip"        data-value="2880"  onclick="setNewPostDelay('story','2880')">+2day</button>
+            <button class="delay-chip"        data-value="5760"  onclick="setNewPostDelay('story','5760')">+4day</button>
+            <button class="delay-chip"        data-value="10080" onclick="setNewPostDelay('story','10080')">+1week</button>
+            <button class="delay-chip"        data-value="20160" onclick="setNewPostDelay('story','20160')">+2week</button>
+          </div>
+        </div>
+        <div class="companion-delay-row">
+          <span class="companion-delay-label">Reel</span>
+          <div class="delay-chips" id="reel-chips">
+            <button class="delay-chip active" data-value="off"   onclick="setNewPostDelay('reel','off')">Off</button>
+            <button class="delay-chip"        data-value="60"    onclick="setNewPostDelay('reel','60')">+1h</button>
+            <button class="delay-chip"        data-value="1440"  onclick="setNewPostDelay('reel','1440')">+1day</button>
+            <button class="delay-chip"        data-value="2880"  onclick="setNewPostDelay('reel','2880')">+2day</button>
+            <button class="delay-chip"        data-value="5760"  onclick="setNewPostDelay('reel','5760')">+4day</button>
+            <button class="delay-chip"        data-value="10080" onclick="setNewPostDelay('reel','10080')">+1week</button>
+            <button class="delay-chip"        data-value="20160" onclick="setNewPostDelay('reel','20160')">+2week</button>
+          </div>
+        </div>
+        <div class="companion-delay-row">
+          <span class="companion-delay-label">At</span>
+          <input type="time" id="companion-time-input" class="companion-time-input" value="18:23">
+        </div>
+        <!-- Video selection for Reel (shown when Reel delay is active) -->
+        <div class="reel-video-row" id="reel-video-row" style="display:none">
+          <span class="reel-video-label">Video</span>
+          <div id="reel-video-preview" style="display:contents"></div>
+          <button class="sel-video-btn" onclick="openVideoPicker('new')">📹 Select video</button>
+        </div>
+      </div>
+
       <button class="schedule-btn" id="schedule-btn" onclick="schedulePost()" disabled>
         Schedule Post
       </button>
@@ -528,6 +673,16 @@
   <div id="picker-grid"></div>
 </div>
 
+<!-- ── Video Picker Modal ── -->
+<div id="video-picker-modal">
+  <div class="picker-header">
+    <button class="back-btn" onclick="closeVideoPicker()">✕</button>
+    <h2>Select Video for Reel</h2>
+    <button class="picker-done-btn" onclick="closeVideoPicker()">Done</button>
+  </div>
+  <div id="vp-grid"></div>
+</div>
+
 <!-- ── Post Detail Modal ── -->
 <div id="detail-modal" onclick="closeDetail(event)">
   <div class="detail-sheet" onclick="event.stopPropagation()">
@@ -543,6 +698,44 @@
     </div>
 
     <textarea id="detail-caption" placeholder="Caption…" rows="3"></textarea>
+
+    <!-- Companion delay selectors (only for scheduled posts) -->
+    <div class="companion-delay-section" id="detail-companion-section" style="display:none">
+      <div class="companion-delay-row">
+        <span class="companion-delay-label">Story</span>
+        <div class="delay-chips" id="detail-story-chips">
+          <button class="delay-chip" data-value="off"   onclick="setDetailDelay('story','off')">Off</button>
+          <button class="delay-chip" data-value="60"    onclick="setDetailDelay('story','60')">+1h</button>
+          <button class="delay-chip" data-value="1440"  onclick="setDetailDelay('story','1440')">+1day</button>
+          <button class="delay-chip" data-value="2880"  onclick="setDetailDelay('story','2880')">+2day</button>
+          <button class="delay-chip" data-value="5760"  onclick="setDetailDelay('story','5760')">+4day</button>
+          <button class="delay-chip" data-value="10080" onclick="setDetailDelay('story','10080')">+1week</button>
+          <button class="delay-chip" data-value="20160" onclick="setDetailDelay('story','20160')">+2week</button>
+        </div>
+      </div>
+      <div class="companion-delay-row">
+        <span class="companion-delay-label">Reel</span>
+        <div class="delay-chips" id="detail-reel-chips">
+          <button class="delay-chip" data-value="off"   onclick="setDetailDelay('reel','off')">Off</button>
+          <button class="delay-chip" data-value="60"    onclick="setDetailDelay('reel','60')">+1h</button>
+          <button class="delay-chip" data-value="1440"  onclick="setDetailDelay('reel','1440')">+1day</button>
+          <button class="delay-chip" data-value="2880"  onclick="setDetailDelay('reel','2880')">+2day</button>
+          <button class="delay-chip" data-value="5760"  onclick="setDetailDelay('reel','5760')">+4day</button>
+          <button class="delay-chip" data-value="10080" onclick="setDetailDelay('reel','10080')">+1week</button>
+          <button class="delay-chip" data-value="20160" onclick="setDetailDelay('reel','20160')">+2week</button>
+        </div>
+      </div>
+      <div class="companion-delay-row">
+        <span class="companion-delay-label">At</span>
+        <input type="time" id="detail-companion-time" class="companion-time-input" value="18:23">
+      </div>
+      <!-- Video selection for Reel in detail edit -->
+      <div class="reel-video-row" id="detail-reel-video-row" style="display:none">
+        <span class="reel-video-label">Video</span>
+        <div id="detail-reel-video-preview" style="display:contents"></div>
+        <button class="sel-video-btn" onclick="openVideoPicker('detail')">📹 Select video</button>
+      </div>
+    </div>
 
     <div class="detail-actions">
       <button class="detail-btn save" onclick="saveDetail()">Save</button>
@@ -566,18 +759,29 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
   apiKey:     ArtRium.getApiKey(),
-  // Selected images for new post — ordered array of {id, filename, title, thumb_url}
   selectedImages: [],
-  lastPostDate: null,   // ISO string or null
-  posts: [],            // array of post objects from API
-  activePost: null,     // post being edited in detail modal
+  lastPostDate: null,
+  posts: [],
+  activePost: null,
   pickerImages: [],
   pickerSearch: '',
   pickerPage: 0,
   pickerLoading: false,
   pickerDone: false,
-  // Map of image_id → order (1-based) for currently-open picker session
-  pickerSelection: new Map(),  // id -> order
+  pickerSelection: new Map(),
+  storyDelay: null,
+  reelDelay: null,
+  companionTime: '18:23',
+  detailStoryDelay: null,
+  detailReelDelay: null,
+  detailCompanionTime: '18:23',
+  // Reel video selection
+  reelVideoId: null,             // for new post form
+  reelVideo: null,               // full video object for new post form
+  detailReelVideoId: null,       // for detail modal
+  detailReelVideo: null,         // full video object for detail modal
+  allVideos: [],                 // cache of done videos for picker
+  videoPickerTarget: 'new',      // 'new' | 'detail'
 };
 
 const PICKER_LIMIT = 30;
@@ -589,6 +793,7 @@ const withAuth = (url) => ArtRium.withAuth(url, state.apiKey);
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
+const escHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 const fmtDate = (iso) => {
   const d = new Date(iso);
@@ -603,7 +808,38 @@ const fmtMonth = (iso) => {
 
 const statusLabel = (s) => ({ scheduled: 'Scheduled', posted: 'Posted', cancelled: 'Cancelled', failed: 'Failed' }[s] || s);
 const statusClass = (s) => `status-badge status-${s}`;
-const _companionIcon = (s) => s === 'posted' ? '✓' : s === 'failed' ? '✕' : '…';
+
+const fmtTime = (iso) => {
+  const d = new Date(iso);
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+};
+
+const _delayLabel = (min) => {
+  if (min === null || min === undefined) return null;
+  if (min === 60)    return '+1h';
+  if (min === 1440)  return '+1day';
+  if (min === 2880)  return '+2day';
+  if (min === 5760)  return '+4day';
+  if (min === 10080) return '+1week';
+  if (min === 20160) return '+2week';
+  if (min < 60)      return `+${min}m`;
+  if (min < 1440)    return `+${min / 60}h`;
+  return `+${Math.round(min / 1440)}d`;
+};
+
+function _companionBadge(label, status, delayMin, scheduledAt) {
+  // Planned (feed not yet posted, delay configured)
+  if (!status && delayMin !== null && delayMin !== undefined) {
+    return `<span class="companion-badge companion-planned">${label} ${_delayLabel(delayMin)}</span>`;
+  }
+  if (status === 'pending' || status === 'processing') {
+    const t = scheduledAt ? ` · ${fmtTime(scheduledAt)}` : '';
+    return `<span class="companion-badge companion-pending">${label}${t} ⏰</span>`;
+  }
+  if (status === 'posted')  return `<span class="companion-badge companion-posted">${label} ✓</span>`;
+  if (status === 'failed')  return `<span class="companion-badge companion-failed">${label} ✕</span>`;
+  return '';
+}
 
 // ── Timeline rendering ────────────────────────────────────────────────────────
 function renderTimeline() {
@@ -652,27 +888,15 @@ function renderTimeline() {
       }
 
       const captionPreview = p.caption
-        ? p.caption.replace(/\n/g, ' ')
+        ? escHtml(p.caption).replace(/\n/g, ' ')
         : '<em>No caption</em>';
       const titleText = p.image?.title || p.image?.filename || '';
 
-      // Companion badges (story + reel) — only shown once feed post is live
-      let companionHTML = '';
-      if (p.status === 'posted') {
-        const storyClass = p.story_status === 'posted' ? 'companion-posted'
-                         : p.story_status === 'failed' ? 'companion-failed'
-                         : p.story_status === 'pending' ? 'companion-pending' : '';
-        const reelClass  = p.reel_status  === 'posted' ? 'companion-posted'
-                         : p.reel_status  === 'failed' ? 'companion-failed'
-                         : p.reel_status  === 'pending' ? 'companion-pending' : '';
-        const storyBadge = storyClass
-          ? `<span class="companion-badge ${storyClass}">Story ${_companionIcon(p.story_status)}</span>` : '';
-        const reelBadge  = reelClass
-          ? `<span class="companion-badge ${reelClass}">Reel ${_companionIcon(p.reel_status)}</span>`  : '';
-        if (storyBadge || reelBadge) {
-          companionHTML = `<div class="companion-row">${storyBadge}${reelBadge}</div>`;
-        }
-      }
+      // Companion badges (shown for planned, pending, processing, posted, failed)
+      const storyBadge = _companionBadge('Story', p.story_status, p.story_delay_minutes, p.story_scheduled_at);
+      const reelBadge  = _companionBadge('Reel',  p.reel_status,  p.reel_delay_minutes,  p.reel_scheduled_at);
+      const companionHTML = (storyBadge || reelBadge)
+        ? `<div class="companion-row">${storyBadge}${reelBadge}</div>` : '';
 
       row.innerHTML = `
         ${thumbHTML}
@@ -899,6 +1123,118 @@ $('picker-grid').addEventListener('scroll', () => {
   }
 });
 
+// ── Delay chip helpers ────────────────────────────────────────────────────────
+function _syncChips(chipsId, value) {
+  const strVal = value === null ? 'off' : String(value);
+  document.querySelectorAll(`#${chipsId} .delay-chip`).forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.value === strVal);
+  });
+}
+
+function setNewPostDelay(type, value) {
+  const parsed = value === 'off' ? null : parseInt(value, 10);
+  if (type === 'story') { state.storyDelay = parsed; _syncChips('story-chips', parsed); }
+  else {
+    state.reelDelay = parsed;
+    _syncChips('reel-chips', parsed);
+    $('reel-video-row').style.display = parsed !== null ? '' : 'none';
+    if (parsed === null) { state.reelVideoId = null; state.reelVideo = null; renderReelVideoPreview('new'); }
+  }
+}
+
+function setDetailDelay(type, value) {
+  const parsed = value === 'off' ? null : parseInt(value, 10);
+  if (type === 'story') { state.detailStoryDelay = parsed; _syncChips('detail-story-chips', parsed); }
+  else {
+    state.detailReelDelay = parsed;
+    _syncChips('detail-reel-chips', parsed);
+    $('detail-reel-video-row').style.display = parsed !== null ? '' : 'none';
+    if (parsed === null) { state.detailReelVideoId = null; state.detailReelVideo = null; renderReelVideoPreview('detail'); }
+  }
+}
+
+// ── Video picker ──────────────────────────────────────────────────────────────
+async function openVideoPicker(target) {
+  state.videoPickerTarget = target;
+  $('video-picker-modal').classList.add('show');
+  if (!state.allVideos.length) await loadAllVideos();
+  renderVideoPicker();
+}
+
+function closeVideoPicker() {
+  $('video-picker-modal').classList.remove('show');
+}
+
+async function loadAllVideos() {
+  try {
+    const r = await api('/api/video');
+    state.allVideos = (await r.json()).filter(v => v.status === 'done');
+  } catch(_) {}
+}
+
+function renderVideoPicker() {
+  const grid = $('vp-grid');
+  grid.innerHTML = '';
+  if (!state.allVideos.length) {
+    grid.innerHTML = '<div class="vp-empty">No completed videos yet.<br>Generate some in the Video tool.</div>';
+    return;
+  }
+  const currentId = state.videoPickerTarget === 'new' ? state.reelVideoId : state.detailReelVideoId;
+  for (const v of state.allVideos) {
+    const item = document.createElement('div');
+    item.className = 'vp-item' + (v.id === currentId ? ' selected' : '');
+    item.onclick = () => selectReelVideo(v);
+    const thumbHtml = v.thumb_url
+      ? `<img src="${withAuth(v.thumb_url)}" alt="" loading="lazy"><div class="vp-play"><div class="vp-play-circle">▶</div></div>`
+      : `<div class="vp-no-thumb">🎬</div>`;
+    const meta = [
+      v.n_images ? `${v.n_images} frames` : null,
+      v.width && v.height ? `${v.width}×${v.height}` : null,
+      v.fps ? `${v.fps}fps` : null,
+    ].filter(Boolean).join(' · ');
+    item.innerHTML = `
+      <div class="vp-thumb-wrap">${thumbHtml}</div>
+      <div class="vp-info">
+        <div class="vp-meta">${meta}</div>
+        ${v.prompt ? `<div class="vp-prompt">${v.prompt}</div>` : ''}
+      </div>`;
+    grid.appendChild(item);
+  }
+}
+
+function selectReelVideo(v) {
+  if (state.videoPickerTarget === 'new') {
+    state.reelVideoId = v.id;
+    state.reelVideo   = v;
+    renderReelVideoPreview('new');
+  } else {
+    state.detailReelVideoId = v.id;
+    state.detailReelVideo   = v;
+    renderReelVideoPreview('detail');
+  }
+  closeVideoPicker();
+}
+
+function renderReelVideoPreview(target) {
+  const isNew = target === 'new';
+  const previewEl = $(isNew ? 'reel-video-preview' : 'detail-reel-video-preview');
+  const v = isNew ? state.reelVideo : state.detailReelVideo;
+  if (!v) { previewEl.innerHTML = ''; return; }
+  const thumb = v.thumb_url
+    ? `<img class="sel-video-thumb" src="${withAuth(v.thumb_url)}" alt="">`
+    : `<span style="font-size:22px">🎬</span>`;
+  const label = v.prompt || `${v.width}×${v.height}`;
+  previewEl.innerHTML = `
+    ${thumb}
+    <span class="sel-video-name">${label}</span>
+    <button class="sel-video-clear" onclick="clearReelVideo('${target}')">×</button>`;
+}
+
+function clearReelVideo(target) {
+  if (target === 'new') { state.reelVideoId = null; state.reelVideo = null; renderReelVideoPreview('new'); }
+  else { state.detailReelVideoId = null; state.detailReelVideo = null; renderReelVideoPreview('detail'); }
+}
+
 // ── Schedule new post ─────────────────────────────────────────────────────────
 async function schedulePost() {
   if (state.selectedImages.length === 0) return;
@@ -910,10 +1246,14 @@ async function schedulePost() {
 
   try {
     const body = {
-      image_id:           primary.id,
-      carousel_image_ids: rest.length > 0 ? rest.map(img => img.id) : null,
-      caption:            $('caption-input').value.trim() || null,
-      scheduled_at:       state.computedDate,
+      image_id:             primary.id,
+      carousel_image_ids:   rest.length > 0 ? rest.map(img => img.id) : null,
+      caption:              $('caption-input').value.trim() || null,
+      scheduled_at:         state.computedDate,
+      story_delay_minutes:  state.storyDelay,
+      reel_delay_minutes:   state.reelDelay,
+      companion_time:       state.companionTime,
+      reel_video_id:        state.reelVideoId || null,
     };
     await api('/api/instagram/posts', {
       method: 'POST',
@@ -927,8 +1267,18 @@ async function schedulePost() {
     state.pickerImages = [];
     state.pickerPage = 0;
     state.pickerDone = false;
+    state.storyDelay = null;
+    state.reelDelay  = null;
+    state.companionTime = '18:23';
+    state.reelVideoId = null;
+    state.reelVideo   = null;
     $('picker-grid').innerHTML = '';
     $('caption-input').value = '';
+    _syncChips('story-chips', null);
+    _syncChips('reel-chips', null);
+    $('companion-time-input').value = '18:23';
+    $('reel-video-row').style.display = 'none';
+    renderReelVideoPreview('new');
     renderSelectedStrip();
 
     await loadTimeline();
@@ -968,6 +1318,23 @@ function openDetail(post) {
   $('detail-status-badge').innerHTML = `<span class="${statusClass(post.status)}">${statusLabel(post.status)}</span>`;
   $('detail-caption').value = post.caption || '';
 
+  // Companion delay chips (only editable for scheduled posts)
+  const isScheduled = post.status === 'scheduled';
+  state.detailStoryDelay    = post.story_delay_minutes ?? null;
+  state.detailReelDelay     = post.reel_delay_minutes  ?? null;
+  state.detailCompanionTime = post.companion_time || '18:23';
+  $('detail-companion-section').style.display = isScheduled ? '' : 'none';
+  _syncChips('detail-story-chips', state.detailStoryDelay);
+  _syncChips('detail-reel-chips',  state.detailReelDelay);
+  $('detail-companion-time').value = state.detailCompanionTime;
+  // Reel video selection
+  state.detailReelVideoId = post.reel_video_id || null;
+  state.detailReelVideo   = state.detailReelVideoId
+    ? (state.allVideos.find(v => v.id === state.detailReelVideoId) || null)
+    : null;
+  $('detail-reel-video-row').style.display = (isScheduled && state.detailReelDelay !== null) ? '' : 'none';
+  renderReelVideoPreview('detail');
+
   const isPosted = post.status === 'posted';
   const isFailed = post.status === 'failed';
   $('detail-post-now').style.display    = isPosted ? 'none' : '';
@@ -988,10 +1355,18 @@ function closeDetail(e) {
 async function saveDetail() {
   if (!state.activePost) return;
   try {
+    const patchBody = { caption: $('detail-caption').value.trim() || null };
+    // Always include delays so the server knows the user's intent (model_fields_set)
+    if (state.activePost.status === 'scheduled') {
+      patchBody.story_delay_minutes = state.detailStoryDelay;
+      patchBody.reel_delay_minutes  = state.detailReelDelay;
+      patchBody.companion_time      = state.detailCompanionTime;
+      patchBody.reel_video_id       = state.detailReelVideoId || null;
+    }
     await api(`/api/instagram/posts/${state.activePost.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ caption: $('detail-caption').value.trim() || null }),
+      body: JSON.stringify(patchBody),
     });
     ArtRium.toast('Saved ✓');
     closeDetail();
@@ -1082,6 +1457,8 @@ async function deletePost() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 $('offset-days').addEventListener('input', updateComputedDate);
+$('companion-time-input').addEventListener('change', (e) => { state.companionTime = e.target.value || '18:23'; });
+$('detail-companion-time').addEventListener('change', (e) => { state.detailCompanionTime = e.target.value || '18:23'; });
 
 window.addEventListener('load', async () => {
   const dot = $('dot');
@@ -1098,7 +1475,7 @@ window.addEventListener('load', async () => {
   });
 
   renderSelectedStrip();
-  await Promise.all([loadTimeline(), loadLastPost()]);
+  await Promise.all([loadTimeline(), loadLastPost(), loadAllVideos()]);
 });
 </script>
 </body>

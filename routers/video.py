@@ -1,14 +1,19 @@
 """
-Key-frame video generation — submit 2–3 images to ComfyUI's Wan 2.2 FLF2V
-workflow with RIFE VFI interpolation and VHS_VideoCombine h265 output.
+Key-frame video generation — two workflow types:
 
-POST /api/video/generate       → enqueue job, return {video_id}
-GET  /api/video/jobs/{id}      → poll status
-GET  /api/video/jobs/{id}/progress → lightweight progress (ComfyUI queue + phase)
-GET  /api/video/thumb/{id}     → first-frame JPEG thumbnail
-GET  /api/video/file/{fname}   → serve MP4
-GET  /api/videos               → list all videos
-DELETE /api/video/{id}         → delete
+  i2v_multi  Each image is animated independently (WanImageToVideo), clips concatenated.
+             Supports 1–3 images with per-image prompts and frame counts.
+
+  flf2v      Images are used as first/last key frames (WanFirstLastFrameToVideo).
+             Requires 2–3 images with a shared prompt.
+
+POST /api/video/generate            → enqueue job, return {video_id}
+GET  /api/video/jobs/{id}           → poll status
+GET  /api/video/jobs/{id}/progress  → lightweight progress (ComfyUI queue + phase)
+GET  /api/video/thumb/{id}          → first-frame JPEG thumbnail
+GET  /api/video/file/{fname}        → serve MP4
+GET  /api/videos                    → list all videos
+DELETE /api/video/{id}              → delete
 """
 import asyncio
 import logging
@@ -60,15 +65,18 @@ SAVE_NODE_ID  = "save"
 # ── Pydantic ──────────────────────────────────────────────────────────────────
 
 class GenerateVideoRequest(BaseModel):
-    image_ids: list[uuid.UUID]   # 2–3 image IDs in order (key frames)
+    image_ids: list[uuid.UUID]
+    workflow: str = "i2v_multi"    # "i2v_multi" | "flf2v"
     width:  int = 1088
     height: int = 1088
-    frame_count: int = 25
+    frame_count: int = 25          # flf2v: frames per transition; i2v_multi: per-image fallback
     fps:    int = 24
-    prompt: str = ""
+    prompt: str = ""               # flf2v: shared prompt; i2v_multi: per-image fallback
+    prompts: list[str] = []        # i2v_multi: per-image prompts (one per image_id)
+    frame_counts: list[int] = []   # i2v_multi: per-image frame counts (one per image_id)
 
 
-# ── Workflow builder ──────────────────────────────────────────────────────────
+# ── FLF2V workflow builder (key-frame transitions) ────────────────────────────
 
 def _transition_nodes(
     t: int,
@@ -128,15 +136,12 @@ def _transition_nodes(
     return nodes, p + "decode"
 
 
-def _build_workflow(
+def _build_flf2v_workflow(
     comfy_filenames: list[str],
     width: int, height: int, frame_count: int, fps: int,
     prompt: str, vid_prefix: str,
 ) -> dict:
-    """Build the full ComfyUI API-format prompt for 2–3 key frames.
-
-    Pipeline: FLF2V transitions → ImageBatch chain → RIFE VFI ×3 → VHS_VideoCombine h265
-    """
+    """FLF2V: transitions between key frames → ImageBatch chain → RIFE ×3 → VHS h265."""
     n_img = len(comfy_filenames)
     wf: dict = {}
 
@@ -185,7 +190,6 @@ def _build_workflow(
         "frames":                     ["batch_final", 0],
     }}
 
-    # VHS_VideoCombine → h265 MP4
     wf[SAVE_NODE_ID] = {"class_type": "VHS_VideoCombine", "inputs": {
         "frame_rate":      fps,
         "loop_count":      0,
@@ -200,6 +204,104 @@ def _build_workflow(
     }}
 
     return wf
+
+
+# ── i2v_multi workflow builder (independent clips per image) ──────────────────
+
+def _i2v_segment(
+    seg: int, img_node_id: str,
+    prompt: str, frame_count: int,
+    width: int, height: int, seed: int,
+) -> dict:
+    """One WanImageToVideo segment with 4-step LoRA, two-pass KSampler, RIFE ×2."""
+    p = f"s{seg}_"
+    return {
+        p+"clip":   {"class_type": "CLIPLoader",          "inputs": {"clip_name": _CLIP_NAME, "type": "wan", "device": "default"}},
+        p+"vae":    {"class_type": "VAELoader",           "inputs": {"vae_name": _VAE_NAME}},
+        p+"unet_h": {"class_type": "UNETLoader",          "inputs": {"unet_name": _UNET_HIGH, "weight_dtype": "default"}},
+        p+"unet_l": {"class_type": "UNETLoader",          "inputs": {"unet_name": _UNET_LOW,  "weight_dtype": "default"}},
+        p+"lora_h": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_h", 0], "lora_name": _LORA_HIGH, "strength_model": 1.0}},
+        p+"lora_l": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_l", 0], "lora_name": _LORA_LOW,  "strength_model": 1.0}},
+        p+"samp_h": {"class_type": "ModelSamplingSD3",    "inputs": {"model": [p+"lora_h", 0], "shift": 5.0}},
+        p+"samp_l": {"class_type": "ModelSamplingSD3",    "inputs": {"model": [p+"lora_l", 0], "shift": 5.0}},
+        p+"pos":    {"class_type": "CLIPTextEncode",      "inputs": {"clip": [p+"clip", 0], "text": prompt}},
+        p+"neg":    {"class_type": "CLIPTextEncode",      "inputs": {"clip": [p+"clip", 0], "text": _NEG_PROMPT}},
+        p+"i2v":    {"class_type": "WanImageToVideo",     "inputs": {
+            "width": width, "height": height, "length": frame_count, "batch_size": 1,
+            "positive": [p+"pos", 0], "negative": [p+"neg", 0],
+            "vae": [p+"vae", 0], "start_image": [img_node_id, 0],
+        }},
+        p+"ks_h":   {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": [p+"samp_h", 0], "add_noise": "enable", "noise_seed": seed,
+            "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple",
+            "start_at_step": 0, "end_at_step": 2, "return_with_leftover_noise": "enable",
+            "positive": [p+"i2v", 0], "negative": [p+"i2v", 1], "latent_image": [p+"i2v", 2],
+        }},
+        p+"ks_l":   {"class_type": "KSamplerAdvanced", "inputs": {
+            "model": [p+"samp_l", 0], "add_noise": "disable", "noise_seed": 0,
+            "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple",
+            "start_at_step": 2, "end_at_step": 10000, "return_with_leftover_noise": "disable",
+            "positive": [p+"i2v", 0], "negative": [p+"i2v", 1], "latent_image": [p+"ks_h", 0],
+        }},
+        p+"decode": {"class_type": "VAEDecode", "inputs": {"samples": [p+"ks_l", 0], "vae": [p+"vae", 0]}},
+        p+"rife":   {"class_type": "RIFE VFI", "inputs": {
+            "ckpt_name": _RIFE_CKPT, "clear_cache_after_n_frames": 10, "multiplier": 2,
+            "fast_mode": True, "ensemble": True, "scale_factor": 1,
+            "dtype": "float32", "torch_compile": False, "batch_size": 1,
+            "frames": [p+"decode", 0],
+        }},
+    }
+
+
+def _build_i2v_multi_workflow(
+    comfy_filenames: list[str],
+    prompts: list[str],
+    frame_counts: list[int],
+    width: int, height: int, fps: int,
+    vid_prefix: str,
+) -> tuple[dict, str]:
+    """i2v_multi: each image animated independently, RIFE clips concatenated."""
+    n = len(comfy_filenames)
+    wf: dict = {}
+    rife_ids: list[str] = []
+
+    for i, (fname, prompt, fc) in enumerate(zip(comfy_filenames, prompts, frame_counts)):
+        img_id = f"img{i}"
+        wf[img_id] = {"class_type": "LoadImage", "inputs": {"image": fname, "upload": "image"}}
+        wf.update(_i2v_segment(i, img_id, prompt, fc, width, height, random.randint(0, 2**32 - 1)))
+        rife_ids.append(f"s{i}_rife")
+
+    if n == 1:
+        frames_node = rife_ids[0]
+    elif n == 2:
+        wf["batch01"] = {"class_type": "ImageBatch", "inputs": {
+            "image1": [rife_ids[0], 0], "image2": [rife_ids[1], 0],
+        }}
+        frames_node = "batch01"
+    else:
+        wf["batch01"] = {"class_type": "ImageBatch", "inputs": {
+            "image1": [rife_ids[0], 0], "image2": [rife_ids[1], 0],
+        }}
+        wf["batch012"] = {"class_type": "ImageBatch", "inputs": {
+            "image1": ["batch01", 0], "image2": [rife_ids[2], 0],
+        }}
+        frames_node = "batch012"
+
+    save_id = "i2v_save"
+    wf[save_id] = {"class_type": "VHS_VideoCombine", "inputs": {
+        "frame_rate":      fps,
+        "loop_count":      0,
+        "filename_prefix": vid_prefix,
+        "format":          "video/h265-mp4",
+        "pix_fmt":         "yuv420p10le",
+        "crf":             22,
+        "save_metadata":   False,
+        "pingpong":        False,
+        "save_output":     True,
+        "images":          [frames_node, 0],
+    }}
+
+    return wf, save_id
 
 
 # ── ComfyUI helpers ───────────────────────────────────────────────────────────
@@ -290,8 +392,8 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
             images_by_id = {img.id: img for img in img_result.scalars().all()}
 
         ordered_images = [images_by_id[iid] for iid in req.image_ids if iid in images_by_id]
-        if len(ordered_images) < 2:
-            raise ValueError("Need at least 2 valid images")
+        if len(ordered_images) < 1:
+            raise ValueError("Need at least 1 valid image")
 
         async with httpx.AsyncClient(timeout=60) as client:
             comfy_names: list[str] = []
@@ -305,9 +407,22 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
                 logger.info("Uploaded %s → ComfyUI:%s", src.name, assigned_name)
 
             _set("submitting", "Submitting workflow to ComfyUI…", 20)
-            wf = _build_workflow(
-                comfy_names, req.width, req.height, req.frame_count, req.fps, req.prompt, prefix,
-            )
+            n_imgs = len(comfy_names)
+
+            if req.workflow == "flf2v":
+                if n_imgs < 2:
+                    raise ValueError("FLF2V requires at least 2 images")
+                wf = _build_flf2v_workflow(
+                    comfy_names, req.width, req.height, req.frame_count, req.fps, req.prompt, prefix,
+                )
+                active_save_node = SAVE_NODE_ID
+            else:  # i2v_multi
+                prompts_list = req.prompts if len(req.prompts) == n_imgs else [req.prompt] * n_imgs
+                fc_list = req.frame_counts if len(req.frame_counts) == n_imgs else [req.frame_count] * n_imgs
+                wf, active_save_node = _build_i2v_multi_workflow(
+                    comfy_names, prompts_list, fc_list, req.width, req.height, req.fps, prefix,
+                )
+
             prompt_id = await _post_prompt(client, wf)
             logger.info("Video job %s → ComfyUI prompt %s", video_id, prompt_id)
 
@@ -322,7 +437,7 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
 
         _set("finalizing", "Generation complete — saving video…", 92)
 
-        save_out = outputs.get(SAVE_NODE_ID, {})
+        save_out = outputs.get(active_save_node, {})
         gifs = save_out.get("gifs") or save_out.get("videos") or []
         if not gifs:
             raise RuntimeError(f"VHS_VideoCombine output missing from history: {save_out}")
@@ -384,15 +499,29 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
 @router.post("/generate", status_code=202)
 async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(get_db)):
     n = len(body.image_ids)
-    if not (2 <= n <= 3):
-        raise HTTPException(status_code=400, detail="Provide 2 or 3 image IDs")
-    if body.frame_count < 5 or body.frame_count > 81:
-        raise HTTPException(status_code=400, detail="frame_count must be 5–81")
+    if body.workflow == "flf2v":
+        if not (2 <= n <= 3):
+            raise HTTPException(status_code=400, detail="flf2v requires 2 or 3 image IDs")
+        if body.frame_count < 5 or body.frame_count > 81:
+            raise HTTPException(status_code=400, detail="frame_count must be 5–81")
+    else:
+        if not (1 <= n <= 3):
+            raise HTTPException(status_code=400, detail="Provide 1, 2, or 3 image IDs")
+        for fc in body.frame_counts:
+            if not (5 <= fc <= 81):
+                raise HTTPException(status_code=400, detail="frame_counts values must be 5–81")
+
+    # Summarise per-image prompts for display
+    if body.workflow == "i2v_multi" and body.prompts:
+        prompt_display = " | ".join(p for p in body.prompts if p) or body.prompt or None
+    else:
+        prompt_display = body.prompt or None
 
     video = Video(
         id=uuid.uuid4(),
         image_ids=body.image_ids,
-        prompt=body.prompt or None,
+        workflow=body.workflow,
+        prompt=prompt_display,
         width=body.width,
         height=body.height,
         frame_count=body.frame_count,
@@ -406,7 +535,7 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
     await db.refresh(video)
 
     asyncio.create_task(_run_generation(video.id, body))
-    logger.info("Queued video generation job %s (%d images)", video.id, n)
+    logger.info("Queued video generation job %s (%s, %d images)", video.id, body.workflow, n)
 
     return {"video_id": str(video.id), "status": "generating"}
 
@@ -473,7 +602,6 @@ async def delete_video(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         p = settings.storage_dir / video.filepath
         if p.exists():
             p.unlink(missing_ok=True)
-    # Also clean up thumbnail
     thumb = settings.videos_dir / f"{video_id}_thumb.jpg"
     thumb.unlink(missing_ok=True)
     await db.delete(video)
@@ -495,6 +623,7 @@ def _serialize(v: Video) -> dict:
     return {
         "id":          str(v.id),
         "status":      v.status,
+        "workflow":    v.workflow or "flf2v",
         "filename":    v.filename,
         "url":         f"/api/video/file/{v.filename}" if v.filename else None,
         "thumb_url":   f"/api/video/thumb/{v.id}" if v.status == "done" else None,

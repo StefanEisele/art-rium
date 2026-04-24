@@ -93,6 +93,7 @@ def _serialize(post: InstagramPost, images: dict[uuid.UUID, "Image"] | None = No
         "reel_status":     post.reel_status,
         "reel_media_id":   post.reel_media_id,
         "reel_video_id":   str(post.reel_video_id) if post.reel_video_id else None,
+        "error":           post.error,
         "created_at": post.created_at.isoformat(),
         "updated_at": post.updated_at.isoformat(),
     }
@@ -298,7 +299,7 @@ async def post_now(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
             img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
             images = {i.id: i for i in img_result.scalars().all()}
 
-            # Step 1 — create individual carousel item containers
+            # Step 1 — create individual carousel item containers and wait for each
             child_ids: list[str] = []
             for img_id in all_ids:
                 img = images.get(img_id)
@@ -317,8 +318,10 @@ async def post_now(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
                     err = body1["error"]
                     logger.error(f"Instagram carousel item error: {err}")
                     raise HTTPException(status_code=502, detail=err.get("message", "Instagram API error"))
-                child_ids.append(body1["id"])
-                logger.info(f"Carousel item container: {body1['id']} ({img.filename})")
+                item_id = body1["id"]
+                child_ids.append(item_id)
+                logger.info(f"Carousel item container: {item_id} ({img.filename}) — waiting…")
+                await _wait_container_ready(client, graph, token, item_id)
 
             # Step 2 — create carousel container
             r2 = await client.post(
@@ -360,7 +363,11 @@ async def post_now(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
             container_id = body1["id"]
             logger.info(f"Container created: {container_id}")
 
-        # ── Publish ──────────────────────────────────────────────────────────
+        # ── Wait for container to be ready, then publish ─────────────────────
+        from workers.instagram_scheduler import _wait_container_ready
+        logger.info("post-now %s — waiting for container %s…", post_id, container_id)
+        await _wait_container_ready(client, graph, token, container_id)
+
         r_pub = await client.post(
             f"{graph}/{uid}/media_publish",
             data={

@@ -18,6 +18,11 @@
     .card { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 14px; }
     .card h2 { font-size: 15px; font-weight: 700; }
 
+    /* Mode chips */
+    .mode-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+    .mode-chip { font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all 0.13s; }
+    .mode-chip.active { background: var(--accent); border-color: var(--accent); color: #000; }
+
     /* Images strip */
     .images-strip { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; min-height: 72px; }
     .images-strip::-webkit-scrollbar { display: none; }
@@ -44,10 +49,21 @@
     .res-chip { font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all 0.13s; }
     .res-chip.active { background: var(--accent); border-color: var(--accent); color: #000; }
 
-    /* Prompt */
-    textarea#prompt-input { width: 100%; resize: none; background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); font-size: 14px; padding: 10px 12px; outline: none; font-family: inherit; line-height: 1.5; transition: border-color 0.2s; min-height: 60px; }
+    /* Shared prompt (flf2v) */
+    textarea#prompt-input { width: 100%; box-sizing: border-box; resize: none; background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); font-size: 14px; padding: 10px 12px; outline: none; font-family: inherit; line-height: 1.5; transition: border-color 0.2s; min-height: 60px; }
     textarea#prompt-input:focus { border-color: var(--accent); }
     textarea#prompt-input::placeholder { color: var(--text-dim); }
+
+    /* Per-image section (i2v_multi) */
+    .per-img-section { display: flex; flex-direction: column; gap: 10px; }
+    .per-img-row { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .per-img-header { display: flex; align-items: center; gap: 10px; }
+    .per-img-thumb { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; flex-shrink: 0; }
+    .per-img-num { font-size: 13px; font-weight: 700; }
+    .per-img-prompt { width: 100%; box-sizing: border-box; resize: none; background: var(--bg); border: 1.5px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; padding: 8px 10px; outline: none; font-family: inherit; line-height: 1.5; transition: border-color 0.2s; min-height: 52px; }
+    .per-img-prompt:focus { border-color: var(--accent); }
+    .per-img-prompt::placeholder { color: var(--text-dim); }
+    .per-img-frames-row { display: flex; align-items: center; gap: 10px; }
 
     /* Generate button */
     .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius); border: none; background: var(--accent); color: #000; font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.13s; }
@@ -138,16 +154,23 @@
     <!-- Form -->
     <div id="form-section">
       <div class="card">
-        <h2>New Key-Frame Video</h2>
+        <h2>New Video</h2>
+
+        <!-- Mode selector -->
+        <div class="field-row">
+          <span class="field-label">Mode</span>
+          <div class="mode-chips" id="mode-chips">
+            <button class="mode-chip active" data-mode="i2v_multi" onclick="setMode('i2v_multi',this)">Animate (i2v)</button>
+            <button class="mode-chip" data-mode="flf2v" onclick="setMode('flf2v',this)">Transitions (FLF2V)</button>
+          </div>
+        </div>
 
         <!-- Image picker strip -->
         <div>
           <div class="images-strip" id="images-strip">
             <button class="add-btn" id="add-btn" onclick="openPicker()">+</button>
           </div>
-          <div style="font-size:12px;color:var(--text-dim);margin-top:6px" id="img-hint">
-            Select 2–3 key frames in order. The AI animates transitions between them.
-          </div>
+          <div style="font-size:12px;color:var(--text-dim);margin-top:6px" id="img-hint"></div>
         </div>
 
         <!-- Resolution -->
@@ -160,13 +183,6 @@
           </div>
         </div>
 
-        <!-- Frames per transition -->
-        <div class="field-row">
-          <span class="field-label">Frames</span>
-          <input class="field-input" type="number" id="frame-count" value="25" min="5" max="81" step="1">
-          <span style="font-size:13px;color:var(--text-dim)">per transition</span>
-        </div>
-
         <!-- FPS -->
         <div class="field-row">
           <span class="field-label">FPS</span>
@@ -177,8 +193,18 @@
           </select>
         </div>
 
-        <!-- Prompt -->
-        <textarea id="prompt-input" rows="2" placeholder="Optional motion prompt (e.g. 'slow zoom in, cinematic')"></textarea>
+        <!-- Per-image section (i2v_multi only) -->
+        <div id="per-img-section" class="per-img-section" style="display:none"></div>
+
+        <!-- Frames per transition (flf2v only) -->
+        <div class="field-row" id="shared-frames-row" style="display:none">
+          <span class="field-label">Frames</span>
+          <input class="field-input" type="number" id="frame-count" value="25" min="5" max="81" step="1">
+          <span style="font-size:13px;color:var(--text-dim)">per transition</span>
+        </div>
+
+        <!-- Shared prompt (flf2v only) -->
+        <textarea id="prompt-input" rows="2" placeholder="Optional motion prompt (e.g. 'slow zoom in, cinematic')" style="display:none"></textarea>
 
         <button class="gen-btn" id="gen-btn" onclick="generate()" disabled>Generate Video</button>
       </div>
@@ -198,7 +224,7 @@
 <div id="picker-modal">
   <div class="picker-header">
     <button class="back-btn" onclick="closePicker()">✕</button>
-    <h2>Choose Key Frames</h2>
+    <h2>Choose Images</h2>
     <span class="picker-count" id="picker-count">0</span>
     <button class="picker-done-btn" onclick="closePicker()">Done</button>
   </div>
@@ -215,19 +241,35 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
   apiKey: ArtRium.getApiKey(),
+  mode: 'i2v_multi',
   selectedImages: [],
+  perImageSettings: new Map(),   // imageId → {prompt, frameCount}
   width: 1088, height: 1088,
   pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
   pickerSelection: new Map(),
   videos: [],
-  pollingJobs: new Set(),
-  progressIntervals: new Map(),   // video_id → intervalId
+  progressIntervals: new Map(),
 };
 
 const $ = id => document.getElementById(id);
 const api = (url, opts={}) => ArtRium.apiFetch(url, opts, state.apiKey);
 const withAuth = url => ArtRium.withAuth(url, state.apiKey);
 const PICKER_LIMIT = 30;
+
+// ── Mode ──────────────────────────────────────────────────────────────────────
+function setMode(mode, el) {
+  state.mode = mode;
+  document.querySelectorAll('.mode-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  renderStrip();
+  _updateModeFields();
+}
+
+function _updateModeFields() {
+  const isI2v = state.mode === 'i2v_multi';
+  $('shared-frames-row').style.display = isI2v ? 'none' : '';
+  $('prompt-input').style.display      = isI2v ? 'none' : '';
+}
 
 // ── Resolution ────────────────────────────────────────────────────────────────
 function setRes(w, h, el) {
@@ -250,11 +292,21 @@ function renderStrip() {
   });
   const n = state.selectedImages.length;
   addBtn.style.display = n >= 3 ? 'none' : '';
-  $('img-hint').textContent = n === 0
-    ? 'Select 2–3 key frames in order. The AI animates transitions between them.'
-    : n < 2 ? `${n} selected — add at least one more.`
-    : `${n} key frames · ${n-1} transition${n>2?'s':''}.`;
-  $('gen-btn').disabled = n < 2;
+  const isI2v = state.mode === 'i2v_multi';
+  if (isI2v) {
+    $('img-hint').textContent = n === 0
+      ? 'Select 1–3 images. Each gets its own animation clip.'
+      : n === 1 ? '1 image — animated loop. Add more for separate clips.'
+      : `${n} images — ${n} independent clips, concatenated.`;
+    $('gen-btn').disabled = n < 1;
+  } else {
+    $('img-hint').textContent = n === 0
+      ? 'Select 2–3 key frames. The AI generates transitions between them.'
+      : n < 2 ? `${n} selected — add at least one more.`
+      : `${n} key frames · ${n-1} transition${n > 2 ? 's' : ''}.`;
+    $('gen-btn').disabled = n < 2;
+  }
+  renderPerImageSection();
 }
 
 function removeImage(idx) {
@@ -262,9 +314,53 @@ function removeImage(idx) {
   renderStrip();
 }
 
+// ── Per-image section ─────────────────────────────────────────────────────────
+function renderPerImageSection() {
+  const sec = $('per-img-section');
+  if (state.mode !== 'i2v_multi' || state.selectedImages.length === 0) {
+    sec.style.display = 'none';
+    return;
+  }
+  sec.style.display = '';
+
+  // Snapshot current input values before clearing
+  sec.querySelectorAll('.per-img-row').forEach(row => {
+    const id = row.dataset.imgId;
+    if (!id) return;
+    state.perImageSettings.set(id, {
+      prompt:     row.querySelector('.per-img-prompt')?.value || '',
+      frameCount: parseInt(row.querySelector('.per-img-frames')?.value) || 25,
+    });
+  });
+
+  sec.innerHTML = '';
+  state.selectedImages.forEach((img, idx) => {
+    const saved = state.perImageSettings.get(img.id) || {};
+    const row = document.createElement('div');
+    row.className = 'per-img-row';
+    row.dataset.imgId = img.id;
+    row.innerHTML = `
+      <div class="per-img-header">
+        <img class="per-img-thumb" src="${withAuth(img.thumb_url)}" alt="">
+        <span class="per-img-num">Image ${idx + 1}</span>
+      </div>
+      <textarea class="per-img-prompt" rows="2" placeholder="Animation prompt for image ${idx + 1}…">${_esc(saved.prompt || '')}</textarea>
+      <div class="per-img-frames-row">
+        <span class="field-label">Frames</span>
+        <input class="field-input per-img-frames" type="number" value="${saved.frameCount || 25}" min="5" max="81" step="1">
+      </div>
+    `;
+    sec.appendChild(row);
+  });
+}
+
+function _esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 // ── Image picker ──────────────────────────────────────────────────────────────
 function openPicker() {
-  state.pickerSelection = new Map(state.selectedImages.map((img,i) => [img.id, i+1]));
+  state.pickerSelection = new Map(state.selectedImages.map((img, i) => [img.id, i + 1]));
   $('picker-modal').classList.add('show');
   if (!state.pickerImages.length) loadPickerImages(true);
   else refreshPickerCells();
@@ -318,8 +414,8 @@ function toggleCell(cell, img) {
     const sorted = [...state.pickerSelection.entries()].sort((a,b)=>a[1]-b[1]);
     state.pickerSelection = new Map(sorted.map(([id],i)=>[id,i+1]));
   } else {
-    if (state.pickerSelection.size >= 3) { ArtRium.toast('Maximum 3 key frames', true); return; }
-    state.pickerSelection.set(img.id, state.pickerSelection.size+1);
+    if (state.pickerSelection.size >= 3) { ArtRium.toast('Maximum 3 images', true); return; }
+    state.pickerSelection.set(img.id, state.pickerSelection.size + 1);
   }
   refreshPickerCells();
   updatePickerCount();
@@ -354,30 +450,50 @@ $('picker-grid').addEventListener('scroll', () => {
 
 // ── Generate ──────────────────────────────────────────────────────────────────
 async function generate() {
-  if (state.selectedImages.length < 2) return;
+  const n = state.selectedImages.length;
+  if (n < 1) return;
+  if (state.mode === 'flf2v' && n < 2) return;
   const btn = $('gen-btn');
   btn.disabled = true; btn.textContent = 'Queuing…';
   try {
+    let body;
+    if (state.mode === 'i2v_multi') {
+      const rows = Array.from($('per-img-section').querySelectorAll('.per-img-row'));
+      body = {
+        image_ids:    state.selectedImages.map(i => i.id),
+        workflow:     'i2v_multi',
+        width:        state.width,
+        height:       state.height,
+        fps:          parseInt($('fps-select').value) || 24,
+        frame_count:  25,
+        prompts:      rows.map(r => r.querySelector('.per-img-prompt').value.trim()),
+        frame_counts: rows.map(r => parseInt(r.querySelector('.per-img-frames').value) || 25),
+      };
+    } else {
+      body = {
+        image_ids:   state.selectedImages.map(i => i.id),
+        workflow:    'flf2v',
+        width:       state.width,
+        height:      state.height,
+        fps:         parseInt($('fps-select').value) || 24,
+        frame_count: parseInt($('frame-count').value) || 25,
+        prompt:      $('prompt-input').value.trim(),
+      };
+    }
     const r = await api('/api/video/generate', {
       method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        image_ids: state.selectedImages.map(i=>i.id),
-        width:  state.width,
-        height: state.height,
-        frame_count: parseInt($('frame-count').value)||25,
-        fps: parseInt($('fps-select').value)||24,
-        prompt: $('prompt-input').value.trim(),
-      }),
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
     });
     const d = await r.json();
     ArtRium.toast('Video generation started ✓');
     await loadVideos();
     startProgressPolling(d.video_id);
   } catch(e) {
-    ArtRium.toast(e.message||'Failed to start generation', true);
+    ArtRium.toast(e.message || 'Failed to start generation', true);
   } finally {
-    btn.disabled = state.selectedImages.length < 2;
+    const minN = state.mode === 'flf2v' ? 2 : 1;
+    btn.disabled = state.selectedImages.length < minN;
     btn.textContent = 'Generate Video';
   }
 }
@@ -393,17 +509,9 @@ function startProgressPolling(videoId) {
       if (prog.phase === 'done' || prog.phase === 'failed') {
         clearInterval(intervalId);
         state.progressIntervals.delete(videoId);
-        if (prog.phase === 'done') {
-          ArtRium.toast('Video ready ✓');
-          const r2 = await api(`/api/video/jobs/${videoId}`);
-          const v = await r2.json();
-          updateVideoCard(v);
-        } else {
-          ArtRium.toast('Video generation failed', true);
-          const r2 = await api(`/api/video/jobs/${videoId}`);
-          const v = await r2.json();
-          updateVideoCard(v);
-        }
+        ArtRium.toast(prog.phase === 'done' ? 'Video ready ✓' : 'Video generation failed', prog.phase !== 'done');
+        const r2 = await api(`/api/video/jobs/${videoId}`);
+        updateVideoCard(await r2.json());
       }
     } catch(_) {}
   }, 4000);
@@ -413,21 +521,12 @@ function startProgressPolling(videoId) {
 function applyProgress(videoId, prog) {
   const card = document.getElementById(`vc-${videoId}`);
   if (!card) return;
-  const track  = card.querySelector('.progress-track');
-  const fill   = card.querySelector('.progress-fill');
-  const msg    = card.querySelector('.progress-message');
-  if (!track) return;
-
-  const pct = prog.pct || 0;
+  const fill = card.querySelector('.progress-fill');
+  const msg  = card.querySelector('.progress-message');
+  if (!fill) return;
   const isPulse = prog.phase === 'running' || prog.phase === 'queued';
-
-  if (isPulse) {
-    fill.classList.add('pulse');
-    fill.style.width = '100%';
-  } else {
-    fill.classList.remove('pulse');
-    fill.style.width = pct + '%';
-  }
+  if (isPulse) { fill.classList.add('pulse'); fill.style.width = '100%'; }
+  else { fill.classList.remove('pulse'); fill.style.width = (prog.pct || 0) + '%'; }
   if (msg) msg.textContent = prog.message || '';
 }
 
@@ -451,9 +550,15 @@ function renderVideos() {
   const list = $('videos-list');
   if (!state.videos.length) { list.innerHTML = '<div class="video-empty">No videos yet.</div>'; return; }
   list.innerHTML = '';
-  for (const v of state.videos) {
-    list.appendChild(makeVideoCard(v));
+  for (const v of state.videos) list.appendChild(makeVideoCard(v));
+}
+
+function _videoMeta(v) {
+  const n = v.n_images || '?';
+  if (v.workflow === 'i2v_multi') {
+    return `${n} i2v clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
   }
+  return `${n} frames · ${v.width}×${v.height} · ${v.frame_count}fr · ${v.fps}fps`;
 }
 
 function makeVideoCard(v) {
@@ -462,8 +567,8 @@ function makeVideoCard(v) {
   card.id = `vc-${v.id}`;
 
   const statusClass = `status-${v.status}`;
-  const statusLabel = {generating:'Generating…',done:'Done',failed:'Failed'}[v.status]||v.status;
-  const meta = `${v.n_images||'?'} frames · ${v.width}×${v.height} · ${v.frame_count}fr · ${v.fps}fps`;
+  const statusLabel = {generating:'Generating…',done:'Done',failed:'Failed'}[v.status] || v.status;
+  const meta = _videoMeta(v);
   const date = fmtDate(v.created_at);
 
   let body = '';
@@ -493,7 +598,7 @@ function makeVideoCard(v) {
         <div class="progress-message">Starting…</div>
       </div>`;
   } else if (v.status === 'failed') {
-    body = `<div class="error-text">${v.error||'Unknown error'}</div>`;
+    body = `<div class="error-text">${v.error || 'Unknown error'}</div>`;
   }
 
   const actions = v.status === 'done' && v.url
@@ -530,14 +635,13 @@ function updateVideoCard(v) {
     if (list.querySelector('.video-empty')) list.innerHTML = '';
     list.prepend(newCard);
   }
-  // Resume progress polling if still generating
   if (v.status === 'generating') startProgressPolling(v.id);
 }
 
 async function deleteVideo(id) {
   try {
     await api(`/api/video/${id}`, {method:'DELETE'});
-    state.videos = state.videos.filter(v=>v.id!==id);
+    state.videos = state.videos.filter(v => v.id !== id);
     clearInterval(state.progressIntervals.get(id));
     state.progressIntervals.delete(id);
     ArtRium.toast('Deleted');

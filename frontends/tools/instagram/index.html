@@ -532,6 +532,16 @@
     .detail-meta { display: flex; flex-direction: column; gap: 4px; }
     .detail-meta .detail-date { font-size: 14px; font-weight: 600; }
     .detail-meta .detail-title { font-size: 13px; color: var(--text-dim); }
+    .detail-schedule-edit { display: flex; gap: 8px; align-items: center; }
+    .detail-sched-date, .detail-sched-time {
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 8px; color: var(--text); font-size: 13px; font-weight: 600;
+      padding: 6px 10px; outline: none; font-family: inherit;
+      transition: border-color 0.2s; -webkit-appearance: none; appearance: none;
+    }
+    .detail-sched-date { flex: 1; }
+    .detail-sched-time { width: 100px; }
+    .detail-sched-date:focus, .detail-sched-time:focus { border-color: var(--accent); }
 
     textarea#detail-caption {
       width: 100%; resize: none;
@@ -554,6 +564,29 @@
     .detail-btn.mark-posted { background: rgba(50,215,75,0.15); color: var(--green); border: 1.5px solid rgba(50,215,75,0.3); }
     .detail-btn.cancel-post { background: var(--surface2); color: var(--text-dim); border: 1.5px solid var(--border); }
     .detail-btn.delete { background: rgba(255,69,58,0.12); color: var(--red); border: 1.5px solid rgba(255,69,58,0.2); }
+
+    /* ── Hashtag picker ── */
+    .hashtag-row {
+      display: flex; gap: 8px; align-items: center;
+    }
+    .hashtag-select {
+      flex: 1;
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 8px; color: var(--text); font-size: 13px; font-weight: 500;
+      padding: 8px 10px; outline: none; font-family: inherit;
+      -webkit-appearance: none; appearance: none;
+      transition: border-color 0.2s;
+      cursor: pointer;
+    }
+    .hashtag-select:focus { border-color: var(--accent); }
+    .hashtag-add-btn {
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 8px; color: var(--text-dim); font-size: 13px; font-weight: 700;
+      padding: 8px 14px; cursor: pointer; font-family: inherit;
+      transition: all 0.13s; white-space: nowrap; flex-shrink: 0;
+    }
+    .hashtag-add-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .hashtag-add-btn:active { transform: scale(0.96); }
 
     /* toast */
     #toast {
@@ -603,6 +636,21 @@
 
       <!-- Caption -->
       <textarea id="caption-input" placeholder="Write a caption…" rows="3"></textarea>
+
+      <!-- Hashtag picker -->
+      <div class="hashtag-row">
+        <select id="hashtag-select" class="hashtag-select">
+          <option value="">— Add hashtag set —</option>
+          <option value="#aiart #generativeart #aigenerated #aiartwork #aiartcommunity">AI Art — Community</option>
+          <option value="#aiart #aiartist #aicreative #artificialintelligenceart #aidigitalart">AI Art — Artists</option>
+          <option value="#generativeart #computerart #algorithmicart #creativecoding #proceduralart">Generative Art</option>
+          <option value="#aiart #digitalart #digitalpainting #digitalartist #digitalillustration">AI + Digital Art</option>
+          <option value="#aiart #abstractart #abstractdigitalart #aiabstract #generativeart">AI Abstract</option>
+          <option value="#aiart #ailandscape #ainature #ainatureart #aigenerated">AI Landscape</option>
+          <option value="#art #artist #artistsoninstagram #artwork #artoftheday">Artist Community</option>
+        </select>
+        <button class="hashtag-add-btn" onclick="addHashtagSet('caption-input', 'hashtag-select')">Add</button>
+      </div>
 
       <!-- Offset scheduling -->
       <div class="schedule-row">
@@ -693,11 +741,31 @@
 
     <div class="detail-meta">
       <div class="detail-date" id="detail-date"></div>
+      <div class="detail-schedule-edit" id="detail-schedule-edit" style="display:none">
+        <input type="date" id="detail-sched-date" class="detail-sched-date">
+        <input type="time" id="detail-sched-time" class="detail-sched-time">
+      </div>
       <div class="detail-title" id="detail-title-text"></div>
       <div id="detail-status-badge"></div>
+      <div id="detail-error-msg" style="display:none;font-size:12px;color:var(--red);margin-top:4px;word-break:break-all"></div>
     </div>
 
     <textarea id="detail-caption" placeholder="Caption…" rows="3"></textarea>
+
+    <!-- Hashtag picker -->
+    <div class="hashtag-row">
+      <select id="detail-hashtag-select" class="hashtag-select">
+        <option value="">— Add hashtag set —</option>
+        <option value="#aiart #generativeart #aigenerated #aiartwork #aiartcommunity">AI Art — Community</option>
+        <option value="#aiart #aiartist #aicreative #artificialintelligenceart #aidigitalart">AI Art — Artists</option>
+        <option value="#generativeart #computerart #algorithmicart #creativecoding #proceduralart">Generative Art</option>
+        <option value="#aiart #digitalart #digitalpainting #digitalartist #digitalillustration">AI + Digital Art</option>
+        <option value="#aiart #abstractart #abstractdigitalart #aiabstract #generativeart">AI Abstract</option>
+        <option value="#aiart #ailandscape #ainature #ainatureart #aigenerated">AI Landscape</option>
+        <option value="#art #artist #artistsoninstagram #artwork #artoftheday">Artist Community</option>
+      </select>
+      <button class="hashtag-add-btn" onclick="addHashtagSet('detail-caption', 'detail-hashtag-select')">Add</button>
+    </div>
 
     <!-- Companion delay selectors (only for scheduled posts) -->
     <div class="companion-delay-section" id="detail-companion-section" style="display:none">
@@ -1188,7 +1256,7 @@ function renderVideoPicker() {
       ? `<img src="${withAuth(v.thumb_url)}" alt="" loading="lazy"><div class="vp-play"><div class="vp-play-circle">▶</div></div>`
       : `<div class="vp-no-thumb">🎬</div>`;
     const meta = [
-      v.n_images ? `${v.n_images} frames` : null,
+      v.n_images ? (v.n_images === 1 ? '1 image · i2v' : `${v.n_images} frames`) : null,
       v.width && v.height ? `${v.width}×${v.height}` : null,
       v.fps ? `${v.fps}fps` : null,
     ].filter(Boolean).join(' · ');
@@ -1316,10 +1384,27 @@ function openDetail(post) {
     ? `Carousel · ${imgs.length} images${titleText ? ' · ' + titleText : ''}`
     : titleText;
   $('detail-status-badge').innerHTML = `<span class="${statusClass(post.status)}">${statusLabel(post.status)}</span>`;
+  const errEl = $('detail-error-msg');
+  if (post.status === 'failed' && post.error) {
+    errEl.textContent = post.error;
+    errEl.style.display = '';
+  } else {
+    errEl.style.display = 'none';
+  }
   $('detail-caption').value = post.caption || '';
 
   // Companion delay chips (only editable for scheduled posts)
   const isScheduled = post.status === 'scheduled';
+
+  // Editable date/time (only for scheduled posts)
+  $('detail-schedule-edit').style.display = isScheduled ? '' : 'none';
+  if (isScheduled) {
+    const d = new Date(post.scheduled_at);
+    const pad = n => String(n).padStart(2, '0');
+    $('detail-sched-date').value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
+    $('detail-sched-time').value = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
   state.detailStoryDelay    = post.story_delay_minutes ?? null;
   state.detailReelDelay     = post.reel_delay_minutes  ?? null;
   state.detailCompanionTime = post.companion_time || '18:23';
@@ -1362,6 +1447,11 @@ async function saveDetail() {
       patchBody.reel_delay_minutes  = state.detailReelDelay;
       patchBody.companion_time      = state.detailCompanionTime;
       patchBody.reel_video_id       = state.detailReelVideoId || null;
+      const dateVal = $('detail-sched-date').value;
+      const timeVal = $('detail-sched-time').value;
+      if (dateVal && timeVal) {
+        patchBody.scheduled_at = new Date(`${dateVal}T${timeVal}`).toISOString();
+      }
     }
     await api(`/api/instagram/posts/${state.activePost.id}`, {
       method: 'PATCH',
@@ -1455,10 +1545,32 @@ async function deletePost() {
   }
 }
 
+// ── Hashtag sets ──────────────────────────────────────────────────────────────
+function addHashtagSet(textareaId, selectId) {
+  const sel = $(selectId);
+  const tags = sel.value.trim();
+  if (!tags) return;
+  const ta = $(textareaId);
+  const cur = ta.value;
+  ta.value = cur ? cur.trimEnd() + '\n' + tags : tags;
+  sel.value = '';
+  ta.dispatchEvent(new Event('input'));
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 $('offset-days').addEventListener('input', updateComputedDate);
 $('companion-time-input').addEventListener('change', (e) => { state.companionTime = e.target.value || '18:23'; });
 $('detail-companion-time').addEventListener('change', (e) => { state.detailCompanionTime = e.target.value || '18:23'; });
+
+function _updateDetailDateLabel() {
+  const dateVal = $('detail-sched-date').value;
+  const timeVal = $('detail-sched-time').value;
+  if (dateVal && timeVal) {
+    $('detail-date').textContent = fmtDate(new Date(`${dateVal}T${timeVal}`).toISOString());
+  }
+}
+$('detail-sched-date').addEventListener('change', _updateDetailDateLabel);
+$('detail-sched-time').addEventListener('change', _updateDetailDateLabel);
 
 window.addEventListener('load', async () => {
   const dot = $('dot');

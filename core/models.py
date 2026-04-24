@@ -147,6 +147,7 @@ class InstagramPost(Base):
     reel_media_id: Mapped[str | None] = mapped_column(String(128))
     companion_time: Mapped[str | None] = mapped_column(String(5))              # "HH:MM" for day+ companion posts (default "18:23")
     reel_video_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # use an existing generated Video instead of slideshow
+    error: Mapped[str | None] = mapped_column(Text)                              # last failure message
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
@@ -179,6 +180,7 @@ class Video(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="generating")
     error: Mapped[str | None] = mapped_column(Text)
     comfy_prompt_id: Mapped[str | None] = mapped_column(String(128))
+    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "flf2v"
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

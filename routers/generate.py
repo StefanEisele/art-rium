@@ -16,6 +16,7 @@ from core.auth import require_auth, ws_auth_ok
 from core.comfy import post_prompt
 from core.config import settings
 from core.db import get_db
+from core.loras import ALLOWED_LORAS, DEFAULT_LORA, LORAS
 from core.models import Image
 from core.thumbnail import make_thumbnail, thumb_rel_path
 
@@ -26,13 +27,6 @@ router = APIRouter()
 _TEMPLATE = json.loads(
     (Path(__file__).parent.parent / "workflows" / "z-image_turbo.json").read_text()
 )
-
-
-_ALLOWED_LORAS = {
-    "rustorangeanddimblue_lora_copy.safetensors",
-    "art_vision_ZIG.safetensors",
-    "zImageT_zidiusArt_melancholy.safetensors",
-}
 
 
 def _build_workflow(
@@ -56,15 +50,21 @@ class GenerateRequest(BaseModel):
     height: int = 1024
     client_id: str
     batch_count: int = 1
-    lora_name: str = "rustorangeanddimblue_lora_copy.safetensors"
+    lora_name: str = DEFAULT_LORA
     lora_strength: float = 0.5
+
+
+@router.get("/api/loras", dependencies=[Depends(require_auth)])
+async def list_loras():
+    """Return the LoRA catalogue used by the Z-Image picker (SSOT for the frontend)."""
+    return {"loras": LORAS, "default": DEFAULT_LORA}
 
 
 @router.post("/api/generate", dependencies=[Depends(require_auth)])
 async def generate(req: GenerateRequest, request: Request):
     if not req.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt is required")
-    if req.lora_name not in _ALLOWED_LORAS:
+    if req.lora_name not in ALLOWED_LORAS:
         raise HTTPException(status_code=400, detail=f"Unknown LoRA: {req.lora_name}")
 
     listener = request.app.state.comfy_listener

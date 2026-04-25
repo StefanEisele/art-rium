@@ -34,6 +34,12 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.models import Image, Video
+from services.comfy.client import (
+    poll_history,
+    post_workflow,
+    queue_info,
+    upload_image,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/video", dependencies=[Depends(require_auth)])
@@ -304,72 +310,6 @@ def _build_i2v_multi_workflow(
     return wf, save_id
 
 
-# ── ComfyUI helpers ───────────────────────────────────────────────────────────
-
-async def _upload_image(client: httpx.AsyncClient, filepath: Path, name: str) -> str:
-    with open(filepath, "rb") as f:
-        data = f.read()
-    r = await client.post(
-        f"http://{settings.comfyui_host}/upload/image",
-        files={"image": (name, data, "image/png")},
-        data={"type": "input", "overwrite": "true"},
-    )
-    r.raise_for_status()
-    return r.json()["name"]
-
-
-async def _post_prompt(client: httpx.AsyncClient, workflow: dict) -> str:
-    r = await client.post(
-        f"http://{settings.comfyui_host}/prompt",
-        json={"prompt": workflow},
-        timeout=30,
-    )
-    if r.status_code != 200:
-        body = r.text
-        logger.error("ComfyUI rejected workflow (%d): %s", r.status_code, body[:3000])
-        raise RuntimeError(f"ComfyUI rejected workflow ({r.status_code}): {body[:500]}")
-    data = r.json()
-    pid = data.get("prompt_id")
-    if not pid:
-        raise RuntimeError(f"ComfyUI did not return prompt_id: {data}")
-    return pid
-
-
-async def _poll_history(client: httpx.AsyncClient, prompt_id: str) -> dict:
-    deadline = asyncio.get_event_loop().time() + POLL_TIMEOUT
-    while True:
-        r = await client.get(f"http://{settings.comfyui_host}/history/{prompt_id}", timeout=10)
-        if r.status_code == 200:
-            body = r.json()
-            entry = body.get(prompt_id, {})
-            status = entry.get("status", {})
-            if status.get("completed"):
-                if status.get("status_str") != "success":
-                    msgs = [str(m) for m in status.get("messages", [])]
-                    raise RuntimeError(f"ComfyUI job failed: {' | '.join(msgs)}")
-                return entry.get("outputs", {})
-        if asyncio.get_event_loop().time() >= deadline:
-            raise TimeoutError(f"ComfyUI job {prompt_id} timed out after {POLL_TIMEOUT}s")
-        await asyncio.sleep(POLL_INTERVAL)
-
-
-async def _comfy_queue_info(prompt_id: str) -> dict:
-    """Return queue status for a given prompt_id (best-effort, never raises)."""
-    try:
-        async with httpx.AsyncClient(timeout=4) as client:
-            r = await client.get(f"http://{settings.comfyui_host}/queue")
-            q = r.json()
-        for item in q.get("queue_running", []):
-            if len(item) > 1 and item[1] == prompt_id:
-                return {"status": "running"}
-        for i, item in enumerate(q.get("queue_pending", [])):
-            if len(item) > 1 and item[1] == prompt_id:
-                return {"status": "pending", "position": i + 1}
-        return {"status": "not_in_queue"}
-    except Exception:
-        return {"status": "unknown"}
-
-
 # ── Background generation task ────────────────────────────────────────────────
 
 async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> None:
@@ -399,8 +339,7 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
             comfy_names: list[str] = []
             for i, img in enumerate(ordered_images):
                 src = settings.storage_dir / img.filepath
-                upload_name = f"{prefix}_kf{i + 1}.png"
-                assigned_name = await _upload_image(client, src, upload_name)
+                assigned_name = await upload_image(client, src, f"{prefix}_kf{i + 1}.png")
                 comfy_names.append(assigned_name)
                 pct = 5 + int(12 * (i + 1) / len(ordered_images))
                 _set("uploading", f"Uploaded image {i+1}/{len(ordered_images)}", pct)
@@ -423,7 +362,7 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
                     comfy_names, prompts_list, fc_list, req.width, req.height, req.fps, prefix,
                 )
 
-            prompt_id = await _post_prompt(client, wf)
+            prompt_id = await post_workflow(client, wf)
             logger.info("Video job %s → ComfyUI prompt %s", video_id, prompt_id)
 
             async with AsyncSessionLocal() as db:
@@ -433,7 +372,10 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
                     await db.commit()
 
             _set("queued", "Waiting in ComfyUI queue…", 25)
-            outputs = await _poll_history(client, prompt_id)
+            outputs = await poll_history(
+                client, prompt_id,
+                timeout=POLL_TIMEOUT, interval=POLL_INTERVAL,
+            )
 
         _set("finalizing", "Generation complete — saving video…", 92)
 
@@ -556,7 +498,7 @@ async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
 
     # Enrich with live ComfyUI queue info when the prompt is submitted
     if video.comfy_prompt_id and prog["phase"] in ("queued", "submitting", "processing"):
-        qi = await _comfy_queue_info(video.comfy_prompt_id)
+        qi = await queue_info(video.comfy_prompt_id)
         if qi["status"] == "running":
             prog["phase"]   = "running"
             prog["message"] = "ComfyUI: generating frames…"

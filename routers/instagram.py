@@ -7,20 +7,19 @@ via Cloudflare tunnel). Use the /post-now endpoint once that is configured.
 """
 import uuid
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, desc, asc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth
-from core.config import settings
 from core.db import get_db
 from core.models import InstagramPost, Image
-from workers.instagram_companion import publish_stories, publish_reel
+from services.instagram.graph import missing_config
+from services.instagram.publisher import publish_feed
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/instagram", dependencies=[Depends(require_auth)])
@@ -51,18 +50,6 @@ class PostUpdate(BaseModel):
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _companion_at(published_at: datetime, delay_minutes: int, companion_time: str | None) -> datetime:
-    """Compute companion scheduled_at. Day+ delays snap to the HH:MM target time."""
-    dt = published_at + timedelta(minutes=delay_minutes)
-    if delay_minutes >= 1440 and companion_time:
-        try:
-            h, m = map(int, companion_time.split(':'))
-            dt = dt.replace(hour=h, minute=m, second=0, microsecond=0)
-        except (ValueError, AttributeError):
-            pass
-    return dt
-
 
 def _all_image_ids(post: InstagramPost) -> list[uuid.UUID]:
     """Return ordered list of all image IDs for a post (primary first)."""
@@ -262,13 +249,8 @@ async def delete_post(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 @router.post("/posts/{post_id}/post-now")
 async def post_now(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """Publish a scheduled post to Instagram via the Graph API."""
-    # ── Validate config ──────────────────────────────────────────────────────
-    missing = [k for k, v in {
-        "INSTAGRAM_USER_ID": settings.instagram_user_id,
-        "INSTAGRAM_ACCESS_TOKEN": settings.instagram_access_token,
-        "PUBLIC_BASE_URL": settings.public_base_url,
-    }.items() if not v]
+    """Publish a scheduled post to Instagram immediately via the Graph API."""
+    missing = missing_config()
     if missing:
         raise HTTPException(
             status_code=400,
@@ -281,122 +263,19 @@ async def post_now(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     if post.status == "posted":
         raise HTTPException(status_code=400, detail="Post already published")
 
-    base  = settings.public_base_url.rstrip("/")
-    graph = settings.instagram_graph_api_base
-    uid   = settings.instagram_user_id
-    token = settings.instagram_access_token
+    # The publisher only acts on rows in 'scheduled' state — flip retries
+    # ('failed', 'cancelled') back so the same code path handles them.
+    if post.status != "scheduled":
+        post.status = "scheduled"
+        post.updated_at = datetime.now(timezone.utc)
+        await db.commit()
 
-    def _image_url(filename: str) -> str:
-        url = f"{base}/share/image/{filename}"
-        if settings.image_share_token:
-            url += f"?token={settings.image_share_token}"
-        return url
+    status, media_id = await publish_feed(post_id)
+    if status == "posted":
+        return {"media_id": media_id, "status": "posted"}
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        if post.carousel_image_ids:
-            # ── Carousel post ────────────────────────────────────────────────
-            all_ids = _all_image_ids(post)
-            img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-            images = {i.id: i for i in img_result.scalars().all()}
-
-            # Step 1 — create individual carousel item containers and wait for each
-            child_ids: list[str] = []
-            for img_id in all_ids:
-                img = images.get(img_id)
-                if not img:
-                    raise HTTPException(status_code=404, detail=f"Image {img_id} not found")
-                r = await client.post(
-                    f"{graph}/{uid}/media",
-                    data={
-                        "image_url":        _image_url(img.filename),
-                        "is_carousel_item": "true",
-                        "access_token":     token,
-                    },
-                )
-                body1 = r.json()
-                if "error" in body1:
-                    err = body1["error"]
-                    logger.error(f"Instagram carousel item error: {err}")
-                    raise HTTPException(status_code=502, detail=err.get("message", "Instagram API error"))
-                item_id = body1["id"]
-                child_ids.append(item_id)
-                logger.info(f"Carousel item container: {item_id} ({img.filename}) — waiting…")
-                await _wait_container_ready(client, graph, token, item_id)
-
-            # Step 2 — create carousel container
-            r2 = await client.post(
-                f"{graph}/{uid}/media",
-                data={
-                    "media_type":   "CAROUSEL",
-                    "children":     ",".join(child_ids),
-                    "caption":      post.caption or "",
-                    "access_token": token,
-                },
-            )
-            body2 = r2.json()
-            if "error" in body2:
-                err = body2["error"]
-                logger.error(f"Instagram carousel container error: {err}")
-                raise HTTPException(status_code=502, detail=err.get("message", "Instagram API error"))
-            container_id = body2["id"]
-            logger.info(f"Carousel container: {container_id}")
-
-        else:
-            # ── Single image post ────────────────────────────────────────────
-            img = await db.get(Image, post.image_id)
-            if not img:
-                raise HTTPException(status_code=404, detail="Image not found")
-
-            r1 = await client.post(
-                f"{graph}/{uid}/media",
-                data={
-                    "image_url":    _image_url(img.filename),
-                    "caption":      post.caption or "",
-                    "access_token": token,
-                },
-            )
-            body1 = r1.json()
-            if "error" in body1:
-                err = body1["error"]
-                logger.error(f"Instagram container error: {err}")
-                raise HTTPException(status_code=502, detail=err.get("message", "Instagram API error"))
-            container_id = body1["id"]
-            logger.info(f"Container created: {container_id}")
-
-        # ── Wait for container to be ready, then publish ─────────────────────
-        from workers.instagram_scheduler import _wait_container_ready
-        logger.info("post-now %s — waiting for container %s…", post_id, container_id)
-        await _wait_container_ready(client, graph, token, container_id)
-
-        r_pub = await client.post(
-            f"{graph}/{uid}/media_publish",
-            data={
-                "creation_id":  container_id,
-                "access_token": token,
-            },
-        )
-        body_pub = r_pub.json()
-        if "error" in body_pub:
-            err = body_pub["error"]
-            logger.error(f"Instagram publish error: {err}")
-            raise HTTPException(status_code=502, detail=err.get("message", "Instagram publish error"))
-        media_id = body_pub["id"]
-        logger.info(f"Published — media_id={media_id}")
-
-    # ── Update DB ────────────────────────────────────────────────────────────
-    published_at            = datetime.now(timezone.utc)
-    post.status             = "posted"
-    post.instagram_media_id = media_id
-    post.updated_at         = published_at
-
-    # Schedule companion posts according to per-post delay settings
-    if post.story_delay_minutes is not None:
-        post.story_status       = "pending"
-        post.story_scheduled_at = _companion_at(published_at, post.story_delay_minutes, post.companion_time)
-    if post.reel_delay_minutes is not None:
-        post.reel_status       = "pending"
-        post.reel_scheduled_at = _companion_at(published_at, post.reel_delay_minutes, post.companion_time)
-
-    await db.commit()
-
-    return {"media_id": media_id, "status": "posted"}
+    # Pull the recorded error message back for the HTTP response
+    await db.refresh(post)
+    detail = post.error or "Publish failed (no error recorded)"
+    logger.error("Instagram post-now %s failed: %s", post_id, detail)
+    raise HTTPException(status_code=502, detail=detail)

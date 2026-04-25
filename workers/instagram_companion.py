@@ -21,28 +21,23 @@ from sqlalchemy import select
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import Image, InstagramPost, Video
+from services.instagram.graph import (
+    REEL_POLL_INTERVAL,
+    REEL_POLL_TIMEOUT,
+    check_response,
+    missing_config,
+    share_url,
+    wait_container_ready,
+)
 from workers.video_generator import generate_slideshow
 
 logger = logging.getLogger(__name__)
-
-REEL_POLL_INTERVAL = 5    # seconds between status polls
-REEL_POLL_TIMEOUT  = 300  # seconds before giving up
-
-
-# ── Public entry point ────────────────────────────────────────────────────────
-
-def _check_config() -> list[str]:
-    return [k for k, v in {
-        "INSTAGRAM_USER_ID":      settings.instagram_user_id,
-        "INSTAGRAM_ACCESS_TOKEN": settings.instagram_access_token,
-        "PUBLIC_BASE_URL":        settings.public_base_url,
-    }.items() if not v]
 
 
 # ── Stories ───────────────────────────────────────────────────────────────────
 
 async def publish_stories(post_id: uuid.UUID) -> None:
-    missing = _check_config()
+    missing = missing_config()
     if missing:
         logger.warning("Stories skipped for %s — missing config: %s", post_id, ", ".join(missing))
         return
@@ -69,12 +64,12 @@ async def publish_stories(post_id: uuid.UUID) -> None:
                     logger.warning("Story: image %s not found, skipping", img_id)
                     continue
                 r = await client.post(f"{graph}/{uid}/media", data={
-                    "image_url":    _image_url(img.filename),
+                    "image_url":    share_url(img.filename),
                     "media_type":   "STORIES",
                     "access_token": token,
                 })
                 body = r.json()
-                _check(body, f"story container for {img.filename}")
+                check_response(body, f"story container for {img.filename}")
                 container_id = body["id"]
 
                 r2 = await client.post(f"{graph}/{uid}/media_publish", data={
@@ -82,7 +77,7 @@ async def publish_stories(post_id: uuid.UUID) -> None:
                     "access_token": token,
                 })
                 body2 = r2.json()
-                _check(body2, f"story publish for {img.filename}")
+                check_response(body2, f"story publish for {img.filename}")
                 media_ids.append(body2["id"])
                 logger.info("Story published: %s (%s)", body2["id"], img.filename)
                 await asyncio.sleep(3)  # avoid "Media ID not available" on rapid successive stories
@@ -104,7 +99,7 @@ async def publish_stories(post_id: uuid.UUID) -> None:
 # ── Reel ──────────────────────────────────────────────────────────────────────
 
 async def publish_reel(post_id: uuid.UUID) -> None:
-    missing = _check_config()
+    missing = missing_config()
     if missing:
         logger.warning("Reel skipped for %s — missing config: %s", post_id, ", ".join(missing))
         return
@@ -155,7 +150,8 @@ async def publish_reel(post_id: uuid.UUID) -> None:
             )
 
         # ── 3. Create Reel container ──────────────────────────────────────────
-        video_url = _video_share_url(video_path.name, existing=not video_is_temp)
+        kind = "video" if not video_is_temp else "reel"
+        video_url = share_url(video_path.name, kind=kind)
         async with httpx.AsyncClient(timeout=60) as client:
             r = await client.post(f"{graph}/{uid}/media", data={
                 "media_type":    "REELS",
@@ -165,12 +161,16 @@ async def publish_reel(post_id: uuid.UUID) -> None:
                 "access_token":  token,
             })
             body = r.json()
-            _check(body, "reel container")
+            check_response(body, "reel container")
             container_id = body["id"]
             logger.info("Reel container: %s", container_id)
 
             # ── 4. Poll until FINISHED ────────────────────────────────────────
-            await _wait_for_video(client, container_id, token)
+            await wait_container_ready(
+                client, container_id,
+                max_wait=REEL_POLL_TIMEOUT,
+                poll_interval=REEL_POLL_INTERVAL,
+            )
 
             # ── 5. Publish ────────────────────────────────────────────────────
             r2 = await client.post(f"{graph}/{uid}/media_publish", data={
@@ -178,7 +178,7 @@ async def publish_reel(post_id: uuid.UUID) -> None:
                 "access_token": token,
             })
             body2 = r2.json()
-            _check(body2, "reel publish")
+            check_response(body2, "reel publish")
             reel_media_id = body2["id"]
             logger.info("Reel published: %s", reel_media_id)
 
@@ -205,66 +205,3 @@ async def publish_reel(post_id: uuid.UUID) -> None:
             await db.commit()
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _image_url(filename: str) -> str:
-    base = settings.public_base_url.rstrip("/")
-    url  = f"{base}/share/image/{filename}"
-    if settings.image_share_token:
-        url += f"?token={settings.image_share_token}"
-    return url
-
-
-def _reel_url(filename: str) -> str:
-    base = settings.public_base_url.rstrip("/")
-    url  = f"{base}/share/reel/{filename}"
-    if settings.image_share_token:
-        url += f"?token={settings.image_share_token}"
-    return url
-
-
-def _video_share_url(filename: str, existing: bool = False) -> str:
-    """Public URL for a video file — uses /share/video/ for stored videos, /share/reel/ for temp slideshow."""
-    base = settings.public_base_url.rstrip("/")
-    path = "video" if existing else "reel"
-    url  = f"{base}/share/{path}/{filename}"
-    if settings.image_share_token:
-        url += f"?token={settings.image_share_token}"
-    return url
-
-
-def _check(body: dict, context: str) -> None:
-    if "error" in body:
-        err = body["error"]
-        raise RuntimeError(f"{context}: {err.get('message', body)}")
-
-
-async def _wait_for_video(
-    client: httpx.AsyncClient,
-    container_id: str,
-    token: str,
-) -> None:
-    """Poll container status until FINISHED or timeout."""
-    graph = settings.instagram_graph_api_base
-    deadline = asyncio.get_event_loop().time() + REEL_POLL_TIMEOUT
-
-    while True:
-        r = await client.get(
-            f"{graph}/{container_id}",
-            params={"fields": "status_code", "access_token": token},
-        )
-        body = r.json()
-        _check(body, "reel status poll")
-        status_code = body.get("status_code", "")
-        logger.debug("Reel container %s status: %s", container_id, status_code)
-
-        if status_code == "FINISHED":
-            return
-        if status_code == "ERROR":
-            raise RuntimeError(f"Reel container {container_id} entered ERROR state")
-
-        if asyncio.get_event_loop().time() >= deadline:
-            raise TimeoutError(
-                f"Reel container {container_id} not ready after {REEL_POLL_TIMEOUT}s"
-            )
-        await asyncio.sleep(REEL_POLL_INTERVAL)

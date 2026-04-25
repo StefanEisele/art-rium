@@ -299,8 +299,8 @@
       <label>Prompt</label>
       <select id="template-select" class="template-select"></select>
       <textarea id="prompt" placeholder="Describe your image…"
-                maxlength="2000" oninput="onPromptInput()"></textarea>
-      <div class="char-count"><span id="char-count">0</span> / 2000</div>
+                maxlength="3000" oninput="onPromptInput()"></textarea>
+      <div class="char-count"><span id="char-count">0</span> / 3000</div>
     </div>
 
     <!-- Advanced toggle -->
@@ -355,23 +355,7 @@
       <!-- LoRA -->
       <div class="field">
         <label>LoRA Style</label>
-        <div class="lora-row">
-          <button class="lora-btn active" id="lora-btn-rust"
-                  onclick="setLora('rustorangeanddimblue_lora_copy.safetensors', this)">
-            Rust &amp; Blue
-            <small>rustorange…</small>
-          </button>
-          <button class="lora-btn" id="lora-btn-art"
-                  onclick="setLora('art_vision_ZIG.safetensors', this)">
-            Art Vision
-            <small>art_vision_ZIG</small>
-          </button>
-          <button class="lora-btn" id="lora-btn-zidius"
-                  onclick="setLora('zImageT_zidiusArt_melancholy.safetensors', this)">
-            Melancholy
-            <small>zidiusArt</small>
-          </button>
-        </div>
+        <div class="lora-row" id="lora-row"></div>
       </div>
 
       <!-- LoRA Strength -->
@@ -426,7 +410,7 @@
 // CONFIGURATION & CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════
 const CONFIG = {
-  maxPromptLength: 2000,
+  maxPromptLength: 3000,
   maxBatchCount: 10,
   maxBatchMin: 1,
   wsReconnectDelay: 3500,
@@ -452,6 +436,7 @@ const DOM_IDS = {
   advToggle: 'adv-toggle',
   seed: 'seed',
   batchRow: 'batch-row',
+  loraRow: 'lora-row',
   shareInstagramBtn: 'share-instagram-btn',
   templateSelect: 'template-select',
 };
@@ -504,6 +489,20 @@ const PROMPT_TEMPLATES = [
     name: "Membrane + Echo Figure",
     prompt: `A translucent barrier as material subject — industrial plastic sheeting, gauze, or architectural membrane with its own physical presence: creases, condensation, the slight milkiness of a surface that has been under stress. A figure seen through the membrane, with ghost versions visible at the edges — the same form repeated at lower opacity, slightly offset, as if the transparency of the barrier multiplies rather than clarifies. The structural suspension points of the membrane show iron oxide rust — corrosion at the load-bearing anchor, bleeding downward into the white material below. The environment behind and around everything: dim mineral blue haze. The rust orange exists only at the structural failure point — specific, located, earned by time. Photorealistic, dim diffused interior light. Leica M10 with 35mm lens, Kodak Tri-X pushed to 1600, heavy grain. No watermark, no text overlays, sharp focus, professional quality.`,
   },
+  {
+    name: "Dystopian Overexposed Portrait",
+    prompt: `High-resolution, cinematic, surreal portrait photography blending hyperrealistic detail with a gritty, filmic, dystopian aesthetic. --SUBJECT PLACEHOLDER--
+
+Lighting is aggressively overexposed and intentionally blown out, with extreme highlights blooming across the frame. Light sources appear oversaturated and uncontrolled, washing parts of the subject in harsh white glare while simultaneously flattening certain details into luminous abstraction. Despite this, fine micro-details remain visible in shadowed regions, creating a tension between clarity and erasure. The lighting suggests an overexposed urban or industrial environment, possibly artificial city illumination or a floodlit exterior space.
+
+The overall image is monochrome, rendered in a restricted grayscale palette ranging from deep charcoal blacks to bright, almost pure whites. This absence of color intensifies the clinical, dystopian mood and emphasizes form, texture, and contrast. The tonal range is extreme, with crushed blacks and clipped highlights contributing to a raw, unforgiving visual style.
+
+The background is heavily out of focus, dissolving into a soft, abstract gradient of blurred light and shadow. It suggests an indistinct urban or architectural environment without providing any readable structures. The shallow depth of field isolates the subject completely, reinforcing a sense of alienation and psychological disconnection from the environment.
+
+A fine layer of film grain overlays the entire image, adding a vintage analog texture reminiscent of degraded film stock or archival photography. Subtle motion blur and sensor noise enhance the impression of instability, as if the image were captured in a fleeting, overexposed moment between reality and collapse.
+
+The overall composition is unsettling, futuristic, and contemplative — merging photographic realism with a dystopian documentary aesthetic. The style combines sci-fi restraint with archival portraiture, evoking themes of anonymity, alienation, and erosion under extreme artificial illumination.`,
+  },
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -518,7 +517,7 @@ const state = {
   batchTotal: 1,
   doneCount: 0,
   generatedImages: [],
-  loraName:     'rustorangeanddimblue_lora_copy.safetensors',
+  loraName:     '',     // populated by buildLoraButtons() from GET /api/loras
   loraStrength: 0.5,
 };
 
@@ -856,16 +855,16 @@ const setBatch = (n, btn) => {
   selectButton('.batch-btn', btn);
 };
 
-const LORA_TRIGGERS = {
-  'rustorangeanddimblue_lora_copy.safetensors': 'rustorangeanddimblue',
-  'art_vision_ZIG.safetensors':                 'art_vision',
-  'zImageT_zidiusArt_melancholy.safetensors':   'zidiusArt',
+// LoRA registry — populated by buildLoraButtons() from GET /api/loras
+const loraRegistry = {
+  list: [],                                 // [{filename, label, trigger}, …]
+  triggerOf: (filename) => (loraRegistry.list.find(l => l.filename === filename) || {}).trigger || '',
 };
 
 const setLora = (name, btn) => {
-  const promptEl  = $(DOM_IDS.prompt);
-  const oldTrigger = LORA_TRIGGERS[state.loraName] || '';
-  const newTrigger = LORA_TRIGGERS[name] || '';
+  const promptEl   = $(DOM_IDS.prompt);
+  const oldTrigger = loraRegistry.triggerOf(state.loraName);
+  const newTrigger = loraRegistry.triggerOf(name);
 
   // Strip old trigger from the start of the prompt (if present)
   let text = promptEl.value;
@@ -963,17 +962,44 @@ const buildBatchRow = () => {
   }
 };
 
+const buildLoraButtons = async () => {
+  const row = $(DOM_IDS.loraRow);
+  row.innerHTML = '';
+  let payload;
+  try {
+    const res = await fetch(withAuth('/api/loras'), { headers: getAuthHeaders() });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    payload = await res.json();
+  } catch (e) {
+    row.textContent = 'Could not load LoRAs.';
+    console.error('Failed to load LoRAs:', e);
+    return;
+  }
+
+  loraRegistry.list = payload.loras || [];
+  state.loraName = payload.default || (loraRegistry.list[0] && loraRegistry.list[0].filename) || '';
+
+  loraRegistry.list.forEach((l) => {
+    const btn = document.createElement('button');
+    btn.className = 'lora-btn' + (l.filename === state.loraName ? ' active' : '');
+    btn.innerHTML = `${l.label}<small>${l.trigger}</small>`;
+    btn.onclick = () => setLora(l.filename, btn);
+    row.appendChild(btn);
+  });
+};
+
 window.addEventListener('load', async () => {
   buildTemplateSelect();
   buildBatchRow();
   buildHeaderButtons();
+  await buildLoraButtons();
   state.generatedImages = storage.loadImages();
   gallery.render();
 
   // Prepend default LoRA trigger word if prompt is empty
   const promptEl = $(DOM_IDS.prompt);
   if (!promptEl.value.trim()) {
-    promptEl.value = LORA_TRIGGERS[state.loraName] || '';
+    promptEl.value = loraRegistry.triggerOf(state.loraName);
     onPromptInput();
   }
 

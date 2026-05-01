@@ -67,13 +67,14 @@ async def no_cache_html(request, call_next):
 
 
 # ── Routers ──────────────────────────────────────────────────────────────────
-from routers import generate, images, titler, instagram, video  # noqa: E402  (after app is created)
+from routers import generate, images, titler, instagram, video, wordpress  # noqa: E402  (after app is created)
 
 app.include_router(generate.router)
 app.include_router(images.router)
 app.include_router(titler.router)
 app.include_router(instagram.router)
 app.include_router(video.router)
+app.include_router(wordpress.router)
 
 # ── Static frontends ──────────────────────────────────────────────────────────
 # Shared assets (CSS / JS) must be mounted before tool and root catch-alls

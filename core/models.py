@@ -48,6 +48,14 @@ class Image(Base):
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     rating: Mapped[int | None] = mapped_column(SmallInteger)       # 1–5, personal curation
     notes: Mapped[str | None] = mapped_column(Text)
+    # WordPress media library (set when uploaded via /api/wordpress/media/upload)
+    wp_media_id: Mapped[int | None] = mapped_column(Integer)
+    wp_source_url: Mapped[str | None] = mapped_column(Text)
+    wp_uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    wp_seo_title: Mapped[str | None] = mapped_column(String(120))     # VLM-generated fallback when image.title is None, ≤60 chars
+    wp_alt_text: Mapped[str | None] = mapped_column(Text)             # VLM-generated, EN
+    wp_seo_description: Mapped[str | None] = mapped_column(Text)      # VLM-generated, EN, ≤155 chars
+    wp_caption: Mapped[str | None] = mapped_column(Text)              # VLM-generated, EN, ≤300 chars
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
@@ -72,10 +80,17 @@ class Article(Base):
     )
     title: Mapped[str] = mapped_column(String(512), nullable=False)
     body_md: Mapped[str | None] = mapped_column(Text)              # Markdown draft
+    excerpt: Mapped[str | None] = mapped_column(Text)              # ≤155 chars, used as Yoast meta description
+    tags: Mapped[list[str] | None] = mapped_column(ARRAY(String))  # 3–6 tags, generated with the article
+    language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")  # Polylang slug: en | de | zh
+    translation_group_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, default=uuid.uuid4
+    )                                                               # shared across the DE/EN/ZH siblings of one piece
     wp_post_id: Mapped[int | None] = mapped_column(Integer)        # null until pushed
+    wp_link: Mapped[str | None] = mapped_column(Text)              # canonical URL after WP push
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="draft"
-    )                                                               # draft | pushed | published
+    )                                                               # draft | published | failed
     image_ids: Mapped[list[uuid.UUID] | None] = mapped_column(ARRAY(UUID(as_uuid=True)))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False

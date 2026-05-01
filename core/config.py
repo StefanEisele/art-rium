@@ -1,4 +1,7 @@
 from pathlib import Path
+from urllib.parse import urlparse
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +28,13 @@ class Settings(BaseSettings):
     wp_base_url: str = ""          # e.g. https://yourdomain.de
     wp_username: str = ""
     wp_app_password: str = ""      # WP Application Password (not account pw)
+    wp_default_language: str = "en"  # Polylang language code for media uploads
+
+    # ── Ollama (local VLM for image analysis) ────────────────────────────────
+    ollama_host: str = "http://localhost:11434"
+    ollama_vlm_model: str = "qwen2.5vl:latest"   # vision; alt-text + media metadata
+    ollama_llm_model: str = "qwen3.5:latest"     # vision; multilingual article writer
+    vlm_analysis_max_edge: int = 512          # downscale before sending to VLM
 
     # ── Instagram (optional) ─────────────────────────────────────────────────
     instagram_user_id: str = ""
@@ -37,6 +47,18 @@ class Settings(BaseSettings):
 
     # ── ffmpeg (needed for Reel video generation) ─────────────────────────────
     ffmpeg_path: str = "ffmpeg"  # override if ffmpeg is not on PATH
+
+    @field_validator("ollama_host", mode="after")
+    @classmethod
+    def _normalize_ollama_host(cls, v: str) -> str:
+        # Tolerate bare hosts like "127.0.0.1" (Ollama's own OLLAMA_HOST env var
+        # is often set this way and pydantic-settings picks it up). Prepend
+        # http:// and the default port if missing.
+        if not v.startswith(("http://", "https://")):
+            v = "http://" + v
+        if urlparse(v).port is None:
+            v = v.rstrip("/") + ":11434"
+        return v
 
     @property
     def images_dir(self) -> Path:

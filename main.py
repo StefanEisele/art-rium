@@ -103,6 +103,10 @@ _video = Path(__file__).parent / "frontends" / "tools" / "video"
 if _video.exists():
     app.mount("/tools/video", StaticFiles(directory=str(_video), html=True), name="video")
 
+_articles = Path(__file__).parent / "frontends" / "tools" / "articles"
+if _articles.exists():
+    app.mount("/tools/articles", StaticFiles(directory=str(_articles), html=True), name="articles")
+
 _dashboard = Path(__file__).parent / "frontends" / "dashboard"
 if _dashboard.exists():
     app.mount("/", StaticFiles(directory=str(_dashboard), html=True), name="dashboard")

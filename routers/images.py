@@ -39,6 +39,7 @@ async def list_images(
     workflow: Optional[str] = None,
     search: Optional[str] = None,
     rating_min: Optional[int] = Query(None, ge=1, le=5),
+    wp_uploaded: Optional[bool] = Query(None, description="True: only WP-uploaded images. False: only not-yet-uploaded. None: all."),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(Image).order_by(desc(Image.created_at)).offset(offset).limit(limit)
@@ -50,6 +51,10 @@ async def list_images(
         stmt = stmt.where(Image.prompt.ilike(f"%{search}%"))
     if rating_min is not None:
         stmt = stmt.where(Image.rating >= rating_min)
+    if wp_uploaded is True:
+        stmt = stmt.where(Image.wp_media_id.is_not(None))
+    elif wp_uploaded is False:
+        stmt = stmt.where(Image.wp_media_id.is_(None))
 
     result = await db.execute(stmt)
     images = result.scalars().all()
@@ -149,5 +154,7 @@ def _serialize(img: Image) -> dict:
         "tags": img.tags or [],
         "rating": img.rating,
         "notes": img.notes,
+        "wp_media_id": img.wp_media_id,
+        "wp_uploaded": img.wp_media_id is not None,
         "created_at": img.created_at.isoformat(),
     }

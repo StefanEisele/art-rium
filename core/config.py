@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     # ── Ollama (local VLM for image analysis) ────────────────────────────────
     ollama_host: str = "http://localhost:11434"
     ollama_vlm_model: str = "qwen2.5vl:latest"   # vision; alt-text + media metadata
-    ollama_llm_model: str = "qwen3.5:latest"     # vision; multilingual article writer
+    ollama_llm_model: str = "qwen3.6:27b"         # vision; multilingual article writer (think:false required)
     vlm_analysis_max_edge: int = 512          # downscale before sending to VLM
 
     # ── Instagram (optional) ─────────────────────────────────────────────────
@@ -47,6 +47,10 @@ class Settings(BaseSettings):
 
     # ── ffmpeg (needed for Reel video generation) ─────────────────────────────
     ffmpeg_path: str = "ffmpeg"  # override if ffmpeg is not on PATH
+
+    # ── Artist (used in WordPress rich-article footers) ──────────────────────
+    artist_website_url: str = ""    # e.g. https://www.stefaneisele.com
+    artist_instagram_url: str = ""  # e.g. https://www.instagram.com/stefaneiseleart/
 
     @field_validator("ollama_host", mode="after")
     @classmethod

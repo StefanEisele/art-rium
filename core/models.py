@@ -162,6 +162,10 @@ class InstagramPost(Base):
     reel_media_id: Mapped[str | None] = mapped_column(String(128))
     companion_time: Mapped[str | None] = mapped_column(String(5))              # "HH:MM" for day+ companion posts (default "18:23")
     reel_video_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # use an existing generated Video instead of slideshow
+    # Instagram-side scheduled containers — once set, the post will publish without us
+    feed_creation_id: Mapped[str | None] = mapped_column(String(128))
+    reel_creation_id: Mapped[str | None] = mapped_column(String(128))
+    reel_video_filename: Mapped[str | None] = mapped_column(String(512))   # slideshow MP4 in storage/reels (kept until reel publishes)
     error: Mapped[str | None] = mapped_column(Text)                              # last failure message
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False

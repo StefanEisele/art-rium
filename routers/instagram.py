@@ -5,21 +5,25 @@ Supports single-image and carousel (multi-image) posts.
 Actual posting to the Instagram Graph API requires a public image URL (e.g.
 via Cloudflare tunnel). Use the /post-now endpoint once that is configured.
 """
+import asyncio
 import uuid
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, desc, asc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth
+from core.config import settings
 from core.db import get_db
 from core.models import InstagramPost, Image
 from services.instagram.graph import missing_config
-from services.instagram.publisher import publish_feed
+from services.instagram.publisher import publish_feed, schedule_feed
+from services.instagram.reel import schedule_reel
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/instagram", dependencies=[Depends(require_auth)])
@@ -80,6 +84,9 @@ def _serialize(post: InstagramPost, images: dict[uuid.UUID, "Image"] | None = No
         "reel_status":     post.reel_status,
         "reel_media_id":   post.reel_media_id,
         "reel_video_id":   str(post.reel_video_id) if post.reel_video_id else None,
+        "feed_creation_id": post.feed_creation_id,
+        "reel_creation_id": post.reel_creation_id,
+        "remote_scheduled": bool(post.feed_creation_id),
         "error":           post.error,
         "created_at": post.created_at.isoformat(),
         "updated_at": post.updated_at.isoformat(),
@@ -188,11 +195,29 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
     await db.refresh(post)
     logger.info(f"Scheduled Instagram post {post.id} for {post.scheduled_at} (carousel={bool(post.carousel_image_ids)})")
 
+    # Kick off Instagram-side remote scheduling so the post can publish even
+    # while the local server is offline. Reel scheduling is slow (transcode
+    # poll), so it runs in the background; feed scheduling is fast so we await
+    # it inline to give immediate feedback in the response.
+    asyncio.create_task(_remote_schedule(post.id))
+
     # Build images dict for serialization
     all_ids = _all_image_ids(post)
     img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
     images = {i.id: i for i in img_result.scalars().all()}
     return _serialize(post, images)
+
+
+async def _remote_schedule(post_id: uuid.UUID) -> None:
+    """Try to register both feed and reel containers with Instagram."""
+    try:
+        await schedule_feed(post_id)
+    except Exception as exc:
+        logger.error("remote feed scheduling failed for %s: %s", post_id, exc)
+    try:
+        await schedule_reel(post_id)
+    except Exception as exc:
+        logger.error("remote reel scheduling failed for %s: %s", post_id, exc)
 
 
 @router.patch("/posts/{post_id}")
@@ -205,13 +230,20 @@ async def update_post(
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
-    if body.caption is not None:
+    # Detect changes that invalidate an existing Instagram-side schedule —
+    # caption / images / time / reel-source — so we can re-create the container.
+    invalidates_remote = False
+
+    if body.caption is not None and body.caption != post.caption:
         post.caption = body.caption
+        invalidates_remote = True
     if body.scheduled_at is not None:
         scheduled_at = body.scheduled_at
         if scheduled_at.tzinfo is None:
             scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
-        post.scheduled_at = scheduled_at
+        if scheduled_at != post.scheduled_at:
+            post.scheduled_at = scheduled_at
+            invalidates_remote = True
     if body.status is not None:
         allowed = {"scheduled", "posted", "cancelled", "failed"}
         if body.status not in allowed:
@@ -219,17 +251,39 @@ async def update_post(
         post.status = body.status
     if body.carousel_image_ids is not None:
         post.carousel_image_ids = body.carousel_image_ids or None
+        invalidates_remote = True
     if "story_delay_minutes" in body.model_fields_set:
         post.story_delay_minutes = body.story_delay_minutes
     if "reel_delay_minutes" in body.model_fields_set:
+        if body.reel_delay_minutes != post.reel_delay_minutes:
+            invalidates_remote = True
         post.reel_delay_minutes = body.reel_delay_minutes
     if "companion_time" in body.model_fields_set:
+        if body.companion_time != post.companion_time:
+            invalidates_remote = True
         post.companion_time = body.companion_time
     if "reel_video_id" in body.model_fields_set:
+        if body.reel_video_id != post.reel_video_id:
+            invalidates_remote = True
         post.reel_video_id = body.reel_video_id
+
+    creation_ids_to_drop: list[str] = []
+    if invalidates_remote and post.status == "scheduled":
+        if post.feed_creation_id:
+            creation_ids_to_drop.append(post.feed_creation_id)
+            post.feed_creation_id = None
+        if post.reel_creation_id:
+            creation_ids_to_drop.append(post.reel_creation_id)
+            post.reel_creation_id = None
+            post.reel_status = None
 
     post.updated_at = datetime.now(timezone.utc)
     await db.commit()
+
+    if creation_ids_to_drop:
+        asyncio.create_task(_drop_remote_containers(creation_ids_to_drop))
+    if invalidates_remote and post.status == "scheduled":
+        asyncio.create_task(_remote_schedule(post.id))
 
     all_ids = _all_image_ids(post)
     img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
@@ -242,9 +296,38 @@ async def delete_post(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     post = await db.get(InstagramPost, post_id)
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
+    creation_ids = [c for c in (post.feed_creation_id, post.reel_creation_id) if c]
+    reel_filename = post.reel_video_filename
     await db.delete(post)
     await db.commit()
     logger.info(f"Deleted Instagram post {post_id}")
+
+    if creation_ids:
+        asyncio.create_task(_drop_remote_containers(creation_ids))
+    if reel_filename:
+        try:
+            (settings.reels_dir / reel_filename).unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Could not delete reel slideshow %s: %s", reel_filename, exc)
+
+
+async def _drop_remote_containers(creation_ids: list[str]) -> None:
+    """
+    Best-effort cancellation of scheduled Instagram containers. The Graph API
+    accepts DELETE on a container ID as long as it has not yet published.
+    Failures are logged but never raise — the post is already gone locally.
+    """
+    if missing_config():
+        return
+    token = settings.instagram_access_token
+    graph = settings.instagram_graph_api_base
+    async with httpx.AsyncClient(timeout=15) as client:
+        for cid in creation_ids:
+            try:
+                r = await client.delete(f"{graph}/{cid}", params={"access_token": token})
+                logger.info("Dropped IG container %s → %s", cid, r.status_code)
+            except Exception as exc:
+                logger.warning("Failed to drop IG container %s: %s", cid, exc)
 
 
 @router.post("/posts/{post_id}/post-now")

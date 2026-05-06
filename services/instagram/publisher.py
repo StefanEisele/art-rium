@@ -1,23 +1,24 @@
 """
-Instagram feed publisher — Single Source of Truth for publishing a scheduled
-post to Instagram via the Graph API.
+Instagram feed publisher — Single Source of Truth for putting a feed post on
+Instagram via the Graph API.
 
-Used by:
-  - routers/instagram.py::post_now      (manual "post now" button)
-  - workers/instagram_scheduler.py      (auto-poster background loop)
-  - cli/publish_due.py                   (Phase 3 — Windows Task Scheduler entry)
+Two paths:
 
-Contract:
+  schedule_feed(post_id) -> (status, creation_id)
+      Creates a container with `scheduled_publish_time` set; Instagram queues
+      the publish itself, so the local server may be offline at the actual
+      publish moment. Requires scheduled_at to be at least
+      MIN_REMOTE_LEAD_SECONDS in the future.
+
   publish_feed(post_id) -> (status, media_id)
+      Synchronously creates a container, polls until ready, then calls
+      media_publish — used for /post-now and as a fallback when scheduled_at
+      is too close to now to use remote scheduling.
 
-  status is one of:
-    "posted"   — feed published, companion Stories/Reels scheduled per delay
-    "failed"   — Graph API rejected; post.error populated, post.status='failed'
-    "skipped"  — post missing / already posted / cancelled / config missing
-
-The function records the outcome on the InstagramPost row in-place. It raises
-only on unrecoverable infrastructure problems (e.g. DB unreachable) — Graph API
-errors are caught and recorded.
+The scheduling-vs-publishing flow is dictated by the Graph API: setting
+`scheduled_publish_time` on container creation is mutually exclusive with
+calling /media_publish — Instagram does the publish itself at the scheduled
+moment. See https://developers.facebook.com/docs/instagram-api/guides/content-publishing
 """
 from __future__ import annotations
 
@@ -44,10 +45,68 @@ from services.instagram.graph import (
 logger = logging.getLogger(__name__)
 
 PublishStatus = Literal["posted", "failed", "skipped"]
+ScheduleStatus = Literal["remote_scheduled", "failed", "skipped"]
+
+# Instagram requires scheduled_publish_time to be ≥10 minutes in the future.
+# We add a small buffer so the request itself doesn't slip past the boundary.
+MIN_REMOTE_LEAD_SECONDS = 11 * 60
+
+
+# ── Remote scheduling (server-independent) ───────────────────────────────────
+
+
+async def schedule_feed(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]:
+    """
+    Create the feed container with scheduled_publish_time set so Instagram
+    publishes it autonomously. Returns (status, creation_id).
+
+      remote_scheduled — container created, Instagram will publish at scheduled_at
+      failed           — Graph API rejected (post.error populated)
+      skipped          — config missing, lead time too short, or already scheduled
+    """
+    missing = missing_config()
+    if missing:
+        logger.warning("schedule_feed %s skipped — missing config: %s", post_id, ", ".join(missing))
+        return "skipped", None
+
+    snapshot = await _load_post_snapshot(post_id)
+    if snapshot is None:
+        return "skipped", None
+    if snapshot.feed_creation_id:
+        return "skipped", snapshot.feed_creation_id  # already scheduled remotely
+
+    lead = (snapshot.scheduled_at - datetime.now(timezone.utc)).total_seconds()
+    if lead < MIN_REMOTE_LEAD_SECONDS:
+        logger.info("schedule_feed %s skipped — only %ds lead, need ≥%ds", post_id, lead, MIN_REMOTE_LEAD_SECONDS)
+        return "skipped", None
+
+    creation_id, api_error = await _call_graph_api(
+        post_id, snapshot,
+        scheduled_publish_time=int(snapshot.scheduled_at.timestamp()),
+    )
+
+    async with AsyncSessionLocal() as db:
+        post = await db.get(InstagramPost, post_id)
+        if not post:
+            return "skipped", None
+        if creation_id:
+            post.feed_creation_id = creation_id
+            post.error = None
+            post.updated_at = datetime.now(timezone.utc)
+            await db.commit()
+            logger.info("schedule_feed %s → remote_scheduled (creation_id=%s)", post_id, creation_id)
+            return "remote_scheduled", creation_id
+        post.error = api_error or "Unknown error"
+        post.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        return "failed", None
+
+
+# ── Synchronous publish (post-now / short-lead fallback) ─────────────────────
 
 
 async def publish_feed(post_id: uuid.UUID) -> tuple[PublishStatus, str | None]:
-    """Publish a scheduled feed post and return (status, media_id)."""
+    """Publish a scheduled feed post immediately and return (status, media_id)."""
     missing = missing_config()
     if missing:
         logger.warning("publish_feed %s skipped — missing config: %s", post_id, ", ".join(missing))
@@ -57,7 +116,28 @@ async def publish_feed(post_id: uuid.UUID) -> tuple[PublishStatus, str | None]:
     if snapshot is None:
         return "skipped", None
 
-    media_id, api_error = await _call_graph_api(post_id, snapshot)
+    creation_id, api_error = await _call_graph_api(post_id, snapshot)
+
+    media_id: str | None = None
+    if creation_id:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                logger.info("publish_feed %s — waiting for container %s…", post_id, creation_id)
+                await wait_container_ready(client, creation_id)
+                r = await client.post(
+                    f"{settings.instagram_graph_api_base}/{settings.instagram_user_id}/media_publish",
+                    data={
+                        "creation_id":  creation_id,
+                        "access_token": settings.instagram_access_token,
+                    },
+                )
+                body = r.json()
+                check_response(body, "publish container")
+                media_id = body["id"]
+        except Exception as exc:
+            api_error = f"{type(exc).__name__}: {exc}"
+            logger.error("publish_feed %s publish step failed: %s\n%s", post_id, exc, traceback.format_exc())
+            media_id = None
 
     return await _finalize_post(post_id, snapshot, media_id, api_error)
 
@@ -70,6 +150,7 @@ class _Snapshot:
     __slots__ = (
         "is_carousel", "caption", "primary_id", "all_ids",
         "filenames_by_id", "story_delay", "reel_delay", "companion_time",
+        "scheduled_at", "feed_creation_id",
     )
 
     def __init__(self, post: InstagramPost, filenames_by_id: dict[uuid.UUID, str]):
@@ -81,6 +162,8 @@ class _Snapshot:
         self.story_delay    = post.story_delay_minutes
         self.reel_delay     = post.reel_delay_minutes
         self.companion_time = post.companion_time
+        self.scheduled_at   = post.scheduled_at
+        self.feed_creation_id = post.feed_creation_id
 
 
 async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
@@ -94,8 +177,19 @@ async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
         return _Snapshot(post, filenames)
 
 
-async def _call_graph_api(post_id: uuid.UUID, snap: _Snapshot) -> tuple[str | None, str | None]:
-    """Returns (media_id, api_error) — exactly one of the two is None."""
+async def _call_graph_api(
+    post_id: uuid.UUID,
+    snap: _Snapshot,
+    *,
+    scheduled_publish_time: int | None = None,
+) -> tuple[str | None, str | None]:
+    """
+    Create a media container and return (creation_id, api_error).
+
+    When `scheduled_publish_time` is provided, the container is created with
+    that field set and the caller MUST NOT call /media_publish — Instagram
+    schedules the publish itself.
+    """
     graph = settings.instagram_graph_api_base
     uid   = settings.instagram_user_id
     token = settings.instagram_access_token
@@ -103,38 +197,38 @@ async def _call_graph_api(post_id: uuid.UUID, snap: _Snapshot) -> tuple[str | No
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             container_id = (
-                await _create_carousel_container(client, graph, uid, token, post_id, snap)
+                await _create_carousel_container(
+                    client, graph, uid, token, post_id, snap,
+                    scheduled_publish_time=scheduled_publish_time,
+                )
                 if snap.is_carousel
-                else await _create_single_container(client, graph, uid, token, snap)
+                else await _create_single_container(
+                    client, graph, uid, token, snap,
+                    scheduled_publish_time=scheduled_publish_time,
+                )
             )
-
-            logger.info("publish_feed %s — waiting for container %s…", post_id, container_id)
-            await wait_container_ready(client, container_id)
-
-            r = await client.post(f"{graph}/{uid}/media_publish", data={
-                "creation_id":  container_id,
-                "access_token": token,
-            })
-            body = r.json()
-            check_response(body, "publish container")
-            return body["id"], None
+            return container_id, None
     except Exception as exc:
         api_error = f"{type(exc).__name__}: {exc}"
-        logger.error("publish_feed %s failed: %s\n%s", post_id, exc, traceback.format_exc())
+        logger.error("Graph API container creation %s failed: %s\n%s", post_id, exc, traceback.format_exc())
         return None, api_error
 
 
 async def _create_single_container(
     client: httpx.AsyncClient, graph: str, uid: str, token: str, snap: _Snapshot,
+    *, scheduled_publish_time: int | None = None,
 ) -> str:
     fname = snap.filenames_by_id.get(snap.primary_id)
     if not fname:
         raise ValueError(f"Primary image {snap.primary_id} not found in DB")
-    r = await client.post(f"{graph}/{uid}/media", data={
+    data: dict[str, str] = {
         "image_url":    share_url(fname),
         "caption":      snap.caption,
         "access_token": token,
-    })
+    }
+    if scheduled_publish_time is not None:
+        data["scheduled_publish_time"] = str(scheduled_publish_time)
+    r = await client.post(f"{graph}/{uid}/media", data=data)
     body = r.json()
     check_response(body, "create single container")
     return body["id"]
@@ -143,6 +237,7 @@ async def _create_single_container(
 async def _create_carousel_container(
     client: httpx.AsyncClient, graph: str, uid: str, token: str,
     post_id: uuid.UUID, snap: _Snapshot,
+    *, scheduled_publish_time: int | None = None,
 ) -> str:
     child_ids: list[str] = []
     for img_id in snap.all_ids:
@@ -161,12 +256,15 @@ async def _create_carousel_container(
         logger.info("publish_feed %s — waiting for item %s (%s)…", post_id, item_id, fname)
         await wait_container_ready(client, item_id)
 
-    r2 = await client.post(f"{graph}/{uid}/media", data={
+    data: dict[str, str] = {
         "media_type":   "CAROUSEL",
         "children":     ",".join(child_ids),
         "caption":      snap.caption,
         "access_token": token,
-    })
+    }
+    if scheduled_publish_time is not None:
+        data["scheduled_publish_time"] = str(scheduled_publish_time)
+    r2 = await client.post(f"{graph}/{uid}/media", data=data)
     body2 = r2.json()
     check_response(body2, "create carousel container")
     return body2["id"]
@@ -188,9 +286,6 @@ async def _finalize_post(
             post.error              = None
             post.updated_at         = now
 
-            if snap.story_delay is not None:
-                post.story_status       = "pending"
-                post.story_scheduled_at = companion_at(now, snap.story_delay, snap.companion_time)
             if snap.reel_delay is not None:
                 post.reel_status       = "pending"
                 post.reel_scheduled_at = companion_at(now, snap.reel_delay, snap.companion_time)

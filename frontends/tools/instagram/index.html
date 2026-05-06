@@ -660,20 +660,10 @@
       </div>
       <div class="computed-date" id="computed-date-line">—</div>
 
-      <!-- Companion scheduling -->
+      <!-- Companion scheduling (Stories are not auto-scheduled — Instagram's
+           scheduled_publish_time is not supported for Stories. Post them
+           manually from the Instagram app.) -->
       <div class="companion-delay-section">
-        <div class="companion-delay-row">
-          <span class="companion-delay-label">Story</span>
-          <div class="delay-chips" id="story-chips">
-            <button class="delay-chip active" data-value="off"   onclick="setNewPostDelay('story','off')">Off</button>
-            <button class="delay-chip"        data-value="60"    onclick="setNewPostDelay('story','60')">+1h</button>
-            <button class="delay-chip"        data-value="1440"  onclick="setNewPostDelay('story','1440')">+1day</button>
-            <button class="delay-chip"        data-value="2880"  onclick="setNewPostDelay('story','2880')">+2day</button>
-            <button class="delay-chip"        data-value="5760"  onclick="setNewPostDelay('story','5760')">+4day</button>
-            <button class="delay-chip"        data-value="10080" onclick="setNewPostDelay('story','10080')">+1week</button>
-            <button class="delay-chip"        data-value="20160" onclick="setNewPostDelay('story','20160')">+2week</button>
-          </div>
-        </div>
         <div class="companion-delay-row">
           <span class="companion-delay-label">Reel</span>
           <div class="delay-chips" id="reel-chips">
@@ -770,18 +760,6 @@
     <!-- Companion delay selectors (only for scheduled posts) -->
     <div class="companion-delay-section" id="detail-companion-section" style="display:none">
       <div class="companion-delay-row">
-        <span class="companion-delay-label">Story</span>
-        <div class="delay-chips" id="detail-story-chips">
-          <button class="delay-chip" data-value="off"   onclick="setDetailDelay('story','off')">Off</button>
-          <button class="delay-chip" data-value="60"    onclick="setDetailDelay('story','60')">+1h</button>
-          <button class="delay-chip" data-value="1440"  onclick="setDetailDelay('story','1440')">+1day</button>
-          <button class="delay-chip" data-value="2880"  onclick="setDetailDelay('story','2880')">+2day</button>
-          <button class="delay-chip" data-value="5760"  onclick="setDetailDelay('story','5760')">+4day</button>
-          <button class="delay-chip" data-value="10080" onclick="setDetailDelay('story','10080')">+1week</button>
-          <button class="delay-chip" data-value="20160" onclick="setDetailDelay('story','20160')">+2week</button>
-        </div>
-      </div>
-      <div class="companion-delay-row">
         <span class="companion-delay-label">Reel</span>
         <div class="delay-chips" id="detail-reel-chips">
           <button class="delay-chip" data-value="off"   onclick="setDetailDelay('reel','off')">Off</button>
@@ -837,10 +815,8 @@ const state = {
   pickerLoading: false,
   pickerDone: false,
   pickerSelection: new Map(),
-  storyDelay: null,
   reelDelay: null,
   companionTime: '18:23',
-  detailStoryDelay: null,
   detailReelDelay: null,
   detailCompanionTime: '18:23',
   // Reel video selection
@@ -896,6 +872,11 @@ const _delayLabel = (min) => {
 };
 
 function _companionBadge(label, status, delayMin, scheduledAt) {
+  // Remote-scheduled by Instagram itself — survives server restart
+  if (status === 'remote_scheduled') {
+    const t = scheduledAt ? ` · ${fmtTime(scheduledAt)}` : '';
+    return `<span class="companion-badge companion-pending">${label}${t} ☁</span>`;
+  }
   // Planned (feed not yet posted, delay configured)
   if (!status && delayMin !== null && delayMin !== undefined) {
     return `<span class="companion-badge companion-planned">${label} ${_delayLabel(delayMin)}</span>`;
@@ -960,17 +941,20 @@ function renderTimeline() {
         : '<em>No caption</em>';
       const titleText = p.image?.title || p.image?.filename || '';
 
-      // Companion badges (shown for planned, pending, processing, posted, failed)
-      const storyBadge = _companionBadge('Story', p.story_status, p.story_delay_minutes, p.story_scheduled_at);
-      const reelBadge  = _companionBadge('Reel',  p.reel_status,  p.reel_delay_minutes,  p.reel_scheduled_at);
-      const companionHTML = (storyBadge || reelBadge)
-        ? `<div class="companion-row">${storyBadge}${reelBadge}</div>` : '';
+      // Companion badges (Reel only — Stories are no longer auto-scheduled)
+      const reelBadge = _companionBadge('Reel', p.reel_status, p.reel_delay_minutes, p.reel_scheduled_at);
+      const companionHTML = reelBadge ? `<div class="companion-row">${reelBadge}</div>` : '';
+
+      // Cloud marker = Instagram has the scheduled post in its own queue
+      const cloudMarker = p.remote_scheduled && p.status === 'scheduled'
+        ? ' <span title="Scheduled directly with Instagram — survives server restart">☁</span>'
+        : '';
 
       row.innerHTML = `
         ${thumbHTML}
         <div class="post-info">
           <div class="post-date">
-            ${fmtDate(p.scheduled_at)}
+            ${fmtDate(p.scheduled_at)}${cloudMarker}
             <span class="${statusClass(p.status)}">${statusLabel(p.status)}</span>
           </div>
           ${titleText ? `<div class="post-title">${isCarousel ? '📸 ' : ''}${titleText}</div>` : ''}
@@ -1200,25 +1184,21 @@ function _syncChips(chipsId, value) {
 }
 
 function setNewPostDelay(type, value) {
+  if (type !== 'reel') return;
   const parsed = value === 'off' ? null : parseInt(value, 10);
-  if (type === 'story') { state.storyDelay = parsed; _syncChips('story-chips', parsed); }
-  else {
-    state.reelDelay = parsed;
-    _syncChips('reel-chips', parsed);
-    $('reel-video-row').style.display = parsed !== null ? '' : 'none';
-    if (parsed === null) { state.reelVideoId = null; state.reelVideo = null; renderReelVideoPreview('new'); }
-  }
+  state.reelDelay = parsed;
+  _syncChips('reel-chips', parsed);
+  $('reel-video-row').style.display = parsed !== null ? '' : 'none';
+  if (parsed === null) { state.reelVideoId = null; state.reelVideo = null; renderReelVideoPreview('new'); }
 }
 
 function setDetailDelay(type, value) {
+  if (type !== 'reel') return;
   const parsed = value === 'off' ? null : parseInt(value, 10);
-  if (type === 'story') { state.detailStoryDelay = parsed; _syncChips('detail-story-chips', parsed); }
-  else {
-    state.detailReelDelay = parsed;
-    _syncChips('detail-reel-chips', parsed);
-    $('detail-reel-video-row').style.display = parsed !== null ? '' : 'none';
-    if (parsed === null) { state.detailReelVideoId = null; state.detailReelVideo = null; renderReelVideoPreview('detail'); }
-  }
+  state.detailReelDelay = parsed;
+  _syncChips('detail-reel-chips', parsed);
+  $('detail-reel-video-row').style.display = parsed !== null ? '' : 'none';
+  if (parsed === null) { state.detailReelVideoId = null; state.detailReelVideo = null; renderReelVideoPreview('detail'); }
 }
 
 // ── Video picker ──────────────────────────────────────────────────────────────
@@ -1318,7 +1298,6 @@ async function schedulePost() {
       carousel_image_ids:   rest.length > 0 ? rest.map(img => img.id) : null,
       caption:              $('caption-input').value.trim() || null,
       scheduled_at:         state.computedDate,
-      story_delay_minutes:  state.storyDelay,
       reel_delay_minutes:   state.reelDelay,
       companion_time:       state.companionTime,
       reel_video_id:        state.reelVideoId || null,
@@ -1335,14 +1314,12 @@ async function schedulePost() {
     state.pickerImages = [];
     state.pickerPage = 0;
     state.pickerDone = false;
-    state.storyDelay = null;
     state.reelDelay  = null;
     state.companionTime = '18:23';
     state.reelVideoId = null;
     state.reelVideo   = null;
     $('picker-grid').innerHTML = '';
     $('caption-input').value = '';
-    _syncChips('story-chips', null);
     _syncChips('reel-chips', null);
     $('companion-time-input').value = '18:23';
     $('reel-video-row').style.display = 'none';
@@ -1405,11 +1382,9 @@ function openDetail(post) {
     $('detail-sched-time').value = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 
-  state.detailStoryDelay    = post.story_delay_minutes ?? null;
   state.detailReelDelay     = post.reel_delay_minutes  ?? null;
   state.detailCompanionTime = post.companion_time || '18:23';
   $('detail-companion-section').style.display = isScheduled ? '' : 'none';
-  _syncChips('detail-story-chips', state.detailStoryDelay);
   _syncChips('detail-reel-chips',  state.detailReelDelay);
   $('detail-companion-time').value = state.detailCompanionTime;
   // Reel video selection
@@ -1443,7 +1418,6 @@ async function saveDetail() {
     const patchBody = { caption: $('detail-caption').value.trim() || null };
     // Always include delays so the server knows the user's intent (model_fields_set)
     if (state.activePost.status === 'scheduled') {
-      patchBody.story_delay_minutes = state.detailStoryDelay;
       patchBody.reel_delay_minutes  = state.detailReelDelay;
       patchBody.companion_time      = state.detailCompanionTime;
       patchBody.reel_video_id       = state.detailReelVideoId || null;

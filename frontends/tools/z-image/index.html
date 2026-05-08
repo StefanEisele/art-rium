@@ -601,6 +601,9 @@ const gallery = {
   },
 
   add: (data) => {
+    // Dedup: same image_ready can arrive twice via WS replay race.
+    if (state.generatedImages.some(i => i.filename === data.filename)) return false;
+
     state.generatedImages.push({ url: data.url, filename: data.filename });
     storage.saveImages();
 
@@ -612,6 +615,7 @@ const gallery = {
     setText(DOM_IDS.resultCount, `${state.generatedImages.length} images`);
 
     if (state.doneCount === 1) item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    return true;
   },
 
   render: () => {
@@ -693,7 +697,7 @@ const messageHandlers = {
   },
 
   [EVENTS.imageReady]: (data) => {
-    gallery.add(data);
+    if (!gallery.add(data)) return;  // duplicate replay — don't bump batch progress
     onBatchDone(() => {
       progress.reset();
       updateShareButton();

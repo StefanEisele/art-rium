@@ -91,7 +91,7 @@ class ComfyListener:
         self._active_ws.pop(client_id, None)
 
     async def replay_pending(self, client_id: str, ws: WebSocket) -> None:
-        pending = self._pending.get(client_id, [])
+        pending = self._pending.pop(client_id, [])
         if pending:
             logger.info(f"Replaying {len(pending)} pending images to {client_id}")
             for img_data in pending:
@@ -249,15 +249,19 @@ class ComfyListener:
             "batch_total": meta["total"],
         }
 
-        # Buffer for replay if client is offline
-        self._pending.setdefault(client_id, []).append(img_data)
-
+        delivered = False
         if ws:
             try:
                 await ws.send_json({"type": "image_ready", "data": img_data})
                 logger.info(f"Delivered image_ready: {ingested_path.name}")
+                delivered = True
             except Exception as e:
                 logger.error(f"image_ready send failed: {e}")
+
+        # Only buffer for replay if live delivery did not succeed —
+        # otherwise a WS reconnect mid-batch would re-deliver the same image.
+        if not delivered:
+            self._pending.setdefault(client_id, []).append(img_data)
 
     async def _on_error(self, ws, prompt_id: str, meta: dict, data: dict) -> None:
         self._prompt_meta.pop(prompt_id, None)

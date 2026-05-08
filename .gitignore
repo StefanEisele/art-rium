@@ -8,9 +8,12 @@ __pycache__/
 .venv/
 venv/
 
-# Storage (large files — not tracked in git)
-storage/images/
-storage/shop_prep/
+# Storage (large runtime files — not tracked in git)
+storage/
+
+# Local server log files (started by `python -m uvicorn ... -RedirectStandardOutput`)
+.tmp_server.log
+.tmp_server.err.log
 
 # Certs
 certs/

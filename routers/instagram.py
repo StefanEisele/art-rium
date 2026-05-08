@@ -21,9 +21,11 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
 from core.models import InstagramPost, Image
+from core.scheduling import companion_at
 from services.instagram.graph import missing_config
 from services.instagram.publisher import publish_feed, schedule_feed
 from services.instagram.reel import schedule_reel
+from services.instagram import outpost as outpost_svc
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/instagram", dependencies=[Depends(require_auth)])
@@ -40,6 +42,7 @@ class PostCreate(BaseModel):
     reel_delay_minutes:  Optional[int] = None  # null = off; N = N min after feed
     companion_time: Optional[str] = "18:23"    # "HH:MM" — day+ delays snap to this time
     reel_video_id: Optional[uuid.UUID] = None  # use an existing generated video for the Reel
+    dispatch_target: Optional[str] = "local"   # "local" (default) | "outpost" (Pi cloud-schedule)
 
 
 class PostUpdate(BaseModel):
@@ -87,6 +90,11 @@ def _serialize(post: InstagramPost, images: dict[uuid.UUID, "Image"] | None = No
         "feed_creation_id": post.feed_creation_id,
         "reel_creation_id": post.reel_creation_id,
         "remote_scheduled": bool(post.feed_creation_id),
+        "dispatch_target":       post.dispatch_target,
+        "outpost_id":            post.outpost_id,
+        "outpost_status":        post.outpost_status,
+        "outpost_reel_status":   post.outpost_reel_status,
+        "outpost_dispatched_at": post.outpost_dispatched_at.isoformat() if post.outpost_dispatched_at else None,
         "error":           post.error,
         "created_at": post.created_at.isoformat(),
         "updated_at": post.updated_at.isoformat(),
@@ -177,6 +185,17 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
     if scheduled_at.tzinfo is None:
         scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
 
+    dispatch_target = (body.dispatch_target or "local").lower()
+    if dispatch_target not in {"local", "outpost"}:
+        raise HTTPException(status_code=400, detail="dispatch_target must be 'local' or 'outpost'")
+    if dispatch_target == "outpost":
+        miss = outpost_svc.missing_config()
+        if miss:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Outpost not configured: {', '.join(miss)} — set in .env",
+            )
+
     post = InstagramPost(
         image_id=body.image_id,
         carousel_image_ids=body.carousel_image_ids or None,
@@ -187,19 +206,25 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
         reel_delay_minutes=body.reel_delay_minutes,
         companion_time=body.companion_time,
         reel_video_id=body.reel_video_id,
+        dispatch_target=dispatch_target,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
     db.add(post)
     await db.commit()
     await db.refresh(post)
-    logger.info(f"Scheduled Instagram post {post.id} for {post.scheduled_at} (carousel={bool(post.carousel_image_ids)})")
+    logger.info(
+        "Scheduled Instagram post %s for %s (carousel=%s, target=%s)",
+        post.id, post.scheduled_at, bool(post.carousel_image_ids), dispatch_target,
+    )
 
-    # Kick off Instagram-side remote scheduling so the post can publish even
-    # while the local server is offline. Reel scheduling is slow (transcode
-    # poll), so it runs in the background; feed scheduling is fast so we await
-    # it inline to give immediate feedback in the response.
-    asyncio.create_task(_remote_schedule(post.id))
+    # Outpost path: package + upload to Pi. Local path: try Graph-side
+    # scheduled_publish_time (whitelist-gated, often falls through to the
+    # local InstagramScheduler immediate-publish path).
+    if dispatch_target == "outpost":
+        asyncio.create_task(outpost_svc.dispatch_to_outpost(post.id))
+    else:
+        asyncio.create_task(_remote_schedule(post.id))
 
     # Build images dict for serialization
     all_ids = _all_image_ids(post)
@@ -229,6 +254,12 @@ async def update_post(
     post = await db.get(InstagramPost, post_id)
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
+
+    # Outpost posts use a separate edit path — caption / scheduled_at /
+    # companion_time / reel retime push to the Pi. Image swaps and
+    # reel add/remove still require delete + recreate.
+    if post.dispatch_target == "outpost" and post.outpost_id:
+        return await _update_outpost_post(post, body, db)
 
     # Detect changes that invalidate an existing Instagram-side schedule —
     # caption / images / time / reel-source — so we can re-create the container.
@@ -298,17 +329,140 @@ async def delete_post(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Post not found")
     creation_ids = [c for c in (post.feed_creation_id, post.reel_creation_id) if c]
     reel_filename = post.reel_video_filename
+    outpost_id = post.outpost_id
     await db.delete(post)
     await db.commit()
     logger.info(f"Deleted Instagram post {post_id}")
 
     if creation_ids:
         asyncio.create_task(_drop_remote_containers(creation_ids))
+    if outpost_id:
+        asyncio.create_task(outpost_svc.cancel_on_outpost(outpost_id))
     if reel_filename:
         try:
             (settings.reels_dir / reel_filename).unlink(missing_ok=True)
         except Exception as exc:
             logger.warning("Could not delete reel slideshow %s: %s", reel_filename, exc)
+
+
+async def _update_outpost_post(
+    post: InstagramPost,
+    body: PostUpdate,
+    db: AsyncSession,
+) -> dict:
+    """
+    Apply edits to an outpost-dispatched post. Allowed: caption, scheduled_at,
+    companion_time, reel_delay retime (existing reel only). Forbidden: image
+    changes, reel add/remove, source video swap, story delays.
+    """
+    requested = set(body.model_fields_set) - {"status"}
+
+    # Forbidden fields are only flagged when the *value* actually changes —
+    # the frontend always serialises every field, so presence alone is noise.
+    new_carousel = body.carousel_image_ids or None
+    old_carousel = list(post.carousel_image_ids) if post.carousel_image_ids else None
+    bad: set[str] = set()
+    if "carousel_image_ids" in requested and new_carousel != old_carousel:
+        bad.add("carousel_image_ids")
+    if "reel_video_id" in requested and body.reel_video_id != post.reel_video_id:
+        bad.add("reel_video_id")
+    if bad:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Cannot edit {sorted(bad)} on cloud-scheduled post — "
+                    f"cancel and create a new post instead."),
+        )
+
+    # Reel and Story can only be retimed, not added/removed after dispatch
+    # (add would need re-upload; remove would orphan an in-flight container).
+    if "reel_delay_minutes" in requested:
+        was_set = post.reel_delay_minutes is not None
+        now_set = body.reel_delay_minutes is not None
+        if was_set != now_set:
+            verb = "add" if now_set else "remove"
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Cannot {verb} reel on cloud-scheduled post — "
+                        f"cancel and create a new post instead."),
+            )
+    if "story_delay_minutes" in requested:
+        was_set = post.story_delay_minutes is not None
+        now_set = body.story_delay_minutes is not None
+        if was_set != now_set:
+            verb = "add" if now_set else "remove"
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Cannot {verb} story on cloud-scheduled post — "
+                        f"cancel and create a new post instead."),
+            )
+
+    # Apply local mutations (only the editable subset).
+    pi_caption = pi_scheduled_at = pi_reel_publish_at = pi_story_publish_at = None
+
+    if "caption" in requested and body.caption != post.caption:
+        post.caption = body.caption
+        pi_caption = body.caption or ""
+
+    if "scheduled_at" in requested and body.scheduled_at is not None:
+        new_sched = body.scheduled_at
+        if new_sched.tzinfo is None:
+            new_sched = new_sched.replace(tzinfo=timezone.utc)
+        if new_sched != post.scheduled_at:
+            post.scheduled_at = new_sched
+            pi_scheduled_at = new_sched
+
+    if "companion_time" in requested and body.companion_time != post.companion_time:
+        post.companion_time = body.companion_time
+
+    if "reel_delay_minutes" in requested and body.reel_delay_minutes != post.reel_delay_minutes:
+        post.reel_delay_minutes = body.reel_delay_minutes
+    if "story_delay_minutes" in requested and body.story_delay_minutes != post.story_delay_minutes:
+        post.story_delay_minutes = body.story_delay_minutes
+
+    # If a companion exists and any timing input changed, recompute its
+    # publish time and push the new value to the Pi.
+    reel_timing = {"scheduled_at", "companion_time", "reel_delay_minutes"} & requested
+    story_timing = {"scheduled_at", "companion_time", "story_delay_minutes"} & requested
+
+    if post.reel_delay_minutes is not None and reel_timing:
+        new_reel_at = companion_at(post.scheduled_at, post.reel_delay_minutes, post.companion_time)
+        if new_reel_at != post.reel_scheduled_at:
+            post.reel_scheduled_at = new_reel_at
+            pi_reel_publish_at = new_reel_at
+
+    if post.story_delay_minutes is not None and story_timing:
+        new_story_at = companion_at(post.scheduled_at, post.story_delay_minutes, post.companion_time)
+        if new_story_at != post.story_scheduled_at:
+            post.story_scheduled_at = new_story_at
+            pi_story_publish_at = new_story_at
+
+    if all(v is None for v in (pi_caption, pi_scheduled_at, pi_reel_publish_at, pi_story_publish_at)):
+        # Nothing to send to the Pi — return current state.
+        all_ids = _all_image_ids(post)
+        img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
+        images = {i.id: i for i in img_result.scalars().all()}
+        return _serialize(post, images)
+
+    try:
+        await outpost_svc.update_on_outpost(
+            post.outpost_id,
+            caption=pi_caption,
+            scheduled_at=pi_scheduled_at,
+            reel_publish_at=pi_reel_publish_at,
+            story_publish_at=pi_story_publish_at,
+        )
+    except RuntimeError as exc:
+        # Don't commit local edits if the Pi rejected them — keeps state aligned.
+        await db.rollback()
+        raise HTTPException(status_code=502, detail=f"Outpost edit failed: {exc}")
+
+    post.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    all_ids = _all_image_ids(post)
+    img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
+    images = {i.id: i for i in img_result.scalars().all()}
+    return _serialize(post, images)
 
 
 async def _drop_remote_containers(creation_ids: list[str]) -> None:
@@ -328,6 +482,12 @@ async def _drop_remote_containers(creation_ids: list[str]) -> None:
                 logger.info("Dropped IG container %s → %s", cid, r.status_code)
             except Exception as exc:
                 logger.warning("Failed to drop IG container %s: %s", cid, exc)
+
+
+@router.get("/outpost-status")
+async def outpost_status():
+    """Reachability + config probe for the cloud-schedule toggle."""
+    return await outpost_svc.health()
 
 
 @router.post("/posts/{post_id}/post-now")

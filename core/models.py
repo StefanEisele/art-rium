@@ -166,6 +166,12 @@ class InstagramPost(Base):
     feed_creation_id: Mapped[str | None] = mapped_column(String(128))
     reel_creation_id: Mapped[str | None] = mapped_column(String(128))
     reel_video_filename: Mapped[str | None] = mapped_column(String(512))   # slideshow MP4 in storage/reels (kept until reel publishes)
+    # Pi posting outpost (cloud-scheduled posts go through here instead of the local scheduler)
+    dispatch_target: Mapped[str] = mapped_column(String(16), nullable=False, default="local")  # local | outpost
+    outpost_id: Mapped[str | None] = mapped_column(String(64))           # Pi-side post UUID (returned by /enqueue)
+    outpost_status: Mapped[str | None] = mapped_column(String(32))       # mirrors Pi: queued|publishing|posted|failed|cancelled
+    outpost_reel_status: Mapped[str | None] = mapped_column(String(32))  # mirrors Pi reel_status (when reel uploaded)
+    outpost_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)                              # last failure message
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False

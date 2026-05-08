@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # ── Public URL (needed for Instagram to fetch images) ────────────────────
     public_base_url: str = ""  # e.g. https://xyz.trycloudflare.com
 
+    # ── Outpost (Pi posting service for cloud-scheduled posts) ───────────────
+    outpost_base_url: str = ""        # e.g. https://ig.stefaneisele.com
+    outpost_shared_secret: str = ""   # X-Outpost-Key
+
     # ── ffmpeg (needed for Reel video generation) ─────────────────────────────
     ffmpeg_path: str = "ffmpeg"  # override if ffmpeg is not on PATH
 

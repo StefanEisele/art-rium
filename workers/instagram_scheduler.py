@@ -27,6 +27,7 @@ from core.models import InstagramPost
 from services.instagram.graph import missing_config
 from services.instagram.publisher import publish_feed
 from services.instagram.reel import reel_publish_time
+from services.instagram import outpost as outpost_svc
 from workers.instagram_companion import publish_reel
 
 logger = logging.getLogger(__name__)
@@ -52,15 +53,17 @@ class InstagramScheduler:
         await self._fallback_immediate_feed(now)
         await self._fallback_immediate_reel(now)
         await self._sync_remote_publication_status(now)
+        await outpost_svc.sync_outpost_status()
 
     # ── 1. Fallback immediate publish ────────────────────────────────────────
 
     async def _fallback_immediate_feed(self, now: datetime) -> None:
-        """For posts that are due now and never got a remote schedule."""
+        """For local-dispatch posts that are due now and never got a remote schedule."""
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(InstagramPost.id)
                 .where(InstagramPost.status == "scheduled")
+                .where(InstagramPost.dispatch_target == "local")
                 .where(InstagramPost.feed_creation_id.is_(None))
                 .where(InstagramPost.scheduled_at <= now)
             )
@@ -78,11 +81,12 @@ class InstagramScheduler:
                 logger.error("Failed to publish post %s: %s", post_id, exc)
 
     async def _fallback_immediate_reel(self, now: datetime) -> None:
-        """Reel companion is due, was never remote-scheduled, and the feed has posted."""
+        """Local-dispatch reel companion is due, never remote-scheduled, feed has posted."""
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(InstagramPost)
                 .where(InstagramPost.status == "posted")
+                .where(InstagramPost.dispatch_target == "local")
                 .where(InstagramPost.reel_delay_minutes.isnot(None))
                 .where(InstagramPost.reel_creation_id.is_(None))
                 .where(InstagramPost.reel_status.in_(("pending", None, "failed")))
@@ -116,6 +120,7 @@ class InstagramScheduler:
             result = await db.execute(
                 select(InstagramPost)
                 .where(InstagramPost.status == "scheduled")
+                .where(InstagramPost.dispatch_target == "local")
                 .where(InstagramPost.feed_creation_id.isnot(None))
                 .where(InstagramPost.scheduled_at <= cutoff)
             )

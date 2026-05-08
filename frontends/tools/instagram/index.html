@@ -189,6 +189,32 @@
     .companion-delay-section {
       display: flex; flex-direction: column; gap: 8px;
     }
+    .dispatch-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px;
+      background: var(--bg-elev, #1c1f24);
+      border-radius: 8px;
+      border: 1px solid var(--border, #2a2f36);
+    }
+    .dispatch-row label {
+      display: flex; align-items: center; gap: 8px;
+      cursor: pointer; flex: 1;
+    }
+    .dispatch-row input[type=checkbox] { width: 16px; height: 16px; cursor: pointer; }
+    .dispatch-row .dispatch-toggle-text { font-size: 13px; font-weight: 600; }
+    .dispatch-row .dispatch-toggle-hint {
+      font-size: 11px; color: var(--text-dim, #9aa0a6);
+      margin-left: 4px;
+    }
+    .dispatch-row.unreachable { opacity: 0.55; }
+    .dispatch-row.unreachable .dispatch-toggle-hint { color: #c45c4c; }
+    .reel-nudge {
+      font-size: 12px; padding: 8px 12px;
+      background: rgba(255,180,0,0.10);
+      border: 1px solid rgba(255,180,0,0.35);
+      color: #d4a23a;
+      border-radius: 6px;
+    }
     .companion-delay-row {
       display: flex; align-items: center; gap: 10px;
     }
@@ -660,10 +686,21 @@
       </div>
       <div class="computed-date" id="computed-date-line">—</div>
 
-      <!-- Companion scheduling (Stories are not auto-scheduled — Instagram's
-           scheduled_publish_time is not supported for Stories. Post them
-           manually from the Instagram app.) -->
+      <!-- Companion scheduling. Stories + Reel can both ride along on a feed
+           post; the Pi outpost handles them once Cloud-Schedule is enabled. -->
       <div class="companion-delay-section">
+        <div class="companion-delay-row">
+          <span class="companion-delay-label">Story</span>
+          <div class="delay-chips" id="story-chips">
+            <button class="delay-chip active" data-value="off"  onclick="setNewPostDelay('story','off')">Off</button>
+            <button class="delay-chip"        data-value="0"    onclick="setNewPostDelay('story','0')">Now</button>
+            <button class="delay-chip"        data-value="60"   onclick="setNewPostDelay('story','60')">+1h</button>
+            <button class="delay-chip"        data-value="180"  onclick="setNewPostDelay('story','180')">+3h</button>
+            <button class="delay-chip"        data-value="360"  onclick="setNewPostDelay('story','360')">+6h</button>
+            <button class="delay-chip"        data-value="720"  onclick="setNewPostDelay('story','720')">+12h</button>
+            <button class="delay-chip"        data-value="1440" onclick="setNewPostDelay('story','1440')">+1day</button>
+          </div>
+        </div>
         <div class="companion-delay-row">
           <span class="companion-delay-label">Reel</span>
           <div class="delay-chips" id="reel-chips">
@@ -686,6 +723,20 @@
           <div id="reel-video-preview" style="display:contents"></div>
           <button class="sel-video-btn" onclick="openVideoPicker('new')">📹 Select video</button>
         </div>
+      </div>
+
+      <!-- Cloud dispatch toggle (only shown if outpost configured + reachable) -->
+      <div class="dispatch-row" id="dispatch-row" style="display:none">
+        <label>
+          <input type="checkbox" id="cloud-dispatch-toggle" onchange="onCloudToggle()">
+          <span class="dispatch-toggle-text">☁ Cloud-Schedule via outpost</span>
+          <span class="dispatch-toggle-hint" id="dispatch-hint">Posts publish even when this server is off.</span>
+        </label>
+      </div>
+      <div class="reel-nudge" id="reel-nudge" style="display:none">
+        ⚠ Reel companion is set but Cloud-Schedule is off. Reels currently fail
+        on the local path (Meta whitelist) — enable the toggle above to publish
+        through the Pi outpost.
       </div>
 
       <button class="schedule-btn" id="schedule-btn" onclick="schedulePost()" disabled>
@@ -760,6 +811,18 @@
     <!-- Companion delay selectors (only for scheduled posts) -->
     <div class="companion-delay-section" id="detail-companion-section" style="display:none">
       <div class="companion-delay-row">
+        <span class="companion-delay-label">Story</span>
+        <div class="delay-chips" id="detail-story-chips">
+          <button class="delay-chip" data-value="off"  onclick="setDetailDelay('story','off')">Off</button>
+          <button class="delay-chip" data-value="0"    onclick="setDetailDelay('story','0')">Now</button>
+          <button class="delay-chip" data-value="60"   onclick="setDetailDelay('story','60')">+1h</button>
+          <button class="delay-chip" data-value="180"  onclick="setDetailDelay('story','180')">+3h</button>
+          <button class="delay-chip" data-value="360"  onclick="setDetailDelay('story','360')">+6h</button>
+          <button class="delay-chip" data-value="720"  onclick="setDetailDelay('story','720')">+12h</button>
+          <button class="delay-chip" data-value="1440" onclick="setDetailDelay('story','1440')">+1day</button>
+        </div>
+      </div>
+      <div class="companion-delay-row">
         <span class="companion-delay-label">Reel</span>
         <div class="delay-chips" id="detail-reel-chips">
           <button class="delay-chip" data-value="off"   onclick="setDetailDelay('reel','off')">Off</button>
@@ -816,8 +879,12 @@ const state = {
   pickerDone: false,
   pickerSelection: new Map(),
   reelDelay: null,
+  storyDelay: null,
   companionTime: '18:23',
+  cloudDispatch: false,            // toggle for new-post panel
+  outpostReachable: false,         // probed once on page load
   detailReelDelay: null,
+  detailStoryDelay: null,
   detailCompanionTime: '18:23',
   // Reel video selection
   reelVideoId: null,             // for new post form
@@ -941,14 +1008,22 @@ function renderTimeline() {
         : '<em>No caption</em>';
       const titleText = p.image?.title || p.image?.filename || '';
 
-      // Companion badges (Reel only — Stories are no longer auto-scheduled)
-      const reelBadge = _companionBadge('Reel', p.reel_status, p.reel_delay_minutes, p.reel_scheduled_at);
-      const companionHTML = reelBadge ? `<div class="companion-row">${reelBadge}</div>` : '';
+      // Companion badges
+      const storyBadge = _companionBadge('Story', p.story_status, p.story_delay_minutes, p.story_scheduled_at);
+      const reelBadge  = _companionBadge('Reel',  p.reel_status,  p.reel_delay_minutes,  p.reel_scheduled_at);
+      const badges     = [storyBadge, reelBadge].filter(Boolean).join('');
+      const companionHTML = badges ? `<div class="companion-row">${badges}</div>` : '';
 
-      // Cloud marker = Instagram has the scheduled post in its own queue
-      const cloudMarker = p.remote_scheduled && p.status === 'scheduled'
-        ? ' <span title="Scheduled directly with Instagram — survives server restart">☁</span>'
-        : '';
+      // Cloud marker = scheduled remotely (Instagram-native or via Pi outpost)
+      let cloudMarker = '';
+      if (p.dispatch_target === 'outpost' && p.status !== 'posted' && p.status !== 'cancelled') {
+        const t = p.outpost_status === 'failed'
+          ? 'Outpost dispatch failed — see error'
+          : `Cloud-scheduled via Pi outpost (${p.outpost_status || 'pending'})`;
+        cloudMarker = ` <span title="${t}">☁</span>`;
+      } else if (p.remote_scheduled && p.status === 'scheduled') {
+        cloudMarker = ' <span title="Scheduled directly with Instagram — survives server restart">☁</span>';
+      }
 
       row.innerHTML = `
         ${thumbHTML}
@@ -1184,21 +1259,31 @@ function _syncChips(chipsId, value) {
 }
 
 function setNewPostDelay(type, value) {
-  if (type !== 'reel') return;
   const parsed = value === 'off' ? null : parseInt(value, 10);
-  state.reelDelay = parsed;
-  _syncChips('reel-chips', parsed);
-  $('reel-video-row').style.display = parsed !== null ? '' : 'none';
-  if (parsed === null) { state.reelVideoId = null; state.reelVideo = null; renderReelVideoPreview('new'); }
+  if (type === 'reel') {
+    state.reelDelay = parsed;
+    _syncChips('reel-chips', parsed);
+    $('reel-video-row').style.display = parsed !== null ? '' : 'none';
+    if (parsed === null) { state.reelVideoId = null; state.reelVideo = null; renderReelVideoPreview('new'); }
+    _updateReelNudge();
+  } else if (type === 'story') {
+    state.storyDelay = parsed;
+    _syncChips('story-chips', parsed);
+    _updateReelNudge();   // story-without-cloud has the same caveat as reel
+  }
 }
 
 function setDetailDelay(type, value) {
-  if (type !== 'reel') return;
   const parsed = value === 'off' ? null : parseInt(value, 10);
-  state.detailReelDelay = parsed;
-  _syncChips('detail-reel-chips', parsed);
-  $('detail-reel-video-row').style.display = parsed !== null ? '' : 'none';
-  if (parsed === null) { state.detailReelVideoId = null; state.detailReelVideo = null; renderReelVideoPreview('detail'); }
+  if (type === 'reel') {
+    state.detailReelDelay = parsed;
+    _syncChips('detail-reel-chips', parsed);
+    $('detail-reel-video-row').style.display = parsed !== null ? '' : 'none';
+    if (parsed === null) { state.detailReelVideoId = null; state.detailReelVideo = null; renderReelVideoPreview('detail'); }
+  } else if (type === 'story') {
+    state.detailStoryDelay = parsed;
+    _syncChips('detail-story-chips', parsed);
+  }
 }
 
 // ── Video picker ──────────────────────────────────────────────────────────────
@@ -1299,8 +1384,10 @@ async function schedulePost() {
       caption:              $('caption-input').value.trim() || null,
       scheduled_at:         state.computedDate,
       reel_delay_minutes:   state.reelDelay,
+      story_delay_minutes:  state.storyDelay,
       companion_time:       state.companionTime,
       reel_video_id:        state.reelVideoId || null,
+      dispatch_target:      state.cloudDispatch ? 'outpost' : 'local',
     };
     await api('/api/instagram/posts', {
       method: 'POST',
@@ -1315,14 +1402,19 @@ async function schedulePost() {
     state.pickerPage = 0;
     state.pickerDone = false;
     state.reelDelay  = null;
+    state.storyDelay = null;
     state.companionTime = '18:23';
     state.reelVideoId = null;
     state.reelVideo   = null;
+    state.cloudDispatch = false;
     $('picker-grid').innerHTML = '';
     $('caption-input').value = '';
     _syncChips('reel-chips', null);
+    _syncChips('story-chips', null);
     $('companion-time-input').value = '18:23';
     $('reel-video-row').style.display = 'none';
+    if ($('cloud-dispatch-toggle')) $('cloud-dispatch-toggle').checked = false;
+    _updateReelNudge();
     renderReelVideoPreview('new');
     renderSelectedStrip();
 
@@ -1383,9 +1475,11 @@ function openDetail(post) {
   }
 
   state.detailReelDelay     = post.reel_delay_minutes  ?? null;
+  state.detailStoryDelay    = post.story_delay_minutes ?? null;
   state.detailCompanionTime = post.companion_time || '18:23';
   $('detail-companion-section').style.display = isScheduled ? '' : 'none';
   _syncChips('detail-reel-chips',  state.detailReelDelay);
+  _syncChips('detail-story-chips', state.detailStoryDelay);
   $('detail-companion-time').value = state.detailCompanionTime;
   // Reel video selection
   state.detailReelVideoId = post.reel_video_id || null;
@@ -1419,6 +1513,7 @@ async function saveDetail() {
     // Always include delays so the server knows the user's intent (model_fields_set)
     if (state.activePost.status === 'scheduled') {
       patchBody.reel_delay_minutes  = state.detailReelDelay;
+      patchBody.story_delay_minutes = state.detailStoryDelay;
       patchBody.companion_time      = state.detailCompanionTime;
       patchBody.reel_video_id       = state.detailReelVideoId || null;
       const dateVal = $('detail-sched-date').value;
@@ -1561,8 +1656,45 @@ window.addEventListener('load', async () => {
   });
 
   renderSelectedStrip();
-  await Promise.all([loadTimeline(), loadLastPost(), loadAllVideos()]);
+  await Promise.all([loadTimeline(), loadLastPost(), loadAllVideos(), probeOutpost()]);
 });
+
+async function probeOutpost() {
+  try {
+    const resp = await api('/api/instagram/outpost-status');
+    const r = await resp.json();
+    const row = $('dispatch-row');
+    if (r && r.reachable) {
+      state.outpostReachable = true;
+      row.style.display = 'flex';
+      row.classList.remove('unreachable');
+      $('dispatch-hint').textContent = 'Posts publish even when this server is off.';
+      _updateReelNudge();
+    } else if (r && (r.missing_config || r.error)) {
+      // Configured-but-broken: show greyed out for diagnostic visibility.
+      const detail = r.missing_config ? `missing ${r.missing_config.join(', ')}` : (r.error || 'unreachable');
+      row.style.display = 'flex';
+      row.classList.add('unreachable');
+      $('cloud-dispatch-toggle').disabled = true;
+      $('dispatch-hint').textContent = `Outpost unavailable: ${detail}`;
+    }
+  } catch (e) {
+    // Silent — outpost is optional infrastructure.
+  }
+}
+
+function onCloudToggle() {
+  state.cloudDispatch = $('cloud-dispatch-toggle').checked;
+  _updateReelNudge();
+}
+
+function _updateReelNudge() {
+  const show = state.reelDelay !== null
+    && !state.cloudDispatch
+    && state.outpostReachable;
+  const el = $('reel-nudge');
+  if (el) el.style.display = show ? 'block' : 'none';
+}
 </script>
 </body>
 </html>

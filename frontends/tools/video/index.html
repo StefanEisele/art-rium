@@ -177,9 +177,9 @@
         <div class="field-row">
           <span class="field-label">Resolution</span>
           <div class="res-chips" id="res-chips">
-            <button class="res-chip active" data-w="1088" data-h="1088" onclick="setRes(1088,1088,this)">1088×1088</button>
-            <button class="res-chip" data-w="1920" data-h="1088" onclick="setRes(1920,1088,this)">1920×1088</button>
-            <button class="res-chip" data-w="1088" data-h="1920" onclick="setRes(1088,1920,this)">1088×1920</button>
+            <button class="res-chip active" data-w="960" data-h="960" onclick="setRes(960,960,this)">960×960</button>
+            <button class="res-chip" data-w="1280" data-h="704" onclick="setRes(1280,704,this)">1280×704</button>
+            <button class="res-chip" data-w="704" data-h="1280" onclick="setRes(704,1280,this)">704×1280</button>
           </div>
         </div>
 
@@ -244,7 +244,7 @@ const state = {
   mode: 'i2v_multi',
   selectedImages: [],
   perImageSettings: new Map(),   // imageId → {prompt, frameCount}
-  width: 1088, height: 1088,
+  width: 960, height: 960,
   pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
   pickerSelection: new Map(),
   videos: [],

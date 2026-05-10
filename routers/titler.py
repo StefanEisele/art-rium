@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(require_auth)])
 
 _WORKFLOW = json.loads(
-    (Path(__file__).parent.parent / "workflows" / "qwen_3_5_image_titler.json").read_text()
+    (Path(__file__).parent.parent / "workflows" / "qwen_2_5_vl_image_titler.json").read_text()
 )
 
 OUTPUT_NODE = "6"  # PreviewAny node — this is what fires the executed event with text

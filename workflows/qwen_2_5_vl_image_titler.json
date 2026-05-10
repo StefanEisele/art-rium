@@ -38,7 +38,7 @@
   "7": {
     "inputs": {
       "url": "http://127.0.0.1:11434",
-      "model": "qwen3.5:latest",
+      "model": "qwen2.5vl:latest",
       "keep_alive": 5,
       "keep_alive_unit": "minutes",
       "🔄 Reconnect": null

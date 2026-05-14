@@ -250,7 +250,6 @@
   <header>
     <a class="back-btn" href="/" title="Dashboard">‹</a>
     <h1>Image Titler</h1>
-    <div class="dot connecting" id="dot"></div>
   </header>
 
   <!-- ══ VIEW: PICKER ══ -->
@@ -325,7 +324,6 @@ const PAGE_SIZE = 60;
 
 const state = {
   apiKey:   ArtRium.getApiKey(),
-  clientId: ArtRium.getClientId(),
   images:   [],
   offset:   0,
   hasMore:  false,
@@ -424,43 +422,10 @@ const loadMoreImages = () => {
 };
 
 // ══════════════════════════════════════════════════════════
-// WEBSOCKET
-// ══════════════════════════════════════════════════════════
-let wsConn;
-
-// ══════════════════════════════════════════════════════════
-// WS MESSAGE HANDLING
-// ══════════════════════════════════════════════════════════
-const handleWsMsg = (msg) => {
-  if (msg.type === 'text_ready') {
-    onTitlesReceived(msg.data.text);
-    return;
-  }
-
-  if (msg.type === 'execution_error') {
-    hideProgress();
-    ArtRium.toast('Ollama workflow failed: ' + (msg.data?.message || 'unknown error'), true);
-    return;
-  }
-
-  if (msg.type === 'executing' && msg.data?.node) {
-    const nodeLabels = {
-      '12': 'Loading image…',
-      '11': 'Resizing image…',
-      '7':  'Connecting to Ollama…',
-      '1':  'Generating titles…',
-    };
-    const label = nodeLabels[msg.data.node];
-    if (label) $('prog-label').textContent = label;
-  }
-};
-
-// ══════════════════════════════════════════════════════════
 // TITLING FLOW
 // ══════════════════════════════════════════════════════════
 const startTitling = async () => {
   if (!state.selected) return;
-  if (!wsConn.ready) { ArtRium.toast('Not connected — please wait.'); return; }
 
   switchView('results');
 
@@ -481,47 +446,28 @@ const startTitling = async () => {
   $('save-btn').disabled = true;
   $('save-btn').textContent = 'Select a title to save';
 
-  showProgress('Sending to Ollama…', 'This may take 30–60 seconds');
+  showProgress('Generating titles…', 'Local VLM — usually 5–20 seconds');
 
   try {
-    await apiFetch('/api/titler/run', {
+    const r = await apiFetch('/api/titler/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image_id: state.selected.id, client_id: state.clientId }),
+      body: JSON.stringify({ image_id: state.selected.id }),
     });
+    const data = await r.json();
+    onTitlesReceived(data.titles || []);
   } catch (e) {
     hideProgress();
-    ArtRium.toast('Failed to start: ' + e.message, true);
+    ArtRium.toast('Titler failed: ' + e.message, true);
   }
 };
 
-// ══════════════════════════════════════════════════════════
-// TITLE DISPLAY & PARSING
-// ══════════════════════════════════════════════════════════
-const parseTitles = (text) => {
-  const clean = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-
-  const titles = [];
-  for (const line of clean.split('\n')) {
-    const m = line.match(/^(?:\d+[.)]\s+|[-*]\s+)\*{0,2}(.+?)\*{0,2}\s*$/);
-    if (m) titles.push(m[1].trim());
-  }
-  if (titles.length === 0) {
-    for (const line of clean.split('\n')) {
-      const t = line.replace(/^\s*[-*\d.)]+\s*/, '').replace(/\*\*/g, '').trim();
-      if (t && t.split(' ').length <= 12 && t.length > 3) titles.push(t);
-    }
-  }
-  return [...new Set(titles)];
-};
-
-const onTitlesReceived = (text) => {
+const onTitlesReceived = (titles) => {
   hideProgress();
-  state.titles = parseTitles(text);
+  state.titles = titles;
 
   if (state.titles.length === 0) {
-    ArtRium.toast('Could not parse titles from response. Raw output logged to console.');
-    console.log('Raw LLM output:', text);
+    ArtRium.toast('No titles returned from the model.', true);
     return;
   }
 
@@ -612,15 +558,6 @@ const hideProgress = () => {
 // ══════════════════════════════════════════════════════════
 window.addEventListener('load', () => {
   loadImages(true);
-
-  wsConn = ArtRium.connectWs({
-    clientId:      state.clientId,
-    getApiKey:     () => state.apiKey,
-    onMessage:     handleWsMsg,
-    onConnecting:  () => ArtRium.setDot('connecting'),
-    onConnected:   () => ArtRium.setDot('connected'),
-    onDisconnected:() => ArtRium.setDot('disconnected'),
-  });
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});

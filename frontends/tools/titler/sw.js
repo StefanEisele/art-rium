@@ -1,7 +1,7 @@
 importScripts('/shared/sw-base.js');
 
 artRiumSetupSw({
-  cache: 'art-rium-titler-v1',
+  cache: 'art-rium-titler-v2',
   shell: [
     '/tools/titler/',
     '/tools/titler/manifest.json',

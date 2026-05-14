@@ -395,7 +395,7 @@ const handleMsg = (msg) => {
   } else if (type === 'executing') {
     strip.show();
     if (data.node) strip.setLabel(ArtRium.NODE_LABELS[data.node] || 'Generating…');
-  } else if (type === 'image_ready' || type === 'text_ready') {
+  } else if (type === 'image_ready') {
     strip.done();
   } else if (type === 'execution_error') {
     strip.setLabel('Generation failed');

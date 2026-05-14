@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from core.config import settings
+from services.ollama.client import warm_titler_model
 from workers.comfy_listener import ComfyListener
 from workers.instagram_scheduler import InstagramScheduler
 
@@ -42,11 +43,18 @@ async def lifespan(app: FastAPI):
     scheduler = InstagramScheduler()
     scheduler_task = asyncio.create_task(scheduler.run())
 
+    # Warm the titler VLM in the background — cold load is ~2.5 min, which
+    # exceeds the Cloudflare tunnel's ~100s upstream timeout for the first
+    # frontend request. Fire-and-forget; never blocks server startup.
+    warm_task = asyncio.create_task(warm_titler_model())
+    logger.info("Titler warm-up scheduled in background")
+
     yield
 
     comfy_task.cancel()
     scheduler_task.cancel()
-    for t in (comfy_task, scheduler_task):
+    warm_task.cancel()
+    for t in (comfy_task, scheduler_task, warm_task):
         try:
             await t
         except asyncio.CancelledError:

@@ -693,6 +693,118 @@ async def write_rich_article(
     return out
 
 
+_TITLER_SYSTEM = "You are an art curator specialising in contemporary media art."
+_TITLER_KEEP_ALIVE = "30m"  # keep VLM resident in VRAM after each call — cold-load is ~2.5 min
+
+
+async def warm_titler_model(timeout: float = 600.0) -> None:
+    """
+    Fire-and-forget Ollama call that loads the titler model into VRAM.
+
+    Called from the FastAPI lifespan as a background task so the first real
+    request from the frontend doesn't pay the ~150s cold-load and hit
+    upstream timeouts (Cloudflare tunnel caps at ~100s).
+
+    Uses a tiny synthetic JPG so the vision tower warms up too, with
+    num_predict=1 to keep wall time near the pure load cost.
+    """
+    from io import BytesIO
+    from PIL import Image as PILImage
+
+    buf = BytesIO()
+    PILImage.new("RGB", (32, 32), (128, 128, 128)).save(buf, "JPEG", quality=50)
+    jpg = buf.getvalue()
+
+    payload = {
+        "model":      settings.ollama_titler_model,
+        "messages":   [{"role": "user", "content": "ok", "images": [base64.b64encode(jpg).decode("ascii")]}],
+        "stream":     False,
+        "keep_alive": _TITLER_KEEP_ALIVE,
+        "options":    {"num_predict": 1, "temperature": 0.0},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
+        if r.status_code != 200:
+            logger.warning("Titler warm-up: ollama returned %s — %s", r.status_code, r.text[:200])
+            return
+        data = r.json()
+        load_ms = (data.get("load_duration") or 0) / 1_000_000
+        total_ms = (data.get("total_duration") or 0) / 1_000_000
+        logger.info(
+            "Titler warm-up complete: model=%s, load=%.1fs, total=%.1fs",
+            settings.ollama_titler_model, load_ms / 1000, total_ms / 1000,
+        )
+    except Exception as exc:
+        logger.warning("Titler warm-up failed (will retry on first request): %s", exc)
+
+
+async def generate_titles(
+    jpg_bytes: bytes,
+    *,
+    n: int = 5,
+    timeout: float = 120.0,
+) -> list[str]:
+    """
+    Generate *n* short title suggestions for the artwork in *jpg_bytes*.
+
+    Uses OLLAMA_TITLER_MODEL (must be vision-capable). Returns a deduplicated
+    list of cleaned title strings, capped at *n*.
+
+    Raises RuntimeError on Ollama error / non-JSON output, httpx.HTTPError
+    on network failures.
+    """
+    user_text = (
+        f"Suggest {n} short, evocative titles for this artwork. "
+        f"Each title: 2 to 6 words, Title Case, no trailing punctuation, "
+        f"no surrounding quotes, no numbering, no commentary.\n\n"
+        f'Return STRICT JSON: {{"titles": ["title one", "title two", ...]}}'
+    )
+    payload: dict[str, Any] = {
+        "model": settings.ollama_titler_model,
+        "messages": [
+            {"role": "system", "content": _TITLER_SYSTEM},
+            {
+                "role": "user",
+                "content": user_text,
+                "images": [base64.b64encode(jpg_bytes).decode("ascii")],
+            },
+        ],
+        "format":     "json",
+        "stream":     False,
+        "keep_alive": _TITLER_KEEP_ALIVE,
+        "options":    {"temperature": 0.8},
+    }
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
+        r.raise_for_status()
+        data = r.json()
+
+    if "error" in data:
+        raise RuntimeError(f"Ollama error: {data['error']}")
+
+    content = data.get("message", {}).get("content", "")
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        logger.error("Titler VLM returned non-JSON content: %s", content[:500])
+        raise RuntimeError(f"Titler VLM returned non-JSON content: {exc}") from exc
+
+    raw = parsed.get("titles") or []
+    if not isinstance(raw, list):
+        raise RuntimeError(f"Titler VLM 'titles' field is not a list: {type(raw).__name__}")
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in raw:
+        s = str(t).strip().strip('"').strip("'").rstrip(".").strip()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out[:n]
+
+
 async def reachable() -> bool:
     """Best-effort Ollama health check."""
     try:

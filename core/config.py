@@ -32,8 +32,9 @@ class Settings(BaseSettings):
 
     # ── Ollama (local VLM for image analysis) ────────────────────────────────
     ollama_host: str = "http://localhost:11434"
-    ollama_vlm_model: str = "qwen2.5vl:latest"   # vision; alt-text + media metadata
-    ollama_llm_model: str = "qwen3.6:27b"         # vision; multilingual article writer (think:false required)
+    ollama_vlm_model:    str = "qwen2.5vl:latest"   # vision; alt-text + media metadata
+    ollama_llm_model:    str = "qwen3.6:27b"        # vision; multilingual article writer (think:false required)
+    ollama_titler_model: str = "qwen2.5vl:3b"       # vision; lightweight title brainstorming
     vlm_analysis_max_edge: int = 512          # downscale before sending to VLM
 
     # ── Instagram (optional) ─────────────────────────────────────────────────

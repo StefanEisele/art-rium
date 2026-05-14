@@ -38,9 +38,6 @@ class ComfyListener:
         # prompt_id → metadata (image generation jobs)
         self._prompt_meta: dict[str, dict] = {}
 
-        # prompt_id → {client_id, output_node} (text-only jobs)
-        self._text_prompts: dict[str, dict] = {}
-
         # client_id → WebSocket
         self._active_ws: dict[str, WebSocket] = {}
 
@@ -48,17 +45,6 @@ class ComfyListener:
         self._pending: dict[str, list] = {}
 
     # ── Registration API (called by generate router) ─────────────────────────
-
-    def register_text_prompt(
-        self,
-        prompt_id: str,
-        client_id: str,
-        output_node: str,
-    ) -> None:
-        self._text_prompts[prompt_id] = {
-            "client_id": client_id,
-            "output_node": output_node,
-        }
 
     def register_prompt(
         self,
@@ -137,11 +123,6 @@ class ComfyListener:
         if not prompt_id:
             return
 
-        # Text-only jobs (e.g. titler workflow)
-        if prompt_id in self._text_prompts:
-            await self._route_text(msg, prompt_id, msg_type, data)
-            return
-
         if prompt_id not in self._prompt_meta:
             return
 
@@ -164,50 +145,6 @@ class ComfyListener:
             await self._on_success(prompt_id, meta, client_id, ws)
         elif msg_type == "execution_error":
             await self._on_error(ws, prompt_id, meta, data)
-
-    async def _route_text(self, msg: dict, prompt_id: str, msg_type: str, data: dict) -> None:
-        meta = self._text_prompts[prompt_id]
-        client_id = meta["client_id"]
-        ws = self._active_ws.get(client_id)
-
-        # Forward raw event so frontend can show progress
-        if ws:
-            try:
-                await ws.send_json(msg)
-            except Exception as e:
-                logger.error(f"Text forward failed ({msg_type}): {e}")
-
-        if msg_type == "executed":
-            logger.debug(f"Text job executed node={data.get('node')} output_keys={list(data.get('output', {}).keys())}")
-
-        if msg_type == "executed" and data.get("node") == meta["output_node"]:
-            text = ""
-            output = data.get("output", {})
-            texts = output.get("text", [])
-            if texts:
-                text = texts[0] if isinstance(texts[0], str) else str(texts[0])
-
-            if ws and text:
-                try:
-                    await ws.send_json({"type": "text_ready", "data": {"text": text}})
-                    logger.info(f"Delivered text_ready for prompt {prompt_id}")
-                except Exception as e:
-                    logger.error(f"text_ready send failed: {e}")
-            del self._text_prompts[prompt_id]
-
-        elif msg_type == "execution_success":
-            self._text_prompts.pop(prompt_id, None)
-
-        elif msg_type == "execution_error":
-            if ws:
-                try:
-                    await ws.send_json({
-                        "type": "execution_error",
-                        "data": {"message": data.get("exception_message", "Workflow failed")},
-                    })
-                except Exception:
-                    pass
-            self._text_prompts.pop(prompt_id, None)
 
     async def _on_start(self, ws, meta: dict) -> None:
         if ws:

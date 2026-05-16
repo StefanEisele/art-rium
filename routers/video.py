@@ -35,6 +35,7 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.models import Image, Video
+from core.video_thumb import make_video_thumbnail
 from services.comfy.client import (
     free_memory,
     poll_history,
@@ -318,22 +319,6 @@ def _segments_dir(video_id: uuid.UUID) -> Path:
     return settings.videos_dir / "segments" / str(video_id)
 
 
-async def _make_video_thumbnail(src: Path, dst: Path) -> None:
-    """Write a first-frame JPEG thumbnail next to a video file. Best-effort."""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            settings.ffmpeg_path,
-            "-y", "-i", str(src),
-            "-frames:v", "1", "-q:v", "3",
-            str(dst),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.wait()
-    except Exception as e:
-        logger.warning("Thumbnail generation failed for %s: %s", src, e)
-
-
 # ── Background generation task ────────────────────────────────────────────────
 
 # httpx connection/read errors thrown when ComfyUI is mid-restart between
@@ -480,7 +465,7 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
                     seg_dest  = seg_dir / f"seg_{i}.mp4"
                     seg_thumb = seg_dir / f"seg_{i}_thumb.jpg"
                     await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
-                    await _make_video_thumbnail(seg_dest, seg_thumb)
+                    await make_video_thumbnail(seg_dest, seg_thumb)
                     segment_meta.append({
                         "index":       i,
                         "filename":    seg_dest.name,
@@ -538,7 +523,7 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
         logger.info("Video stored: %s", dest)
 
         _set("finalizing", "Generating thumbnail…", 96)
-        await _make_video_thumbnail(dest, settings.videos_dir / f"{video_id}_thumb.jpg")
+        await make_video_thumbnail(dest, settings.videos_dir / f"{video_id}_thumb.jpg")
 
         async with AsyncSessionLocal() as db:
             video = await db.get(Video, video_id)
@@ -630,7 +615,7 @@ async def _assemble_video(video_id: uuid.UUID, indices: list[int]) -> None:
                 raise RuntimeError(f"ffmpeg concat failed (rc={proc.returncode}): {tail}")
 
         _set("finalizing", "Generating thumbnail…", 96)
-        await _make_video_thumbnail(dest, settings.videos_dir / f"{video_id}_thumb.jpg")
+        await make_video_thumbnail(dest, settings.videos_dir / f"{video_id}_thumb.jpg")
 
         rel_path = dest.relative_to(settings.storage_dir)
         async with AsyncSessionLocal() as db:

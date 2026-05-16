@@ -71,8 +71,9 @@
     /* Results */
     #result-section { display: none; }
     #result-section.show { display: block; }
-    .result-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    @media (max-width: 540px) { .result-pair { grid-template-columns: 1fr; } }
+    .result-pair { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    @media (max-width: 720px) { .result-pair { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 480px) { .result-pair { grid-template-columns: 1fr; } }
     .mix-card { background: var(--surface); border: 1.5px solid var(--border); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
     .mix-card video { width: 100%; border-radius: 6px; background: #000; max-height: 280px; }
     .mix-card .mix-title { font-size: 12px; font-weight: 700; }
@@ -366,7 +367,7 @@ async function submitSession() {
     }
     const body = await r.json();
     state.activeJobId = body.id;
-    document.getElementById('status-msg').textContent = 'Queued — ffmpeg muxing the two outputs…';
+    document.getElementById('status-msg').textContent = 'Queued — ffmpeg muxing the three outputs…';
     pollJob();
   } catch (e) {
     toast(e.message, true);
@@ -383,7 +384,7 @@ async function pollJob() {
     const s = await r.json();
     document.getElementById('status-msg').textContent =
       s.status === 'queued'     ? 'Queued — waiting to start…'
-    : s.status === 'processing' ? 'Muxing audio + video (ffmpeg)…'
+    : s.status === 'processing' ? 'Muxing audio + video (3 outputs, ffmpeg)…'
     : s.status === 'done'       ? 'Done!'
     : s.status === 'failed'     ? 'Failed: ' + (s.error || 'unknown error')
     :                              s.status;
@@ -407,6 +408,7 @@ function finishJob(s) {
   pair.innerHTML = '';
   pair.appendChild(makeMixCard('Synth + Piano Audio', s.mix_synth));
   pair.appendChild(makeMixCard('Hands + Piano Audio', s.mix_hands));
+  pair.appendChild(makeMixCard('Synth + Hands (PiP)',  s.mix_pip));
   document.getElementById('status-card').classList.remove('show');
   document.getElementById('result-section').classList.add('show');
   document.getElementById('submit-btn').disabled = false;
@@ -463,6 +465,7 @@ async function loadRecent() {
         <span class="sr-when">${escapeHtml(src)} · ${escapeHtml(when)}</span>
         ${s.mix_synth?.filename ? `<a href="${withAuth('/api/video/file/' + s.mix_synth.filename, state.apiKey)}" target="_blank">synth</a>` : ''}
         ${s.mix_hands?.filename ? `<a href="${withAuth('/api/video/file/' + s.mix_hands.filename, state.apiKey)}" target="_blank">hands</a>` : ''}
+        ${s.mix_pip?.filename   ? `<a href="${withAuth('/api/video/file/' + s.mix_pip.filename,   state.apiKey)}" target="_blank">pip</a>`   : ''}
       `;
       box.appendChild(row);
     });

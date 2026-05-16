@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -136,6 +136,46 @@ async def get_shared_video(filename: str, token: str = ""):
     if candidate.exists():
         return FileResponse(candidate, media_type="video/mp4")
     raise HTTPException(status_code=404, detail="Video not found")
+
+
+_LOOP_PLAYER_HTML = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000">
+<title>art-rium</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#000;overflow:hidden;-webkit-tap-highlight-color:transparent}
+  video{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+</style>
+</head><body>
+<video src="__SRC__" autoplay loop muted playsinline preload="auto" disablepictureinpicture></video>
+<script>
+  // Some mobile browsers gate autoplay until user interacts — a tap on the
+  // page kicks it off, and we re-loop on every 'ended' as a belt-and-braces.
+  const v = document.querySelector('video');
+  const kick = () => { v.play().catch(() => {}); };
+  document.addEventListener('touchstart', kick, { once: true });
+  document.addEventListener('click',      kick, { once: true });
+  v.addEventListener('ended', () => { v.currentTime = 0; v.play().catch(() => {}); });
+</script>
+</body></html>"""
+
+
+@router.get("/share/video-loop/{filename}")
+async def get_shared_video_loop(filename: str, token: str = ""):
+    """Public HTML player that loops a generated video — used by the Improv
+    tool's share-URL/QR-code so a second device (iPad next to the piano) can
+    play the source over and over without manual restarts."""
+    if settings.image_share_token and token != settings.image_share_token:
+        raise HTTPException(status_code=403, detail="Invalid share token")
+    safe_name = Path(filename).name
+    if not (settings.videos_dir / safe_name).exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+    src = f"/share/video/{safe_name}"
+    if settings.image_share_token:
+        src += f"?token={settings.image_share_token}"
+    return HTMLResponse(_LOOP_PLAYER_HTML.replace("__SRC__", src))
 
 
 @router.get("/api/image/{filename}", dependencies=[Depends(require_auth)])

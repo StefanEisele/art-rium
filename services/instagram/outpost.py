@@ -28,6 +28,7 @@ from core.db import AsyncSessionLocal
 from core.imaging import prepare_jpg_for_web
 from core.models import Image, InstagramPost, Video
 from core.scheduling import companion_at
+from services.instagram.reel_concat import concat_reel_videos
 from workers.video_generator import generate_slideshow
 
 logger = logging.getLogger(__name__)
@@ -68,11 +69,11 @@ async def health() -> dict:
 
 async def dispatch_to_outpost(post_id: uuid.UUID) -> None:
     """
-    Build the multipart package for a scheduled post and POST it to /enqueue.
+    Route a scheduled post to the right Pi-outpost dispatch path.
 
-    Re-encodes images to web-grade JPEG (1080px Q88), optionally renders the
-    reel slideshow inline (Pi cannot ffmpeg at speed), then uploads and
-    persists `outpost_id` + `outpost_status='queued'`.
+    For `kind='feed'` rows we re-encode images, optionally render a reel
+    slideshow, and POST to /enqueue. For `kind='reel'` rows we concatenate
+    the chosen source videos into one 1080×1920 MP4 and POST to /enqueue-reel.
 
     Failures are recorded on the row (`outpost_status='failed'`, `error=...`)
     rather than raised — the caller is a fire-and-forget background task.
@@ -92,7 +93,20 @@ async def dispatch_to_outpost(post_id: uuid.UUID) -> None:
             logger.info("dispatch_to_outpost %s — already dispatched (%s), skipping",
                         post_id, post.outpost_id)
             return
+        kind = post.kind
 
+    if kind == "reel":
+        await _dispatch_reel_only(post_id)
+        return
+    await _dispatch_feed(post_id)
+
+
+async def _dispatch_feed(post_id: uuid.UUID) -> None:
+    """Re-encode images + optional reel slideshow, POST to /enqueue."""
+    async with AsyncSessionLocal() as db:
+        post = await db.get(InstagramPost, post_id)
+        if not post or post.outpost_id:
+            return
         all_ids = [post.image_id] + list(post.carousel_image_ids or [])
         img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
         images = {img.id: img for img in img_result.scalars().all()}
@@ -215,6 +229,108 @@ async def dispatch_to_outpost(post_id: uuid.UUID) -> None:
         await db.commit()
         logger.info("dispatch_to_outpost %s → outpost_id=%s (reel=%s)",
                     post_id, outpost_id, reel_path is not None)
+
+
+async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
+    """
+    Concatenate the post's reel_video_ids into one 1080×1920 MP4 and POST
+    to the Pi /enqueue-reel endpoint. No images, optional story companion.
+    """
+    async with AsyncSessionLocal() as db:
+        post = await db.get(InstagramPost, post_id)
+        if not post or post.outpost_id:
+            return
+        video_ids = list(post.reel_video_ids or [])
+        if not video_ids:
+            await _record_failure(post_id, "kind='reel' but reel_video_ids is empty")
+            return
+        if len(video_ids) > 4:
+            await _record_failure(post_id, f"Too many reel_video_ids ({len(video_ids)}, max 4)")
+            return
+
+        vid_result = await db.execute(select(Video).where(Video.id.in_(video_ids)))
+        videos = {v.id: v for v in vid_result.scalars().all()}
+        ordered = [videos.get(vid) for vid in video_ids]
+        if any(v is None or v.status != "done" or not v.filepath for v in ordered):
+            await _record_failure(post_id, "One or more reel source videos are not ready")
+            return
+
+        caption = post.caption or ""
+        scheduled_at = post.scheduled_at
+        story_publish_at = (
+            companion_at(post.scheduled_at, post.story_delay_minutes, post.companion_time)
+            if post.story_delay_minutes is not None
+            else None
+        )
+        source_paths = [settings.storage_dir / v.filepath for v in ordered]
+
+    # ── Concatenate to a 9:16 reel MP4 (off the DB session) ────────────────
+    settings.reels_dir.mkdir(parents=True, exist_ok=True)
+    reel_path = settings.reels_dir / f"reel_only_{post_id.hex}.mp4"
+    try:
+        await concat_reel_videos(source_paths, reel_path, ffmpeg_path=settings.ffmpeg_path)
+    except Exception as exc:
+        await _record_failure(
+            post_id,
+            f"Reel concat failed: {type(exc).__name__}: {exc}",
+        )
+        return
+
+    # ── Multipart upload to /enqueue-reel ──────────────────────────────────
+    try:
+        with open(reel_path, "rb") as f:
+            reel_bytes = f.read()
+        data = {
+            "caption": caption,
+            "scheduled_at": _iso(scheduled_at),
+        }
+        if story_publish_at is not None:
+            data["story_publish_at"] = _iso(story_publish_at)
+
+        async with httpx.AsyncClient(timeout=300) as client:
+            r = await client.post(
+                f"{_base()}/enqueue-reel",
+                headers=_headers(),
+                data=data,
+                files=[("reel_mp4", (reel_path.name, reel_bytes, "video/mp4"))],
+            )
+        if r.status_code >= 300:
+            await _record_failure(
+                post_id,
+                f"Outpost /enqueue-reel HTTP {r.status_code}: {r.text[:300]}",
+            )
+            return
+        body = r.json()
+        outpost_id = body.get("id")
+        if not outpost_id:
+            await _record_failure(post_id, f"Outpost response missing id: {body}")
+            return
+    except Exception as exc:
+        await _record_failure(
+            post_id,
+            f"Outpost reel dispatch failed: {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+        )
+        return
+
+    async with AsyncSessionLocal() as db:
+        fresh = await db.get(InstagramPost, post_id)
+        if not fresh:
+            return
+        fresh.outpost_id = outpost_id
+        fresh.outpost_status = body.get("status", "queued")
+        fresh.outpost_reel_status = "pending"   # kind='reel' always has a reel
+        fresh.reel_video_filename = reel_path.name
+        if story_publish_at is not None and not fresh.story_status:
+            fresh.story_status = "pending"
+            fresh.story_scheduled_at = story_publish_at
+        fresh.outpost_dispatched_at = datetime.now(timezone.utc)
+        fresh.error = None
+        fresh.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        logger.info(
+            "_dispatch_reel_only %s → outpost_id=%s (n_videos=%d)",
+            post_id, outpost_id, len(video_ids),
+        )
 
 
 # ── Sync ────────────────────────────────────────────────────────────────────

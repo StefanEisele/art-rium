@@ -137,12 +137,18 @@ class InstagramPost(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    image_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("images.id"), nullable=False
-    )
+    kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="feed", server_default="feed"
+    )                                                               # feed (default, image-based) | reel (standalone, 1–4 videos)
+    image_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("images.id"), nullable=True
+    )                                                               # primary image for kind='feed'; NULL for kind='reel'
     carousel_image_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
         ARRAY(UUID(as_uuid=True))
-    )                                                               # null = single post; set = carousel (additional images after image_id)
+    )                                                               # additional carousel images (kind='feed' only)
+    reel_video_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
+        ARRAY(UUID(as_uuid=True))
+    )                                                               # ordered list of 1–4 source videos for kind='reel' concat
     caption: Mapped[str | None] = mapped_column(Text)
     scheduled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -233,6 +239,11 @@ class ImprovSession(Base):
         nullable=True,
     )
     mix_hands_video_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("videos.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    mix_pip_video_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("videos.id", ondelete="SET NULL"),
         nullable=True,

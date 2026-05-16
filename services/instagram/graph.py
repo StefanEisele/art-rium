@@ -31,7 +31,7 @@ REEL_POLL_INTERVAL = 5
 REEL_POLL_TIMEOUT = 300
 
 
-ShareKind = Literal["image", "reel", "video"]
+ShareKind = Literal["image", "reel", "video", "video-loop"]
 
 
 # ── URL construction ──────────────────────────────────────────────────────────
@@ -41,9 +41,11 @@ def share_url(filename: str, kind: ShareKind = "image") -> str:
     Build a public share URL that the Graph API can fetch.
 
     `kind` selects the endpoint prefix:
-      image  → /share/image/<file>   (PNG from storage/images or comfy output)
-      reel   → /share/reel/<file>    (temp slideshow MP4 in storage/reels)
-      video  → /share/video/<file>   (curated video in storage/videos)
+      image       → /share/image/<file>      PNG from storage/images or comfy output
+      reel        → /share/reel/<file>       temp slideshow MP4 in storage/reels
+      video       → /share/video/<file>      curated video in storage/videos
+      video-loop  → /share/video-loop/<file> tiny HTML page with a looping video
+                                             (Improv tool's QR-code target)
 
     The IMAGE_SHARE_TOKEN is appended as ?token=… when configured.
     """

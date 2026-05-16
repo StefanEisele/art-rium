@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
-from core.models import InstagramPost, Image
+from core.models import InstagramPost, Image, Video
 from core.scheduling import companion_at
 from services.instagram.graph import missing_config
 from services.instagram.publisher import publish_feed, schedule_feed
@@ -34,14 +34,16 @@ router = APIRouter(prefix="/api/instagram", dependencies=[Depends(require_auth)]
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class PostCreate(BaseModel):
-    image_id: uuid.UUID                                   # primary / first image
-    carousel_image_ids: Optional[list[uuid.UUID]] = None  # additional images (2nd…10th)
+    kind: Optional[str] = "feed"                          # "feed" (default, image-based) | "reel" (standalone, 1–4 videos)
+    image_id: Optional[uuid.UUID] = None                  # primary / first image (required for kind='feed')
+    carousel_image_ids: Optional[list[uuid.UUID]] = None  # additional images (2nd…10th) — kind='feed' only
+    reel_video_ids: Optional[list[uuid.UUID]] = None      # 1–4 source videos to concat for kind='reel'
     caption: Optional[str] = None
     scheduled_at: datetime          # client computes this (incl. offset logic)
-    story_delay_minutes: Optional[int] = None  # null = off; N = N min after feed
-    reel_delay_minutes:  Optional[int] = None  # null = off; N = N min after feed
+    story_delay_minutes: Optional[int] = None  # null = off; N = N min after feed/reel
+    reel_delay_minutes:  Optional[int] = None  # null = off; N = N min after feed (kind='feed' only)
     companion_time: Optional[str] = "18:23"    # "HH:MM" — day+ delays snap to this time
-    reel_video_id: Optional[uuid.UUID] = None  # use an existing generated video for the Reel
+    reel_video_id: Optional[uuid.UUID] = None  # use an existing generated video for the companion Reel (kind='feed' only)
     dispatch_target: Optional[str] = "local"   # "local" (default) | "outpost" (Pi cloud-schedule)
 
 
@@ -59,7 +61,10 @@ class PostUpdate(BaseModel):
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _all_image_ids(post: InstagramPost) -> list[uuid.UUID]:
-    """Return ordered list of all image IDs for a post (primary first)."""
+    """Return ordered list of all image IDs for a feed post (primary first).
+    Empty list for kind='reel' rows, which have no images."""
+    if not post.image_id:
+        return []
     ids = [post.image_id]
     if post.carousel_image_ids:
         ids.extend(post.carousel_image_ids)
@@ -67,11 +72,13 @@ def _all_image_ids(post: InstagramPost) -> list[uuid.UUID]:
 
 
 def _serialize(post: InstagramPost, images: dict[uuid.UUID, "Image"] | None = None) -> dict:
-    primary = (images or {}).get(post.image_id)
+    primary = (images or {}).get(post.image_id) if post.image_id else None
     d = {
         "id": str(post.id),
-        "image_id": str(post.image_id),
+        "kind": post.kind,
+        "image_id": str(post.image_id) if post.image_id else None,
         "carousel_image_ids": [str(i) for i in post.carousel_image_ids] if post.carousel_image_ids else None,
+        "reel_video_ids": [str(i) for i in post.reel_video_ids] if post.reel_video_ids else None,
         "is_carousel": bool(post.carousel_image_ids),
         "caption": post.caption,
         "scheduled_at": post.scheduled_at.isoformat(),
@@ -135,10 +142,11 @@ async def list_posts(
     result = await db.execute(stmt)
     posts = result.scalars().all()
 
-    # Batch-load all referenced images
+    # Batch-load all referenced images (kind='reel' rows skip — they have none)
     image_ids: set[uuid.UUID] = set()
     for p in posts:
-        image_ids.add(p.image_id)
+        if p.image_id:
+            image_ids.add(p.image_id)
         if p.carousel_image_ids:
             image_ids.update(p.carousel_image_ids)
 
@@ -167,18 +175,9 @@ async def get_last_post(db: AsyncSession = Depends(get_db)):
 
 @router.post("/posts", status_code=201)
 async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
-    # Validate primary image
-    img = await db.get(Image, body.image_id)
-    if not img:
-        raise HTTPException(status_code=404, detail="Image not found")
-
-    # Validate carousel images if provided
-    if body.carousel_image_ids:
-        if len(body.carousel_image_ids) > 9:
-            raise HTTPException(status_code=400, detail="Carousel supports at most 10 images (1 primary + 9 additional)")
-        for cid in body.carousel_image_ids:
-            if not await db.get(Image, cid):
-                raise HTTPException(status_code=404, detail=f"Carousel image {cid} not found")
+    kind = (body.kind or "feed").lower()
+    if kind not in {"feed", "reel"}:
+        raise HTTPException(status_code=400, detail="kind must be 'feed' or 'reel'")
 
     # Normalise to UTC
     scheduled_at = body.scheduled_at
@@ -188,6 +187,48 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
     dispatch_target = (body.dispatch_target or "local").lower()
     if dispatch_target not in {"local", "outpost"}:
         raise HTTPException(status_code=400, detail="dispatch_target must be 'local' or 'outpost'")
+
+    if kind == "reel":
+        # Standalone reel: validate the source-video list; outpost is the only path.
+        if dispatch_target != "outpost":
+            raise HTTPException(
+                status_code=400,
+                detail="Reel-only posts must use dispatch_target='outpost' (the local "
+                       "Graph-API path can't schedule reels).",
+            )
+        if not body.reel_video_ids:
+            raise HTTPException(status_code=400, detail="kind='reel' requires reel_video_ids")
+        if len(body.reel_video_ids) > 4:
+            raise HTTPException(status_code=400, detail="At most 4 source videos per reel")
+        for vid_id in body.reel_video_ids:
+            vid = await db.get(Video, vid_id)
+            if not vid or vid.status != "done" or not vid.filepath:
+                raise HTTPException(status_code=404, detail=f"Video {vid_id} not found or not ready")
+        if body.reel_delay_minutes is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="reel_delay_minutes is for feed-companion reels; on kind='reel' the post itself is the reel.",
+            )
+        if body.image_id or body.carousel_image_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="kind='reel' must not include image_id / carousel_image_ids.",
+            )
+    else:
+        # Feed: keep the original image-based validation.
+        if not body.image_id:
+            raise HTTPException(status_code=400, detail="kind='feed' requires image_id")
+        if not await db.get(Image, body.image_id):
+            raise HTTPException(status_code=404, detail="Image not found")
+        if body.carousel_image_ids:
+            if len(body.carousel_image_ids) > 9:
+                raise HTTPException(status_code=400, detail="Carousel supports at most 10 images (1 primary + 9 additional)")
+            for cid in body.carousel_image_ids:
+                if not await db.get(Image, cid):
+                    raise HTTPException(status_code=404, detail=f"Carousel image {cid} not found")
+        if body.reel_video_ids:
+            raise HTTPException(status_code=400, detail="reel_video_ids is only valid for kind='reel'")
+
     if dispatch_target == "outpost":
         miss = outpost_svc.missing_config()
         if miss:
@@ -197,15 +238,17 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
             )
 
     post = InstagramPost(
-        image_id=body.image_id,
-        carousel_image_ids=body.carousel_image_ids or None,
+        kind=kind,
+        image_id=body.image_id if kind == "feed" else None,
+        carousel_image_ids=(body.carousel_image_ids or None) if kind == "feed" else None,
+        reel_video_ids=(body.reel_video_ids or None) if kind == "reel" else None,
         caption=body.caption,
         scheduled_at=scheduled_at,
         status="scheduled",
         story_delay_minutes=body.story_delay_minutes,
-        reel_delay_minutes=body.reel_delay_minutes,
+        reel_delay_minutes=body.reel_delay_minutes if kind == "feed" else None,
         companion_time=body.companion_time,
-        reel_video_id=body.reel_video_id,
+        reel_video_id=body.reel_video_id if kind == "feed" else None,
         dispatch_target=dispatch_target,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
@@ -214,23 +257,28 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(post)
     logger.info(
-        "Scheduled Instagram post %s for %s (carousel=%s, target=%s)",
-        post.id, post.scheduled_at, bool(post.carousel_image_ids), dispatch_target,
+        "Scheduled Instagram %s post %s for %s (target=%s)",
+        kind, post.id, post.scheduled_at, dispatch_target,
     )
 
     # Outpost path: package + upload to Pi. Local path: try Graph-side
-    # scheduled_publish_time (whitelist-gated, often falls through to the
-    # local InstagramScheduler immediate-publish path).
+    # scheduled_publish_time (whitelist-gated, falls through to local scheduler).
     if dispatch_target == "outpost":
         asyncio.create_task(outpost_svc.dispatch_to_outpost(post.id))
     else:
         asyncio.create_task(_remote_schedule(post.id))
 
-    # Build images dict for serialization
+    images = await _load_images_for_post(post, db)
+    return _serialize(post, images)
+
+
+async def _load_images_for_post(post: InstagramPost, db: AsyncSession) -> dict[uuid.UUID, Image]:
+    """Batch-fetch all referenced images for serialization. Empty for reels."""
+    if post.kind == "reel" or not post.image_id:
+        return {}
     all_ids = _all_image_ids(post)
     img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-    images = {i.id: i for i in img_result.scalars().all()}
-    return _serialize(post, images)
+    return {i.id: i for i in img_result.scalars().all()}
 
 
 async def _remote_schedule(post_id: uuid.UUID) -> None:

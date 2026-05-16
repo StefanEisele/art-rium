@@ -98,12 +98,12 @@ async def create_session(
 
 @router.get("/share-url/{video_id}")
 async def get_share_url(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """Build a public /share/video/<file>?token=… URL for a source video so
-    the frontend can hand it (or its QR code) to a second device."""
+    """Public URL for the source video — points at the loop player so the
+    second device (iPad next to the piano) replays it indefinitely."""
     video = await db.get(Video, video_id)
     if not video or not video.filename:
         raise HTTPException(404, "Video not found")
-    return {"url": share_url(video.filename, kind="video")}
+    return {"url": share_url(video.filename, kind="video-loop")}
 
 
 @router.get("/sessions/{session_id}")
@@ -129,12 +129,17 @@ async def delete_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_d
     if not session:
         raise HTTPException(404, "Session not found")
 
-    for video_id in (session.mix_synth_video_id, session.mix_hands_video_id):
+    for video_id in (
+        session.mix_synth_video_id,
+        session.mix_hands_video_id,
+        session.mix_pip_video_id,
+    ):
         if not video_id:
             continue
         video = await db.get(Video, video_id)
         if video and video.filepath:
             (settings.storage_dir / video.filepath).unlink(missing_ok=True)
+            (settings.videos_dir / f"{video.id}_thumb.jpg").unlink(missing_ok=True)
             await db.delete(video)
 
     (settings.improv_dir / session.recording_filename).unlink(missing_ok=True)
@@ -149,6 +154,7 @@ async def _serialize(session: ImprovSession, db: AsyncSession) -> dict:
     source = await db.get(Video, session.source_video_id)
     synth = await db.get(Video, session.mix_synth_video_id) if session.mix_synth_video_id else None
     hands = await db.get(Video, session.mix_hands_video_id) if session.mix_hands_video_id else None
+    pip   = await db.get(Video, session.mix_pip_video_id)   if session.mix_pip_video_id   else None
     return {
         "id":            str(session.id),
         "status":        session.status,
@@ -158,6 +164,7 @@ async def _serialize(session: ImprovSession, db: AsyncSession) -> dict:
         "source_video":  _video_summary(source),
         "mix_synth":     _video_summary(synth),
         "mix_hands":     _video_summary(hands),
+        "mix_pip":       _video_summary(pip),
     }
 
 
@@ -165,10 +172,11 @@ def _video_summary(video: Video | None) -> dict | None:
     if not video:
         return None
     return {
-        "id":       str(video.id),
-        "filename": video.filename,
-        "prompt":   video.prompt,
-        "status":   video.status,
+        "id":        str(video.id),
+        "filename":  video.filename,
+        "prompt":    video.prompt,
+        "status":    video.status,
+        "thumb_url": f"/api/video/thumb/{video.id}" if video.status == "done" else None,
     }
 
 

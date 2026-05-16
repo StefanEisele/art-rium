@@ -271,6 +271,63 @@
       font-size: 15px; font-weight: 700;
     }
 
+    /* Mode toggle (Beitrag / Reel) */
+    .mode-toggle {
+      display: flex;
+      gap: 4px;
+      background: var(--surface2);
+      border-radius: 8px;
+      padding: 3px;
+    }
+    .mode-toggle button {
+      flex: 1; padding: 7px 10px; border-radius: 6px;
+      border: none; background: transparent; color: var(--text-dim);
+      font-size: 13px; font-weight: 700; cursor: pointer;
+      font-family: inherit; -webkit-tap-highlight-color: transparent;
+      transition: all 0.13s;
+    }
+    .mode-toggle button.active {
+      background: var(--accent); color: #000;
+    }
+
+    /* Reel-mode video strip */
+    .reel-videos-strip {
+      display: flex; gap: 8px; align-items: center;
+      flex-wrap: nowrap; overflow-x: auto;
+      scrollbar-width: none; min-height: 72px;
+    }
+    .reel-videos-strip::-webkit-scrollbar { display: none; }
+    .sel-vid-wrap {
+      position: relative; flex-shrink: 0;
+      width: 72px; height: 72px;
+      border-radius: 10px; overflow: hidden;
+      background: var(--surface2);
+    }
+    .sel-vid-wrap img {
+      width: 72px; height: 72px;
+      object-fit: cover; display: block;
+    }
+    .sel-vid-wrap .sel-vid-play {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.25); pointer-events: none;
+      color: #fff; font-size: 16px;
+    }
+    .sel-vid-wrap .sel-vid-remove {
+      position: absolute; top: -6px; right: -6px;
+      width: 20px; height: 20px; border-radius: 50%;
+      background: var(--red); color: #fff; border: none;
+      font-size: 13px; font-weight: 700; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      line-height: 1; -webkit-tap-highlight-color: transparent;
+    }
+    .sel-vid-wrap .sel-vid-order {
+      position: absolute; bottom: 4px; left: 4px;
+      background: rgba(0,0,0,0.65); color: #fff;
+      font-size: 10px; font-weight: 700;
+      border-radius: 4px; padding: 1px 5px;
+    }
+
     /* Selected images strip */
     .selected-images-strip {
       display: flex;
@@ -650,14 +707,28 @@
   <!-- ── New Post Panel ── -->
   <div id="new-post-section">
     <div class="new-post-card">
-      <h2>Schedule a Post</h2>
+      <h2 id="new-post-heading">Schedule a Post</h2>
 
-      <!-- Selected images strip -->
-      <div>
+      <!-- Mode toggle: image-based feed post vs standalone reel -->
+      <div class="mode-toggle">
+        <button id="mode-feed" class="active" onclick="setMode('feed')">Beitrag</button>
+        <button id="mode-reel"           onclick="setMode('reel')">Reel</button>
+      </div>
+
+      <!-- Selected images strip (feed mode) -->
+      <div id="feed-images-wrap">
         <div class="selected-images-strip" id="selected-images-strip">
           <button class="add-image-btn" id="add-image-btn" onclick="openPicker()">+</button>
         </div>
         <div class="images-hint" id="images-hint">Tap + to add images. Add multiple for a carousel (up to 10).</div>
+      </div>
+
+      <!-- Reel source videos strip (reel mode) -->
+      <div id="reel-videos-wrap" style="display:none">
+        <div class="reel-videos-strip" id="reel-videos-strip">
+          <button class="add-image-btn" id="add-reel-video-btn" onclick="openReelVideoPicker()">+</button>
+        </div>
+        <div class="images-hint">Pick 1–4 generated videos. They'll be stitched (1080×1920, 9:16) and published as one reel.</div>
       </div>
 
       <!-- Caption -->
@@ -887,13 +958,18 @@ const state = {
   detailStoryDelay: null,
   detailCompanionTime: '18:23',
   // Reel video selection
-  reelVideoId: null,             // for new post form
+  reelVideoId: null,             // for new post form (companion-reel single video)
   reelVideo: null,               // full video object for new post form
   detailReelVideoId: null,       // for detail modal
   detailReelVideo: null,         // full video object for detail modal
   allVideos: [],                 // cache of done videos for picker
-  videoPickerTarget: 'new',      // 'new' | 'detail'
+  videoPickerTarget: 'new',      // 'new' | 'detail' | 'reel-source'
+  // Standalone-reel mode
+  mode: 'feed',                  // 'feed' | 'reel'
+  selectedReelVideos: [],        // ordered array of Video objects (1–4) for kind='reel'
 };
+
+const MAX_REEL_VIDEOS = 4;
 
 const PICKER_LIMIT = 30;
 const MAX_CAROUSEL = 10;
@@ -984,11 +1060,19 @@ function renderTimeline() {
       row.className = 'post-row';
       row.onclick = () => openDetail(p);
 
-      // Build thumbnail stack
+      // Build thumbnail stack — images for kind='feed', a 🎬 placeholder + count for kind='reel'.
       const imgs = p.carousel_images || [];
       const isCarousel = p.is_carousel && imgs.length > 1;
+      const isReel = p.kind === 'reel';
       let thumbHTML;
-      if (isCarousel) {
+      if (isReel) {
+        const n = (p.reel_video_ids || []).length || 1;
+        thumbHTML = `
+          <div class="thumb-stack">
+            <div class="thumb-front thumb-placeholder">🎬</div>
+            ${n > 1 ? `<span class="carousel-count-badge">${n}</span>` : ''}
+          </div>`;
+      } else if (isCarousel) {
         const front = imgs[0];
         const back  = imgs[1];
         thumbHTML = `
@@ -1006,11 +1090,16 @@ function renderTimeline() {
       const captionPreview = p.caption
         ? escHtml(p.caption).replace(/\n/g, ' ')
         : '<em>No caption</em>';
-      const titleText = p.image?.title || p.image?.filename || '';
+      const titleText = isReel
+        ? `🎬 Reel · ${(p.reel_video_ids || []).length} clip${(p.reel_video_ids || []).length === 1 ? '' : 's'}`
+        : (p.image?.title || p.image?.filename || '');
 
-      // Companion badges
+      // Companion badges — reel companion only renders for kind='feed';
+      // for kind='reel' rows the post itself is the reel, so we skip it.
       const storyBadge = _companionBadge('Story', p.story_status, p.story_delay_minutes, p.story_scheduled_at);
-      const reelBadge  = _companionBadge('Reel',  p.reel_status,  p.reel_delay_minutes,  p.reel_scheduled_at);
+      const reelBadge  = isReel
+        ? ''
+        : _companionBadge('Reel', p.reel_status, p.reel_delay_minutes, p.reel_scheduled_at);
       const badges     = [storyBadge, reelBadge].filter(Boolean).join('');
       const companionHTML = badges ? `<div class="companion-row">${badges}</div>` : '';
 
@@ -1032,7 +1121,7 @@ function renderTimeline() {
             ${fmtDate(p.scheduled_at)}${cloudMarker}
             <span class="${statusClass(p.status)}">${statusLabel(p.status)}</span>
           </div>
-          ${titleText ? `<div class="post-title">${isCarousel ? '📸 ' : ''}${titleText}</div>` : ''}
+          ${titleText ? `<div class="post-title">${(isCarousel && !isReel) ? '📸 ' : ''}${titleText}</div>` : ''}
           <div class="post-caption">${captionPreview}</div>
           ${companionHTML}
         </div>
@@ -1083,7 +1172,103 @@ function updateComputedDate() {
 }
 
 function updateScheduleBtn() {
-  $('schedule-btn').disabled = state.selectedImages.length === 0;
+  if (state.mode === 'reel') {
+    const n = state.selectedReelVideos.length;
+    $('schedule-btn').disabled = n < 1 || n > MAX_REEL_VIDEOS;
+  } else {
+    $('schedule-btn').disabled = state.selectedImages.length === 0;
+  }
+}
+
+// ── Mode toggle ───────────────────────────────────────────────────────────────
+function setMode(m) {
+  if (m !== 'feed' && m !== 'reel') return;
+  state.mode = m;
+  $('mode-feed').classList.toggle('active', m === 'feed');
+  $('mode-reel').classList.toggle('active', m === 'reel');
+  $('feed-images-wrap').style.display = m === 'feed' ? '' : 'none';
+  $('reel-videos-wrap').style.display = m === 'reel' ? '' : 'none';
+  $('new-post-heading').textContent = m === 'reel' ? 'Schedule a Reel' : 'Schedule a Post';
+  $('schedule-btn').textContent     = m === 'reel' ? 'Schedule Reel'  : 'Schedule Post';
+
+  // Reel companion (the +1h/+1day reel chip set) is only meaningful in feed mode —
+  // a standalone reel IS the reel.
+  document.querySelectorAll('#reel-chips, label[for="reel-chips"]').forEach(el => {
+    if (el.closest) {
+      const row = el.closest('.companion-delay-row');
+      if (row) row.style.display = m === 'reel' ? 'none' : '';
+    }
+  });
+  // The reel-video selector row only shows in feed mode + when a companion reel delay is set.
+  const reelVidRow = $('reel-video-row');
+  if (m === 'reel') {
+    reelVidRow.style.display = 'none';
+  } else {
+    reelVidRow.style.display = state.reelDelay !== null ? '' : 'none';
+  }
+
+  // Reel-only posts must use the Pi outpost — force the cloud-schedule toggle on.
+  if (m === 'reel') {
+    state.cloudDispatch = true;
+    const tg = $('cloud-dispatch-toggle');
+    if (tg) {
+      tg.checked = true;
+      tg.disabled = true;
+    }
+  } else {
+    const tg = $('cloud-dispatch-toggle');
+    if (tg) tg.disabled = false;
+  }
+
+  updateScheduleBtn();
+  _updateReelNudge?.();
+}
+
+// ── Reel source videos (multi-pick) ───────────────────────────────────────────
+function renderSelectedReelStrip() {
+  const strip = $('reel-videos-strip');
+  strip.querySelectorAll('.sel-vid-wrap').forEach(el => el.remove());
+  const addBtn = $('add-reel-video-btn');
+  state.selectedReelVideos.forEach((v, i) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'sel-vid-wrap';
+    const thumb = v.thumb_url
+      ? `<img src="${withAuth(v.thumb_url)}" alt="">`
+      : `<div class="sel-vid-play" style="background:var(--surface2);font-size:24px">🎬</div>`;
+    wrap.innerHTML = `
+      ${thumb}
+      <div class="sel-vid-play">▶</div>
+      <div class="sel-vid-order">${i + 1}</div>
+      <button class="sel-vid-remove" onclick="removeReelSourceVideo(${i})">×</button>
+    `;
+    strip.insertBefore(wrap, addBtn);
+  });
+  addBtn.style.display = state.selectedReelVideos.length >= MAX_REEL_VIDEOS ? 'none' : '';
+  updateScheduleBtn();
+}
+
+function openReelVideoPicker() {
+  state.videoPickerTarget = 'reel-source';
+  $('video-picker-modal').classList.add('show');
+  loadAllVideos().then(renderVideoPicker);
+}
+
+function removeReelSourceVideo(idx) {
+  state.selectedReelVideos.splice(idx, 1);
+  renderSelectedReelStrip();
+}
+
+function addReelSourceVideo(v) {
+  if (state.selectedReelVideos.length >= MAX_REEL_VIDEOS) {
+    ArtRium.toast(`At most ${MAX_REEL_VIDEOS} videos per reel`, true);
+    return;
+  }
+  if (state.selectedReelVideos.some(x => x.id === v.id)) {
+    ArtRium.toast('Already selected', true);
+    return;
+  }
+  state.selectedReelVideos.push(v);
+  renderSelectedReelStrip();
 }
 
 // ── Selected images strip (new post form) ─────────────────────────────────────
@@ -1312,10 +1497,23 @@ function renderVideoPicker() {
     grid.innerHTML = '<div class="vp-empty">No completed videos yet.<br>Generate some in the Video tool.</div>';
     return;
   }
-  const currentId = state.videoPickerTarget === 'new' ? state.reelVideoId : state.detailReelVideoId;
+  const isMulti = state.videoPickerTarget === 'reel-source';
+  const selectedSet = isMulti
+    ? new Set(state.selectedReelVideos.map(v => v.id))
+    : null;
+  const currentId = isMulti
+    ? null
+    : (state.videoPickerTarget === 'new' ? state.reelVideoId : state.detailReelVideoId);
+  if (isMulti) {
+    $('video-picker-modal').querySelector('.picker-header h2').textContent =
+      `Reel sources (${state.selectedReelVideos.length}/${MAX_REEL_VIDEOS})`;
+  } else {
+    $('video-picker-modal').querySelector('.picker-header h2').textContent = 'Select Video for Reel';
+  }
   for (const v of state.allVideos) {
     const item = document.createElement('div');
-    item.className = 'vp-item' + (v.id === currentId ? ' selected' : '');
+    const isSel = isMulti ? selectedSet.has(v.id) : v.id === currentId;
+    item.className = 'vp-item' + (isSel ? ' selected' : '');
     item.onclick = () => selectReelVideo(v);
     const thumbHtml = v.thumb_url
       ? `<img src="${withAuth(v.thumb_url)}" alt="" loading="lazy"><div class="vp-play"><div class="vp-play-circle">▶</div></div>`
@@ -1336,6 +1534,22 @@ function renderVideoPicker() {
 }
 
 function selectReelVideo(v) {
+  if (state.videoPickerTarget === 'reel-source') {
+    // Multi-select toggle for kind='reel' source list.
+    const idx = state.selectedReelVideos.findIndex(x => x.id === v.id);
+    if (idx >= 0) {
+      state.selectedReelVideos.splice(idx, 1);
+    } else {
+      if (state.selectedReelVideos.length >= MAX_REEL_VIDEOS) {
+        ArtRium.toast(`At most ${MAX_REEL_VIDEOS} videos per reel`, true);
+        return;
+      }
+      state.selectedReelVideos.push(v);
+    }
+    renderSelectedReelStrip();
+    renderVideoPicker();  // re-render to update the order badges + count
+    return;
+  }
   if (state.videoPickerTarget === 'new') {
     state.reelVideoId = v.id;
     state.reelVideo   = v;
@@ -1370,34 +1584,54 @@ function clearReelVideo(target) {
 
 // ── Schedule new post ─────────────────────────────────────────────────────────
 async function schedulePost() {
-  if (state.selectedImages.length === 0) return;
   const btn = $('schedule-btn');
   btn.disabled = true;
-  btn.textContent = 'Scheduling…';
-
-  const [primary, ...rest] = state.selectedImages;
+  btn.textContent = state.mode === 'reel' ? 'Scheduling…' : 'Scheduling…';
 
   try {
-    const body = {
-      image_id:             primary.id,
-      carousel_image_ids:   rest.length > 0 ? rest.map(img => img.id) : null,
-      caption:              $('caption-input').value.trim() || null,
-      scheduled_at:         state.computedDate,
-      reel_delay_minutes:   state.reelDelay,
-      story_delay_minutes:  state.storyDelay,
-      companion_time:       state.companionTime,
-      reel_video_id:        state.reelVideoId || null,
-      dispatch_target:      state.cloudDispatch ? 'outpost' : 'local',
-    };
+    let body;
+    if (state.mode === 'reel') {
+      if (!state.selectedReelVideos.length) return;
+      body = {
+        kind:                 'reel',
+        reel_video_ids:       state.selectedReelVideos.map(v => v.id),
+        caption:              $('caption-input').value.trim() || null,
+        scheduled_at:         state.computedDate,
+        story_delay_minutes:  state.storyDelay,
+        companion_time:       state.companionTime,
+        dispatch_target:      'outpost',     // reel-only is outpost-only
+      };
+    } else {
+      if (state.selectedImages.length === 0) return;
+      const [primary, ...rest] = state.selectedImages;
+      body = {
+        kind:                 'feed',
+        image_id:             primary.id,
+        carousel_image_ids:   rest.length > 0 ? rest.map(img => img.id) : null,
+        caption:              $('caption-input').value.trim() || null,
+        scheduled_at:         state.computedDate,
+        reel_delay_minutes:   state.reelDelay,
+        story_delay_minutes:  state.storyDelay,
+        companion_time:       state.companionTime,
+        reel_video_id:        state.reelVideoId || null,
+        dispatch_target:      state.cloudDispatch ? 'outpost' : 'local',
+      };
+    }
     await api('/api/instagram/posts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    ArtRium.toast(rest.length > 0 ? `Carousel (${state.selectedImages.length} images) scheduled ✓` : 'Post scheduled ✓');
+    if (state.mode === 'reel') {
+      ArtRium.toast(`Reel (${state.selectedReelVideos.length} clip${state.selectedReelVideos.length > 1 ? 's' : ''}) scheduled ✓`);
+    } else {
+      const n = state.selectedImages.length;
+      ArtRium.toast(n > 1 ? `Carousel (${n} images) scheduled ✓` : 'Post scheduled ✓');
+    }
 
     // Reset form
     state.selectedImages = [];
+    state.selectedReelVideos = [];
     state.pickerImages = [];
     state.pickerPage = 0;
     state.pickerDone = false;

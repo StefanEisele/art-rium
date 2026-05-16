@@ -1,21 +1,22 @@
 """
 ffmpeg pipeline for piano-improvisation mixes.
 
-Input:
+Inputs:
   - source video: a generated MP4 from the videos library (no usable audio).
   - recording:    an iPhone MP4 from Blackmagic Camera with the user's hands +
                   Scarlett 2i4 piano audio embedded as a stereo track.
 
-Output:
-  - mix_synth:    source video + the recording's audio, loudness-normalised
-                  to -14 LUFS (Instagram target). Cut to whichever stream is
-                  shorter (-shortest).
-  - mix_hands:    the recording itself, audio loudness-normalised, re-encoded
-                  to h264/aac for consistency with the gallery.
+Outputs (three sequential ffmpeg jobs):
+  - mix_synth: source video + the recording's audio, loudness-normalised to
+               -14 LUFS (Instagram target). Cut to whichever stream is
+               shorter (-shortest).
+  - mix_hands: the recording itself, audio loudness-normalised, video copied
+               unchanged.
+  - mix_pip:   source video as background with the recording inset top-right
+               (24% width, 24px margin, 12px rounded corners) and the
+               recording's audio normalised.
 
-The two ffmpeg jobs are run sequentially (each is ~real-time-ish on Wan-2.2-
-sized snippets, so total wall-time stays well under a minute for typical
-5-15s improv clips).
+Total wall-time stays well under a minute for typical 5–15 s improv clips.
 """
 from __future__ import annotations
 
@@ -29,23 +30,29 @@ logger = logging.getLogger(__name__)
 # Loudness target — Instagram recommends -14 LUFS integrated, true-peak <= -1 dBTP.
 _LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
+# PiP inset geometry — confirmed with user 2026-05-16.
+_PIP_WIDTH_PCT = 0.24    # 24% of background width
+_PIP_MARGIN_PX = 24      # 24px margin from top + right
+_PIP_RADIUS_PX = 12      # 12px corner radius
+
 
 async def mux_session(
     source_video: Path,
     recording: Path,
     output_dir: Path,
     ffmpeg_path: str = "ffmpeg",
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path, Path]:
     """
-    Produce the two mix outputs for one improv session.
+    Produce the three mix outputs for one improv session.
 
-    Returns (mix_synth_path, mix_hands_path), both inside `output_dir`.
+    Returns (mix_synth_path, mix_hands_path, mix_pip_path), all inside `output_dir`.
     Raises RuntimeError if any ffmpeg invocation exits non-zero.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     session_uuid = uuid.uuid4().hex
     mix_synth = output_dir / f"improv_synth_{session_uuid}.mp4"
     mix_hands = output_dir / f"improv_hands_{session_uuid}.mp4"
+    mix_pip   = output_dir / f"improv_pip_{session_uuid}.mp4"
 
     await _run_ffmpeg(
         _synth_cmd(ffmpeg_path, source_video, recording, mix_synth),
@@ -55,7 +62,11 @@ async def mux_session(
         _hands_cmd(ffmpeg_path, recording, mix_hands),
         label="mix_hands",
     )
-    return mix_synth, mix_hands
+    await _run_ffmpeg(
+        _pip_cmd(ffmpeg_path, source_video, recording, mix_pip),
+        label="mix_pip",
+    )
+    return mix_synth, mix_hands, mix_pip
 
 
 # ── Private helpers ─────────────────────────────────────────────────────────
@@ -63,7 +74,7 @@ async def mux_session(
 
 def _synth_cmd(ffmpeg: str, source: Path, recording: Path, out: Path) -> list[str]:
     """
-    source video stream + recording audio stream → MP4, loudness-normalised.
+    Source video stream + recording audio stream → MP4, loudness-normalised.
     `-shortest` clips whichever ends first so the result is gap-free.
     """
     return [
@@ -92,6 +103,54 @@ def _hands_cmd(ffmpeg: str, recording: Path, out: Path) -> list[str]:
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-af", _LOUDNORM_FILTER,
+        "-movflags", "+faststart",
+        str(out),
+    ]
+
+
+def _pip_cmd(ffmpeg: str, source: Path, recording: Path, out: Path) -> list[str]:
+    """
+    Picture-in-picture: source video as background, recording inset in the
+    top-right corner with rounded corners and a small margin. Audio comes
+    from the recording (loudness-normalised).
+
+    Filter pipeline:
+      [0:v]            → background, untouched dimensions
+      [1:v]scale       → inset width = round(background_w * 0.24) to even px
+      geq alpha mask   → rounded-corner alpha channel (12 px radius)
+      overlay          → top-right with 24 px margin
+      libx264 yuv420p  → IG-friendly H.264, audio AAC, faststart
+
+    `geq` is per-pixel on the inset only, so the cost is proportional to the
+    inset area (a few % of total frame). For short improv clips this is
+    negligible.
+    """
+    w_expr = f"trunc(iw*{_PIP_WIDTH_PCT}/2)*2"
+    r = _PIP_RADIUS_PX
+    m = _PIP_MARGIN_PX
+    # ffmpeg filter_complex: commas inside an expression must be escaped (\,).
+    # The alpha mask: opaque pixel iff it's at least `r` px from every edge
+    # OR it's inside the corner-arc circle of radius `r`.
+    geq_alpha = (
+        f"if(gt(min(min(X\\,W-X)\\,min(Y\\,H-Y))\\,{r})\\,255\\,"
+        f"if(lte(hypot(max(0\\,{r}-min(X\\,W-X))\\,max(0\\,{r}-min(Y\\,H-Y)))\\,{r})\\,255\\,0))"
+    )
+    filter_complex = (
+        f"[1:v]scale={w_expr}:-2,format=yuva420p,"
+        f"geq=lum='p(X\\,Y)':cb='p(X\\,Y)':cr='p(X\\,Y)':a='{geq_alpha}'[ovr];"
+        f"[0:v][ovr]overlay=W-w-{m}:{m}[v]"
+    )
+    return [
+        ffmpeg, "-y",
+        "-i", str(source),
+        "-i", str(recording),
+        "-filter_complex", filter_complex,
+        "-map", "[v]",
+        "-map", "1:a:0",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "20",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-af", _LOUDNORM_FILTER,
+        "-shortest",
         "-movflags", "+faststart",
         str(out),
     ]

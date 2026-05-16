@@ -71,9 +71,27 @@ const ArtRium = (() => {
     }
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
-      throw new Error(err.detail || `Error ${r.status}`);
+      throw new Error(_fmtDetail(err.detail) || `Error ${r.status}`);
     }
     return r;
+  };
+
+  // FastAPI returns either a plain string in `detail` (HTTPException) or a
+  // list of objects (RequestValidationError). The legacy `err.detail || ...`
+  // would stringify a list to "[object Object]", which is the bug we'd see
+  // on every 422 response. Normalise both shapes to a readable string.
+  const _fmtDetail = (d) => {
+    if (!d) return null;
+    if (typeof d === 'string') return d;
+    if (Array.isArray(d)) {
+      return d.map(e => {
+        if (typeof e === 'string') return e;
+        const loc = Array.isArray(e?.loc) ? e.loc.slice(1).join('.') : '';
+        const msg = e?.msg || JSON.stringify(e);
+        return loc ? `${loc}: ${msg}` : msg;
+      }).join('; ');
+    }
+    return JSON.stringify(d);
   };
 
   // ── Toast notification ─────────────────────────────────────────────────────

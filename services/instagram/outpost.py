@@ -26,7 +26,7 @@ from sqlalchemy import select
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.imaging import prepare_jpg_for_web
-from core.models import Image, InstagramPost
+from core.models import Image, InstagramPost, Video
 from core.scheduling import companion_at
 from workers.video_generator import generate_slideshow
 
@@ -103,6 +103,7 @@ async def dispatch_to_outpost(post_id: uuid.UUID) -> None:
 
         caption = post.caption or ""
         scheduled_at = post.scheduled_at
+        reel_video_id = post.reel_video_id
         reel_publish_at = (
             companion_at(post.scheduled_at, post.reel_delay_minutes, post.companion_time)
             if post.reel_delay_minutes is not None
@@ -113,6 +114,18 @@ async def dispatch_to_outpost(post_id: uuid.UUID) -> None:
             if post.story_delay_minutes is not None
             else None
         )
+
+        if reel_video_id is not None and reel_publish_at is not None:
+            vid = await db.get(Video, reel_video_id)
+            if not vid or vid.status != "done" or not vid.filepath:
+                await _record_failure(
+                    post_id,
+                    f"Referenced reel video {reel_video_id} is not ready",
+                )
+                return
+            reel_video_path: Path | None = settings.storage_dir / vid.filepath
+        else:
+            reel_video_path = None
 
     # ── Re-encode images (off the DB session) ─────────────────────────────
     try:
@@ -125,9 +138,12 @@ async def dispatch_to_outpost(post_id: uuid.UUID) -> None:
         await _record_failure(post_id, f"Image re-encode failed: {exc}")
         return
 
-    # ── Render slideshow MP4 if a reel is scheduled ───────────────────────
+    # ── Resolve the reel video — reuse stored video if picked, else render slideshow ─
     reel_path: Path | None = None
-    if reel_publish_at is not None:
+    if reel_video_path is not None:
+        reel_path = reel_video_path
+        logger.info("dispatch_to_outpost %s — reusing stored video %s", post_id, reel_path.name)
+    elif reel_publish_at is not None:
         try:
             image_paths = [settings.storage_dir / img.filepath for img in ordered_images]
             settings.reels_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +174,7 @@ async def dispatch_to_outpost(post_id: uuid.UUID) -> None:
         if story_publish_at is not None:
             data["story_publish_at"] = _iso(story_publish_at)
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             r = await client.post(
                 f"{_base()}/enqueue",
                 headers=_headers(),

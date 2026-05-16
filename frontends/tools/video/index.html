@@ -80,8 +80,49 @@
     .video-meta strong { color: var(--text); font-weight: 600; }
     .status-badge { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 5px; }
     .status-generating { background: rgba(10,132,255,0.15); color: var(--accent); }
+    .status-assembling { background: rgba(10,132,255,0.15); color: var(--accent); }
+    .status-review     { background: rgba(255,159,10,0.15); color: #ff9f0a; }
     .status-done       { background: rgba(50,215,75,0.15);  color: var(--green); }
     .status-failed     { background: rgba(255,69,58,0.15);  color: var(--red); }
+
+    /* ── Segment review (Stapel) ── */
+    .seg-review { display: flex; flex-direction: column; gap: 8px; }
+    .seg-hint { font-size: 12px; color: var(--text-dim); }
+    .seg-row {
+      display: flex; gap: 10px; align-items: stretch;
+      background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px;
+      padding: 8px; cursor: pointer; transition: border-color 0.15s, background 0.15s;
+    }
+    .seg-row.selected { border-color: var(--accent); background: rgba(10,132,255,0.07); }
+    .seg-thumb-wrap { position: relative; flex-shrink: 0; width: 96px; height: 96px; border-radius: 8px; overflow: hidden; background: #000; }
+    .seg-thumb-wrap img, .seg-thumb-wrap video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .seg-thumb-wrap video { display: none; }
+    .seg-thumb-wrap.playing img { display: none; }
+    .seg-thumb-wrap.playing video { display: block; }
+    .seg-play-icon {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.25); font-size: 22px; color: rgba(255,255,255,0.92);
+      pointer-events: none;
+    }
+    .seg-thumb-wrap.playing .seg-play-icon { display: none; }
+    .seg-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; justify-content: center; }
+    .seg-title { font-size: 13px; font-weight: 700; }
+    .seg-meta { font-size: 11px; color: var(--text-dim); }
+    .seg-prompt { font-size: 12px; color: var(--text); opacity: 0.85; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    .seg-check {
+      flex-shrink: 0; align-self: center;
+      width: 24px; height: 24px; border-radius: 6px;
+      border: 1.5px solid var(--border); background: var(--surface);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; color: transparent;
+    }
+    .seg-row.selected .seg-check { background: var(--accent); border-color: var(--accent); color: #000; }
+    .seg-assemble-btn {
+      width: 100%; padding: 12px; border-radius: 10px; border: none;
+      background: var(--accent); color: #000; font-size: 14px; font-weight: 700;
+      cursor: pointer; font-family: inherit; transition: opacity 0.15s;
+    }
+    .seg-assemble-btn:disabled { opacity: 0.4; cursor: default; }
 
     /* Thumbnail + video preview */
     .video-preview-wrap { position: relative; width: 100%; border-radius: 10px; overflow: hidden; background: #000; }
@@ -95,24 +136,42 @@
     .error-text { font-size: 12px; color: var(--red); word-break: break-all; }
 
     /* ── Progress bar ── */
-    .progress-wrap { display: flex; flex-direction: column; gap: 6px; }
+    .progress-wrap { display: flex; flex-direction: column; gap: 10px; }
     .progress-track { width: 100%; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
     .progress-fill {
       height: 100%; border-radius: 3px;
       background: linear-gradient(90deg, var(--accent), #7dd3fc);
       transition: width 0.6s ease;
     }
-    .progress-fill.pulse {
-      background: linear-gradient(90deg, var(--accent) 0%, #7dd3fc 50%, var(--accent) 100%);
-      background-size: 200% 100%;
-      animation: progress-shimmer 1.6s linear infinite;
-      width: 100% !important;
+    .progress-message { font-size: 13px; color: var(--text); font-weight: 600; }
+    .progress-pct { font-size: 11px; color: var(--text-dim); font-weight: 600; margin-left: 6px; }
+
+    /* Step indicator pills */
+    .progress-steps {
+      display: flex; gap: 4px; flex-wrap: nowrap; overflow-x: auto;
+      scrollbar-width: none;
     }
-    @keyframes progress-shimmer {
-      0%   { background-position: 200% 0; }
-      100% { background-position: -200% 0; }
+    .progress-steps::-webkit-scrollbar { display: none; }
+    .step-pill {
+      flex: 1 1 0; min-width: 0;
+      font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+      padding: 5px 6px; border-radius: 5px;
+      background: var(--surface2); color: var(--text-dim);
+      border: 1.5px solid var(--border);
+      text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      transition: all 0.2s;
     }
-    .progress-message { font-size: 12px; color: var(--text-dim); }
+    .step-pill.done {
+      background: rgba(50,215,75,0.12); color: var(--green); border-color: rgba(50,215,75,0.25);
+    }
+    .step-pill.active {
+      background: var(--accent); color: #000; border-color: var(--accent);
+      animation: step-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes step-pulse {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.55; }
+    }
 
     .video-actions { display: flex; gap: 8px; }
     .action-btn { flex: 1; padding: 9px; border-radius: 8px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; text-align: center; text-decoration: none; }
@@ -193,6 +252,26 @@
           </select>
         </div>
 
+        <!-- RIFE multiplier (i2v_multi only) -->
+        <div class="field-row" id="rife-row">
+          <span class="field-label">RIFE ×</span>
+          <div class="res-chips" id="rife-chips">
+            <button class="res-chip"        data-mult="2" onclick="setRife(2,this)">2×</button>
+            <button class="res-chip active" data-mult="3" onclick="setRife(3,this)">3×</button>
+            <button class="res-chip"        data-mult="4" onclick="setRife(4,this)">4×</button>
+          </div>
+          <span style="font-size:11px;color:var(--text-dim)">frame interpolation</span>
+        </div>
+
+        <!-- Pingpong (i2v_multi only) -->
+        <div class="field-row" id="pingpong-row">
+          <span class="field-label">Loop</span>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-dim);">
+            <input type="checkbox" id="pingpong-toggle" onchange="state.pingpong = this.checked" style="width:16px;height:16px;accent-color:var(--accent);">
+            Pingpong (boomerang)
+          </label>
+        </div>
+
         <!-- Per-image section (i2v_multi only) -->
         <div id="per-img-section" class="per-img-section" style="display:none"></div>
 
@@ -245,22 +324,31 @@ const state = {
   selectedImages: [],
   perImageSettings: new Map(),   // imageId → {prompt, frameCount}
   width: 960, height: 960,
+  rifeMultiplier: 3,             // i2v_multi: RIFE VFI interpolation factor (2 | 3 | 4)
+  pingpong: false,               // i2v_multi: VHS_VideoCombine pingpong flag
   pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
   pickerSelection: new Map(),
   videos: [],
   progressIntervals: new Map(),
+  segmentSelection: new Map(),   // videoId → Set<segmentIndex> for the review UI
 };
 
 const $ = id => document.getElementById(id);
 const api = (url, opts={}) => ArtRium.apiFetch(url, opts, state.apiKey);
 const withAuth = url => ArtRium.withAuth(url, state.apiKey);
 const PICKER_LIMIT = 30;
+const maxImagesForMode = () => state.mode === 'i2v_multi' ? 10 : 3;
 
 // ── Mode ──────────────────────────────────────────────────────────────────────
 function setMode(mode, el) {
   state.mode = mode;
   document.querySelectorAll('.mode-chip').forEach(c => c.classList.remove('active'));
   el.classList.add('active');
+  const maxN = maxImagesForMode();
+  if (state.selectedImages.length > maxN) {
+    state.selectedImages = state.selectedImages.slice(0, maxN);
+    ArtRium.toast(`Trimmed to ${maxN} images for this mode`);
+  }
   renderStrip();
   _updateModeFields();
 }
@@ -269,6 +357,14 @@ function _updateModeFields() {
   const isI2v = state.mode === 'i2v_multi';
   $('shared-frames-row').style.display = isI2v ? 'none' : '';
   $('prompt-input').style.display      = isI2v ? 'none' : '';
+  $('rife-row').style.display          = isI2v ? '' : 'none';
+  $('pingpong-row').style.display      = isI2v ? '' : 'none';
+}
+
+function setRife(mult, el) {
+  state.rifeMultiplier = mult;
+  document.querySelectorAll('#rife-chips .res-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────────
@@ -291,13 +387,14 @@ function renderStrip() {
     strip.insertBefore(wrap, addBtn);
   });
   const n = state.selectedImages.length;
-  addBtn.style.display = n >= 3 ? 'none' : '';
+  const maxN = maxImagesForMode();
+  addBtn.style.display = n >= maxN ? 'none' : '';
   const isI2v = state.mode === 'i2v_multi';
   if (isI2v) {
     $('img-hint').textContent = n === 0
-      ? 'Select 1–3 images. Each gets its own animation clip.'
-      : n === 1 ? '1 image — animated loop. Add more for separate clips.'
-      : `${n} images — ${n} independent clips, concatenated.`;
+      ? 'Select 1–10 images. Each gets its own animation clip — you pick which to merge.'
+      : n === 1 ? '1 image — animated loop (skips review, single clip becomes the video).'
+      : `${n} images — ${n} independent clips; pick which to merge after generation.`;
     $('gen-btn').disabled = n < 1;
   } else {
     $('img-hint').textContent = n === 0
@@ -414,7 +511,8 @@ function toggleCell(cell, img) {
     const sorted = [...state.pickerSelection.entries()].sort((a,b)=>a[1]-b[1]);
     state.pickerSelection = new Map(sorted.map(([id],i)=>[id,i+1]));
   } else {
-    if (state.pickerSelection.size >= 3) { ArtRium.toast('Maximum 3 images', true); return; }
+    const maxN = maxImagesForMode();
+    if (state.pickerSelection.size >= maxN) { ArtRium.toast(`Maximum ${maxN} images`, true); return; }
     state.pickerSelection.set(img.id, state.pickerSelection.size + 1);
   }
   refreshPickerCells();
@@ -460,14 +558,16 @@ async function generate() {
     if (state.mode === 'i2v_multi') {
       const rows = Array.from($('per-img-section').querySelectorAll('.per-img-row'));
       body = {
-        image_ids:    state.selectedImages.map(i => i.id),
-        workflow:     'i2v_multi',
-        width:        state.width,
-        height:       state.height,
-        fps:          parseInt($('fps-select').value) || 24,
-        frame_count:  25,
-        prompts:      rows.map(r => r.querySelector('.per-img-prompt').value.trim()),
-        frame_counts: rows.map(r => parseInt(r.querySelector('.per-img-frames').value) || 25),
+        image_ids:       state.selectedImages.map(i => i.id),
+        workflow:        'i2v_multi',
+        width:           state.width,
+        height:          state.height,
+        fps:             parseInt($('fps-select').value) || 24,
+        frame_count:     25,
+        prompts:         rows.map(r => r.querySelector('.per-img-prompt').value.trim()),
+        frame_counts:    rows.map(r => parseInt(r.querySelector('.per-img-frames').value) || 25),
+        rife_multiplier: state.rifeMultiplier,
+        pingpong:        state.pingpong,
       };
     } else {
       body = {
@@ -499,6 +599,12 @@ async function generate() {
 }
 
 // ── Progress polling ──────────────────────────────────────────────────────────
+// Phases that end polling and trigger a card rebuild. `review` is terminal
+// from the polling-loop perspective: it stops polling and switches the card to
+// the segment-selection UI; assembling resumes its own polling after the user
+// confirms.
+const _TERMINAL_PHASES = new Set(['done', 'failed', 'review']);
+
 function startProgressPolling(videoId) {
   if (state.progressIntervals.has(videoId)) return;
   const intervalId = setInterval(async () => {
@@ -506,10 +612,12 @@ function startProgressPolling(videoId) {
       const r = await api(`/api/video/jobs/${videoId}/progress`);
       const prog = await r.json();
       applyProgress(videoId, prog);
-      if (prog.phase === 'done' || prog.phase === 'failed') {
+      if (_TERMINAL_PHASES.has(prog.phase)) {
         clearInterval(intervalId);
         state.progressIntervals.delete(videoId);
-        ArtRium.toast(prog.phase === 'done' ? 'Video ready ✓' : 'Video generation failed', prog.phase !== 'done');
+        if (prog.phase === 'done')        ArtRium.toast('Video ready ✓');
+        else if (prog.phase === 'failed') ArtRium.toast('Video generation failed', true);
+        else                              ArtRium.toast('Clips ready — pick which to merge');
         const r2 = await api(`/api/video/jobs/${videoId}`);
         updateVideoCard(await r2.json());
       }
@@ -518,16 +626,144 @@ function startProgressPolling(videoId) {
   state.progressIntervals.set(videoId, intervalId);
 }
 
+// Branch on status to wire up whatever the rendered card needs next.
+function _postRenderVideo(v) {
+  if (v.status === 'generating' || v.status === 'assembling') startProgressPolling(v.id);
+  else if (v.status === 'review') loadSegments(v.id);
+}
+
+// ── Segment review (Stapel) ───────────────────────────────────────────────────
+async function loadSegments(videoId) {
+  try {
+    const r = await api(`/api/video/jobs/${videoId}/segments`);
+    const data = await r.json();
+    const segs = data.segments || [];
+    // Default selection = all segments included, preserved across re-renders so
+    // the user's checks survive a card rebuild.
+    if (!state.segmentSelection.has(videoId)) {
+      state.segmentSelection.set(videoId, new Set(segs.map(s => s.index)));
+    }
+    renderSegmentList(videoId, segs);
+  } catch(e) {
+    const host = $(`review-${videoId}`);
+    if (host) host.innerHTML = `<div class="error-text">Failed to load clips: ${e.message || e}</div>`;
+  }
+}
+
+function renderSegmentList(videoId, segs) {
+  const host = $(`review-${videoId}`);
+  if (!host) return;
+  const sel = state.segmentSelection.get(videoId);
+  const total = segs.length;
+  const rows = segs.map(s => `
+    <div class="seg-row ${sel.has(s.index) ? 'selected' : ''}" data-seg-idx="${s.index}"
+         onclick="toggleSegment('${videoId}', ${s.index})">
+      <div class="seg-thumb-wrap" data-seg-idx="${s.index}"
+           onclick="playSegment('${videoId}', ${s.index}, event)">
+        <img src="${withAuth(s.thumb_url)}" alt="">
+        <video src="${withAuth(s.url)}" controls playsinline preload="none"></video>
+        <div class="seg-play-icon">▶</div>
+      </div>
+      <div class="seg-info">
+        <div class="seg-title">Clip ${s.index + 1}</div>
+        <div class="seg-meta">${s.frame_count || '?'} frames</div>
+        <div class="seg-prompt">${_esc(s.prompt || '— (no prompt)')}</div>
+      </div>
+      <div class="seg-check">✓</div>
+    </div>
+  `).join('');
+  host.innerHTML = `
+    <div class="seg-hint">${total} clip${total === 1 ? '' : 's'} ready — tap a thumbnail to preview, tap the row to toggle inclusion.</div>
+    ${rows}
+    <button class="seg-assemble-btn" id="assemble-${videoId}"
+            ${sel.size === 0 ? 'disabled' : ''}
+            onclick="assembleVideo('${videoId}')">
+      Assemble Video (${sel.size}/${total} selected)
+    </button>
+  `;
+}
+
+function toggleSegment(videoId, idx) {
+  const sel = state.segmentSelection.get(videoId);
+  if (!sel) return;
+  if (sel.has(idx)) sel.delete(idx);
+  else sel.add(idx);
+  const row = document.querySelector(`#review-${videoId} .seg-row[data-seg-idx="${idx}"]`);
+  if (row) row.classList.toggle('selected', sel.has(idx));
+  const btn = $(`assemble-${videoId}`);
+  if (btn) {
+    const total = document.querySelectorAll(`#review-${videoId} .seg-row`).length;
+    btn.disabled = sel.size === 0;
+    btn.textContent = `Assemble Video (${sel.size}/${total} selected)`;
+  }
+}
+
+function playSegment(videoId, idx, event) {
+  if (event) event.stopPropagation();
+  const wrap = document.querySelector(`#review-${videoId} .seg-thumb-wrap[data-seg-idx="${idx}"]`);
+  if (!wrap) return;
+  if (wrap.classList.contains('playing')) return;   // already showing native controls; leave clicks to <video>
+  wrap.classList.add('playing');
+  const v = wrap.querySelector('video');
+  if (v) v.play().catch(() => {});
+}
+
+async function assembleVideo(videoId) {
+  const sel = state.segmentSelection.get(videoId);
+  if (!sel || sel.size === 0) return;
+  const indices = [...sel].sort((a, b) => a - b);
+  const btn = $(`assemble-${videoId}`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting…'; }
+  try {
+    await api(`/api/video/jobs/${videoId}/assemble`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({indices}),
+    });
+    ArtRium.toast(`Assembling from ${indices.length} clip${indices.length === 1 ? '' : 's'}…`);
+    state.segmentSelection.delete(videoId);
+    const r = await api(`/api/video/jobs/${videoId}`);
+    updateVideoCard(await r.json());
+  } catch(e) {
+    ArtRium.toast(e.message || 'Failed to assemble', true);
+    if (btn) { btn.disabled = false; btn.textContent = `Assemble Video (${sel.size} selected)`; }
+  }
+}
+
+// Ordered backend phases → visible step pills. `processing` is the default
+// fallback (server-side dict miss); it maps to "Upload" so the first pill is
+// active immediately after the job starts.
+const PHASE_STEPS = [
+  { key: 'uploading',  label: 'Upload'   },
+  { key: 'submitting', label: 'Submit'   },
+  { key: 'queued',     label: 'Queue'    },
+  { key: 'running',    label: 'Generate' },
+  { key: 'review',     label: 'Review'   },
+  { key: 'finalizing', label: 'Finalize' },
+  { key: 'done',       label: 'Done'     },
+];
+const PHASE_ORDER = Object.fromEntries(PHASE_STEPS.map((s, i) => [s.key, i]));
+PHASE_ORDER.processing = 0;
+
 function applyProgress(videoId, prog) {
   const card = document.getElementById(`vc-${videoId}`);
   if (!card) return;
   const fill = card.querySelector('.progress-fill');
   const msg  = card.querySelector('.progress-message');
+  const pctEl = card.querySelector('.progress-pct');
   if (!fill) return;
-  const isPulse = prog.phase === 'running' || prog.phase === 'queued';
-  if (isPulse) { fill.classList.add('pulse'); fill.style.width = '100%'; }
-  else { fill.classList.remove('pulse'); fill.style.width = (prog.pct || 0) + '%'; }
+  const pct = Math.max(2, Math.min(100, Number(prog.pct) || 0));
+  fill.style.width = pct + '%';
   if (msg) msg.textContent = prog.message || '';
+  if (pctEl) pctEl.textContent = `${Math.round(pct)}%`;
+
+  const currentIdx = PHASE_ORDER[prog.phase] ?? 0;
+  const failed = prog.phase === 'failed';
+  const finished = prog.phase === 'done';
+  card.querySelectorAll('.step-pill').forEach((pill, i) => {
+    pill.classList.toggle('done',   !failed && (i < currentIdx || finished));
+    pill.classList.toggle('active', !failed && !finished && i === currentIdx);
+  });
 }
 
 // ── Video list ────────────────────────────────────────────────────────────────
@@ -536,9 +772,7 @@ async function loadVideos() {
     const r = await api('/api/video');
     state.videos = await r.json();
     renderVideos();
-    for (const v of state.videos) {
-      if (v.status === 'generating') startProgressPolling(v.id);
-    }
+    for (const v of state.videos) _postRenderVideo(v);
   } catch(e) {}
 }
 
@@ -567,7 +801,10 @@ function makeVideoCard(v) {
   card.id = `vc-${v.id}`;
 
   const statusClass = `status-${v.status}`;
-  const statusLabel = {generating:'Generating…',done:'Done',failed:'Failed'}[v.status] || v.status;
+  const statusLabel = {
+    generating:'Generating…', review:'Review', assembling:'Assembling…',
+    done:'Done', failed:'Failed',
+  }[v.status] || v.status;
   const meta = _videoMeta(v);
   const date = fmtDate(v.created_at);
 
@@ -591,11 +828,19 @@ function makeVideoCard(v) {
         <source src="${videoUrl}" type="video/mp4">
       </video>`;
     }
-  } else if (v.status === 'generating') {
+  } else if (v.status === 'generating' || v.status === 'assembling') {
     body = `
       <div class="progress-wrap">
-        <div class="progress-track"><div class="progress-fill pulse" style="width:100%"></div></div>
-        <div class="progress-message">Starting…</div>
+        <div class="progress-steps">
+          ${PHASE_STEPS.map(s => `<div class="step-pill" data-step="${s.key}">${s.label}</div>`).join('')}
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="width:3%"></div></div>
+        <div><span class="progress-message">Starting…</span><span class="progress-pct"></span></div>
+      </div>`;
+  } else if (v.status === 'review') {
+    body = `
+      <div class="seg-review" id="review-${v.id}">
+        <div class="seg-hint">Loading clips…</div>
       </div>`;
   } else if (v.status === 'failed') {
     body = `<div class="error-text">${v.error || 'Unknown error'}</div>`;
@@ -635,7 +880,11 @@ function updateVideoCard(v) {
     if (list.querySelector('.video-empty')) list.innerHTML = '';
     list.prepend(newCard);
   }
-  if (v.status === 'generating') startProgressPolling(v.id);
+  // Keep the in-memory list in sync so subsequent loadVideos() doesn't roll
+  // back to a stale status snapshot on a soft reload.
+  const idx = state.videos.findIndex(x => x.id === v.id);
+  if (idx >= 0) state.videos[idx] = v; else state.videos.unshift(v);
+  _postRenderVideo(v);
 }
 
 async function deleteVideo(id) {
@@ -644,6 +893,7 @@ async function deleteVideo(id) {
     state.videos = state.videos.filter(v => v.id !== id);
     clearInterval(state.progressIntervals.get(id));
     state.progressIntervals.delete(id);
+    state.segmentSelection.delete(id);
     ArtRium.toast('Deleted');
     renderVideos();
   } catch(e) { ArtRium.toast('Delete failed', true); }

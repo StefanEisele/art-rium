@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <title>Improv — art-rium</title>
+  <link rel="stylesheet" href="/shared/shared.css">
+  <style>
+    .app    { display: flex; flex-direction: column; min-height: 100dvh; max-width: 760px; margin: 0 auto; padding-top: env(safe-area-inset-top); }
+    header  { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; position: sticky; top: 0; background: var(--bg); z-index: 10; }
+    header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex: 1; }
+    main    { flex: 1; padding-bottom: 24px; }
+
+    .section { padding: 16px; }
+    .card { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+    .card + .card { margin-top: 14px; }
+    .card h2 { font-size: 15px; font-weight: 700; }
+    .hint { font-size: 12px; color: var(--text-dim); line-height: 1.45; }
+    .label { font-size: 11px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.6px; display: block; margin-bottom: 6px; }
+
+    /* Picker */
+    .video-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .video-tile { position: relative; aspect-ratio: 1 / 1; background: var(--surface2); border-radius: 10px; overflow: hidden; cursor: pointer; border: 2.5px solid transparent; }
+    .video-tile.selected { border-color: var(--accent); }
+    .video-tile video, .video-tile img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; }
+    .video-tile .meta { position: absolute; bottom: 0; left: 0; right: 0; padding: 4px 6px; background: linear-gradient(180deg, transparent, rgba(0,0,0,0.7)); font-size: 10px; color: #fff; font-weight: 500; }
+    .video-grid .empty { grid-column: 1/-1; padding: 24px; text-align: center; color: var(--text-dim); font-size: 13px; }
+
+    /* Selected video preview */
+    .selected-preview { display: flex; flex-direction: column; gap: 12px; }
+    .selected-preview video { width: 100%; max-height: 320px; border-radius: 10px; background: #000; }
+    .share-box { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .share-url { font-size: 11px; word-break: break-all; color: var(--text-dim); background: var(--bg); padding: 8px; border-radius: 6px; font-family: ui-monospace, monospace; line-height: 1.4; }
+    .share-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .share-actions button { padding: 8px 14px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface); color: var(--text); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
+    .share-actions button.open { background: var(--accent); border-color: var(--accent); color: #000; }
+    .qr-wrap { display: none; align-self: center; padding: 10px; background: #fff; border-radius: 8px; }
+    .qr-wrap.show { display: block; }
+    .qr-wrap img { width: 180px; height: 180px; display: block; }
+
+    /* Upload dropzone */
+    .drop {
+      border: 2px dashed var(--border); border-radius: 12px; padding: 28px 16px;
+      text-align: center; cursor: pointer; background: var(--surface2);
+      transition: all 0.15s; display: flex; flex-direction: column; gap: 8px; align-items: center;
+    }
+    .drop.over { border-color: var(--accent); background: rgba(245,166,35,0.08); }
+    .drop .big { font-size: 28px; color: var(--text-dim); }
+    .drop .lbl { font-size: 13px; font-weight: 600; }
+    .drop .sub { font-size: 11px; color: var(--text-dim); }
+    .drop input[type=file] { display: none; }
+    .drop.has-file { border-style: solid; border-color: var(--accent); background: var(--surface); text-align: left; align-items: stretch; }
+    .file-row { display: flex; align-items: center; gap: 10px; }
+    .file-row .name { flex: 1; font-size: 13px; font-weight: 600; word-break: break-all; }
+    .file-row .size { font-size: 11px; color: var(--text-dim); }
+    .file-row button { background: none; border: none; color: var(--red); font-size: 18px; cursor: pointer; padding: 4px 8px; }
+
+    /* Buttons */
+    .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius); border: none; background: var(--accent); color: #000; font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.13s; }
+    .gen-btn:disabled { opacity: 0.4; cursor: default; }
+    .gen-btn:active:not(:disabled) { transform: scale(0.98); }
+
+    /* Status */
+    #status-card { display: none; }
+    #status-card.show { display: flex; }
+    .progress-track { width: 100%; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+    .progress-fill { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--accent), #7dd3fc); background-size: 200% 100%; animation: progress-shimmer 1.6s linear infinite; width: 100%; }
+    @keyframes progress-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    /* Results */
+    #result-section { display: none; }
+    #result-section.show { display: block; }
+    .result-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 540px) { .result-pair { grid-template-columns: 1fr; } }
+    .mix-card { background: var(--surface); border: 1.5px solid var(--border); border-radius: 10px; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+    .mix-card video { width: 100%; border-radius: 6px; background: #000; max-height: 280px; }
+    .mix-card .mix-title { font-size: 12px; font-weight: 700; }
+    .mix-card .mix-actions { display: flex; gap: 6px; }
+    .mix-card .mix-actions a { flex: 1; text-align: center; padding: 6px; border-radius: 6px; background: var(--surface2); border: 1.5px solid var(--border); color: var(--text); text-decoration: none; font-size: 11px; font-weight: 600; }
+
+    /* Recent list */
+    .session-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+    .session-row:last-child { border-bottom: none; }
+    .session-row .sr-status { font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; padding: 2px 6px; border-radius: 4px; }
+    .session-row .sr-status.done { background: rgba(70,180,80,0.15); color: #6abe6a; }
+    .session-row .sr-status.processing { background: rgba(245,166,35,0.15); color: var(--accent); }
+    .session-row .sr-status.failed { background: rgba(231,76,60,0.15); color: var(--red); }
+    .session-row .sr-status.queued { background: var(--surface2); color: var(--text-dim); }
+    .session-row .sr-when { color: var(--text-dim); flex: 1; }
+    .session-row a { color: var(--accent); text-decoration: none; font-weight: 600; font-size: 11px; }
+
+    /* Auth panel (mirrors dashboard) */
+    #auth-panel { display: none; padding: 24px; background: var(--surface); border-radius: var(--radius); margin: 16px; gap: 12px; flex-direction: column; }
+    #auth-panel.show { display: flex; }
+    #auth-panel input { width: 100%; box-sizing: border-box; background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); padding: 10px 12px; font-size: 14px; }
+    #auth-panel button { padding: 10px; border-radius: 10px; border: none; background: var(--accent); color: #000; font-weight: 700; cursor: pointer; }
+  </style>
+</head>
+<body>
+
+<div class="app">
+  <header>
+    <a href="/" style="color:var(--text-dim);text-decoration:none;font-size:18px;">←</a>
+    <h1>Improv</h1>
+    <div class="dot" id="dot"></div>
+  </header>
+
+  <div id="auth-panel">
+    <h2 style="margin:0;font-size:16px;">API Key</h2>
+    <input type="password" id="apiKeyInput" placeholder="paste key" autocomplete="off">
+    <button onclick="saveKey()">Connect</button>
+  </div>
+
+  <main id="main">
+
+    <div class="section">
+      <div class="card">
+        <h2>1. Source Video</h2>
+        <p class="hint">Pick a generated video. Open the share link on a second device (iPad) next to your piano so you can watch it while improvising.</p>
+        <div class="video-grid" id="video-grid"><div class="empty">Loading…</div></div>
+
+        <div id="selected-preview" class="selected-preview" style="display:none;">
+          <video id="source-video" controls playsinline preload="metadata"></video>
+          <div class="share-box">
+            <span class="label">Share URL — open on iPad</span>
+            <div class="share-url" id="share-url">—</div>
+            <div class="share-actions">
+              <button onclick="copyShare()">Copy</button>
+              <button onclick="toggleQR()" id="qr-btn">Show QR</button>
+              <button class="open" onclick="openShare()">Open here</button>
+            </div>
+            <div class="qr-wrap" id="qr-wrap"><img id="qr-img" alt="QR"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>2. Recording</h2>
+        <p class="hint">Upload the MP4 from Blackmagic Camera (iPhone + Scarlett 2i4). Should contain your hands video with the piano audio embedded.</p>
+        <label class="drop" id="drop">
+          <div class="big">⬆</div>
+          <div class="lbl">Drop recording here or tap to pick</div>
+          <div class="sub">MP4 / MOV, up to 1 GB</div>
+          <input type="file" id="file-input" accept="video/mp4,video/quicktime,video/*">
+        </label>
+      </div>
+
+      <button class="gen-btn" id="submit-btn" onclick="submitSession()" disabled>Generate mixes</button>
+
+      <div class="card" id="status-card">
+        <div class="progress-track"><div class="progress-fill"></div></div>
+        <div class="hint" id="status-msg">Working…</div>
+      </div>
+
+      <div id="result-section">
+        <div class="card">
+          <h2>Result</h2>
+          <div class="result-pair" id="result-pair"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="card">
+        <h2>Recent sessions</h2>
+        <div id="recent-list"><div class="hint">Loading…</div></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script src="/shared/shared.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<script>
+const { getApiKey, saveApiKey, apiFetch, withAuth, toast } = ArtRium;
+
+const state = {
+  apiKey: getApiKey(),
+  sourceVideo: null,
+  recordingFile: null,
+  activeJobId: null,
+  pollTimer: null,
+};
+
+// ── Auth bootstrap ─────────────────────────────────────────────────────────
+function checkAuth() {
+  if (!state.apiKey) {
+    document.getElementById('auth-panel').classList.add('show');
+    document.getElementById('main').style.display = 'none';
+    return false;
+  }
+  return true;
+}
+
+function saveKey() {
+  const v = document.getElementById('apiKeyInput').value.trim();
+  if (!v) return;
+  saveApiKey(v);
+  state.apiKey = v;
+  document.getElementById('auth-panel').classList.remove('show');
+  document.getElementById('main').style.display = '';
+  init();
+}
+
+// ── Source video picker ────────────────────────────────────────────────────
+async function loadSourceVideos() {
+  try {
+    const r = await apiFetch('/api/video', {}, state.apiKey, () => location.reload());
+    const videos = await r.json();
+    const grid = document.getElementById('video-grid');
+    const ready = videos.filter(v =>
+      v.status === 'done' && v.filename &&
+      v.workflow !== 'improv_synth' && v.workflow !== 'improv_hands'
+    );
+    if (!ready.length) {
+      grid.innerHTML = '<div class="empty">No generated videos yet. Make one in the Video tool first.</div>';
+      return;
+    }
+    grid.innerHTML = '';
+    ready.forEach(v => {
+      const tile = document.createElement('div');
+      tile.className = 'video-tile';
+      tile.dataset.id = v.id;
+      const thumb = v.thumb_url ? withAuth(v.thumb_url, state.apiKey) : '';
+      tile.innerHTML = `
+        ${thumb ? `<img src="${thumb}" alt="" loading="lazy">` : ''}
+        <div class="meta">${escapeHtml((v.prompt || v.filename || '').slice(0, 40))}</div>
+      `;
+      tile.onclick = () => selectVideo(v);
+      grid.appendChild(tile);
+    });
+  } catch (e) {
+    document.getElementById('video-grid').innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function selectVideo(video) {
+  state.sourceVideo = video;
+  document.querySelectorAll('.video-tile').forEach(t => {
+    t.classList.toggle('selected', t.dataset.id === video.id);
+  });
+
+  const preview = document.getElementById('selected-preview');
+  preview.style.display = '';
+
+  document.getElementById('source-video').src =
+    withAuth('/api/video/file/' + video.filename, state.apiKey);
+
+  // Public share URL with image_share_token — fetched from server so we don't
+  // hard-code the token in the frontend.
+  try {
+    const r = await apiFetch('/api/improv/share-url/' + video.id, {}, state.apiKey, null);
+    const { url } = await r.json();
+    document.getElementById('share-url').textContent = url;
+    const qr = qrcode(0, 'M');
+    qr.addData(url);
+    qr.make();
+    document.getElementById('qr-img').src = qr.createDataURL(5, 4);
+  } catch (e) {
+    document.getElementById('share-url').textContent = 'Share URL unavailable: ' + e.message;
+  }
+  document.getElementById('qr-wrap').classList.remove('show');
+  document.getElementById('qr-btn').textContent = 'Show QR';
+
+  updateSubmitButton();
+}
+
+function copyShare() {
+  const url = document.getElementById('share-url').textContent;
+  navigator.clipboard.writeText(url).then(() => toast('URL copied'));
+}
+
+function openShare() {
+  const url = document.getElementById('share-url').textContent;
+  window.open(url, '_blank');
+}
+
+function toggleQR() {
+  const w = document.getElementById('qr-wrap');
+  w.classList.toggle('show');
+  document.getElementById('qr-btn').textContent = w.classList.contains('show') ? 'Hide QR' : 'Show QR';
+}
+
+// ── Recording upload ───────────────────────────────────────────────────────
+function setupDropzone() {
+  const drop = document.getElementById('drop');
+  const input = document.getElementById('file-input');
+  input.addEventListener('change', e => { if (e.target.files[0]) acceptFile(e.target.files[0]); });
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.classList.remove('over');
+    if (e.dataTransfer.files[0]) acceptFile(e.dataTransfer.files[0]);
+  });
+}
+
+function acceptFile(file) {
+  if (!file.type.startsWith('video/') && !/\.(mp4|mov|m4v)$/i.test(file.name)) {
+    toast('Not a video file', true);
+    return;
+  }
+  state.recordingFile = file;
+  const drop = document.getElementById('drop');
+  drop.classList.add('has-file');
+  const mb = (file.size / 1_048_576).toFixed(1);
+  drop.innerHTML = `
+    <div class="file-row">
+      <div>
+        <div class="name">${escapeHtml(file.name)}</div>
+        <div class="size">${mb} MB</div>
+      </div>
+      <button onclick="clearFile(event)">×</button>
+    </div>
+  `;
+  updateSubmitButton();
+}
+
+function clearFile(e) {
+  e.stopPropagation();
+  e.preventDefault();
+  state.recordingFile = null;
+  const drop = document.getElementById('drop');
+  drop.classList.remove('has-file');
+  drop.innerHTML = `
+    <div class="big">⬆</div>
+    <div class="lbl">Drop recording here or tap to pick</div>
+    <div class="sub">MP4 / MOV, up to 1 GB</div>
+    <input type="file" id="file-input" accept="video/mp4,video/quicktime,video/*">
+  `;
+  setupDropzone();
+  updateSubmitButton();
+}
+
+function updateSubmitButton() {
+  const btn = document.getElementById('submit-btn');
+  btn.disabled = !(state.sourceVideo && state.recordingFile);
+}
+
+// ── Submit & poll ──────────────────────────────────────────────────────────
+async function submitSession() {
+  if (!state.sourceVideo || !state.recordingFile) return;
+  const btn = document.getElementById('submit-btn');
+  btn.disabled = true;
+  btn.textContent = 'Uploading…';
+  document.getElementById('result-section').classList.remove('show');
+  document.getElementById('status-card').classList.add('show');
+  document.getElementById('status-msg').textContent = 'Uploading recording…';
+
+  try {
+    const fd = new FormData();
+    fd.append('source_video_id', state.sourceVideo.id);
+    fd.append('recording', state.recordingFile);
+    const r = await fetch('/api/improv/sessions', {
+      method: 'POST',
+      headers: { 'X-API-Key': state.apiKey },
+      body: fd,
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    const body = await r.json();
+    state.activeJobId = body.id;
+    document.getElementById('status-msg').textContent = 'Queued — ffmpeg muxing the two outputs…';
+    pollJob();
+  } catch (e) {
+    toast(e.message, true);
+    document.getElementById('status-card').classList.remove('show');
+    btn.disabled = false;
+    btn.textContent = 'Generate mixes';
+  }
+}
+
+async function pollJob() {
+  if (!state.activeJobId) return;
+  try {
+    const r = await apiFetch('/api/improv/sessions/' + state.activeJobId, {}, state.apiKey, null);
+    const s = await r.json();
+    document.getElementById('status-msg').textContent =
+      s.status === 'queued'     ? 'Queued — waiting to start…'
+    : s.status === 'processing' ? 'Muxing audio + video (ffmpeg)…'
+    : s.status === 'done'       ? 'Done!'
+    : s.status === 'failed'     ? 'Failed: ' + (s.error || 'unknown error')
+    :                              s.status;
+
+    if (s.status === 'done') {
+      finishJob(s);
+      return;
+    }
+    if (s.status === 'failed') {
+      failJob(s);
+      return;
+    }
+    state.pollTimer = setTimeout(pollJob, 3000);
+  } catch (e) {
+    state.pollTimer = setTimeout(pollJob, 5000);
+  }
+}
+
+function finishJob(s) {
+  const pair = document.getElementById('result-pair');
+  pair.innerHTML = '';
+  pair.appendChild(makeMixCard('Synth + Piano Audio', s.mix_synth));
+  pair.appendChild(makeMixCard('Hands + Piano Audio', s.mix_hands));
+  document.getElementById('status-card').classList.remove('show');
+  document.getElementById('result-section').classList.add('show');
+  document.getElementById('submit-btn').disabled = false;
+  document.getElementById('submit-btn').textContent = 'Generate mixes';
+  state.activeJobId = null;
+  toast('Mix complete');
+  loadRecent();
+}
+
+function failJob(s) {
+  document.getElementById('submit-btn').disabled = false;
+  document.getElementById('submit-btn').textContent = 'Generate mixes';
+  toast('Mix failed: ' + (s.error || 'unknown'), true);
+  state.activeJobId = null;
+}
+
+function makeMixCard(label, video) {
+  const card = document.createElement('div');
+  card.className = 'mix-card';
+  if (!video || !video.filename) {
+    card.innerHTML = `<div class="mix-title">${label}</div><div class="hint">Missing</div>`;
+    return card;
+  }
+  const url = withAuth('/api/video/file/' + video.filename, state.apiKey);
+  card.innerHTML = `
+    <div class="mix-title">${label}</div>
+    <video src="${url}" controls playsinline preload="metadata"></video>
+    <div class="mix-actions">
+      <a href="${url}" download="${video.filename}">Download</a>
+      <a href="/tools/gallery/" target="_blank">Gallery →</a>
+    </div>
+  `;
+  return card;
+}
+
+// ── Recent sessions ────────────────────────────────────────────────────────
+async function loadRecent() {
+  try {
+    const r = await apiFetch('/api/improv/sessions?limit=10', {}, state.apiKey, null);
+    const list = await r.json();
+    const box = document.getElementById('recent-list');
+    if (!list.length) {
+      box.innerHTML = '<div class="hint">No sessions yet.</div>';
+      return;
+    }
+    box.innerHTML = '';
+    list.forEach(s => {
+      const row = document.createElement('div');
+      row.className = 'session-row';
+      const when = s.created_at ? new Date(s.created_at).toLocaleString() : '—';
+      const src = s.source_video?.filename || '—';
+      row.innerHTML = `
+        <span class="sr-status ${s.status}">${s.status}</span>
+        <span class="sr-when">${escapeHtml(src)} · ${escapeHtml(when)}</span>
+        ${s.mix_synth?.filename ? `<a href="${withAuth('/api/video/file/' + s.mix_synth.filename, state.apiKey)}" target="_blank">synth</a>` : ''}
+        ${s.mix_hands?.filename ? `<a href="${withAuth('/api/video/file/' + s.mix_hands.filename, state.apiKey)}" target="_blank">hands</a>` : ''}
+      `;
+      box.appendChild(row);
+    });
+  } catch (e) {
+    document.getElementById('recent-list').innerHTML = `<div class="hint">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+async function init() {
+  if (!checkAuth()) return;
+  setupDropzone();
+  await Promise.all([loadSourceVideos(), loadRecent()]);
+}
+
+init();
+</script>
+</body>
+</html>

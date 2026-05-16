@@ -60,25 +60,74 @@ async def poll_history(
     timeout: int,
     interval: int,
 ) -> dict:
-    """Poll /history/<prompt_id> until status='success' or timeout. Returns outputs dict."""
+    """Poll /history/<prompt_id> until status='success' or timeout. Returns outputs dict.
+
+    Transient network errors are absorbed and retried — ComfyUI's HTTP thread can
+    stall for several seconds during model load/unload, and a single ReadTimeout
+    should not kill a multi-minute job. After MAX_CONSECUTIVE_MISSES failed polls
+    in a row (~90s), we assume ComfyUI is genuinely down and raise.
+    """
     deadline = asyncio.get_event_loop().time() + timeout
+    MAX_CONSECUTIVE_MISSES = 6
+    misses = 0
     while True:
-        r = await client.get(
-            f"http://{settings.comfyui_host}/history/{prompt_id}",
-            timeout=10,
-        )
-        if r.status_code == 200:
-            body = r.json()
-            entry = body.get(prompt_id, {})
-            status = entry.get("status", {})
-            if status.get("completed"):
-                if status.get("status_str") != "success":
+        try:
+            r = await client.get(
+                f"http://{settings.comfyui_host}/history/{prompt_id}",
+                timeout=30,
+            )
+            misses = 0
+            if r.status_code == 200:
+                body = r.json()
+                entry = body.get(prompt_id, {})
+                status = entry.get("status", {})
+                status_str = status.get("status_str")
+                # Fail fast on error state — some ComfyUI versions never set completed=True after a node exception
+                if status_str == "error" or any(
+                    isinstance(m, (list, tuple)) and m and m[0] == "execution_error"
+                    for m in status.get("messages", [])
+                ):
                     msgs = [str(m) for m in status.get("messages", [])]
                     raise RuntimeError(f"ComfyUI job failed: {' | '.join(msgs)}")
-                return entry.get("outputs", {})
+                if status.get("completed"):
+                    if status_str != "success":
+                        msgs = [str(m) for m in status.get("messages", [])]
+                        raise RuntimeError(f"ComfyUI job failed: {' | '.join(msgs)}")
+                    return entry.get("outputs", {})
+        except httpx.RequestError as e:
+            misses += 1
+            logger.warning(
+                "ComfyUI history poll failed (%s: %s) — miss %d/%d",
+                type(e).__name__, e, misses, MAX_CONSECUTIVE_MISSES,
+            )
+            if misses >= MAX_CONSECUTIVE_MISSES:
+                raise RuntimeError(
+                    f"ComfyUI unreachable after {misses} consecutive polls — likely crashed"
+                ) from e
         if asyncio.get_event_loop().time() >= deadline:
             raise TimeoutError(f"ComfyUI job {prompt_id} timed out after {timeout}s")
         await asyncio.sleep(interval)
+
+
+async def free_memory(client: httpx.AsyncClient) -> None:
+    """Ask ComfyUI to fully unload all models and free VRAM. Best-effort, never raises.
+
+    Useful between independent submissions in a multi-segment pipeline. Without
+    this, ComfyUI partially evicts a model after one prompt and partially reloads
+    it for the next — on Wan 14B fp8 + 16 GB GPU the partial-reload path can hit
+    an mmap access violation in load_torch_file and crash the ComfyUI process.
+    Forcing a clean unload makes the next prompt do a cold load instead.
+    """
+    try:
+        r = await client.post(
+            f"http://{settings.comfyui_host}/free",
+            json={"unload_models": True, "free_memory": True},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            logger.warning("ComfyUI /free returned %d: %s", r.status_code, r.text[:200])
+    except Exception as e:
+        logger.warning("ComfyUI /free failed (%s): %s", type(e).__name__, e)
 
 
 async def queue_info(prompt_id: str) -> dict:

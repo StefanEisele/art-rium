@@ -85,5 +85,10 @@ class Settings(BaseSettings):
     def videos_dir(self) -> Path:
         return self.storage_dir / "videos"
 
+    @property
+    def improv_dir(self) -> Path:
+        """Raw user-uploaded improvisation recordings (iPhone MP4s) before muxing."""
+        return self.storage_dir / "improv"
+
 
 settings = Settings()

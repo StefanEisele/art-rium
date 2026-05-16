@@ -1,6 +1,7 @@
 # Web framework
 fastapi>=0.111
 uvicorn[standard]>=0.29
+python-multipart>=0.0.9  # required for FastAPI Form() / UploadFile
 
 # Database
 sqlalchemy[asyncio]>=2.0

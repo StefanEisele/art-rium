@@ -209,3 +209,38 @@ class Video(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Piano improvisation sessions
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ImprovSession(Base):
+    __tablename__ = "improv_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    source_video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("videos.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    recording_filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    mix_synth_video_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("videos.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    mix_hands_video_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("videos.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    # queued | processing | done | failed
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

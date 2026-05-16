@@ -6,9 +6,15 @@ from core.config import settings
 
 logger = logging.getLogger(__name__)
 
+AUTH_COOKIE_NAME = "art_rium_auth"
+AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
+
 _LOCAL_PREFIXES = ("127.", "192.168.", "10.")
 _172_OCTET_MIN = 16
 _172_OCTET_MAX = 31
+# Headers a reverse proxy (Cloudflare tunnel) sets — their presence means the
+# request originated remotely even though request.client.host shows loopback.
+_PROXY_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip")
 
 
 def is_local_ip(ip: str) -> bool:
@@ -23,15 +29,30 @@ def is_local_ip(ip: str) -> bool:
     return False
 
 
-def auth_ok(request: Request) -> bool:
-    """Local IPs bypass auth; remote requests require X-API-Key or ?api_key=."""
+def _is_direct_local_request(request: Request) -> bool:
+    """True only for genuine local-network access — not a proxied request."""
     ip = request.client.host if request.client else ""
-    if is_local_ip(ip):
+    if not is_local_ip(ip):
+        return False
+    return not any(h in request.headers for h in _PROXY_HEADERS)
+
+
+def _extract_key(request: Request) -> str:
+    return (
+        request.headers.get("X-API-Key")
+        or request.query_params.get("api_key")
+        or request.cookies.get(AUTH_COOKIE_NAME)
+        or ""
+    )
+
+
+def auth_ok(request: Request) -> bool:
+    """Direct local access bypasses auth; everything else needs the API key."""
+    if _is_direct_local_request(request):
         return True
     if not settings.api_key:
         return True
-    key = request.headers.get("X-API-Key") or request.query_params.get("api_key", "")
-    return key == settings.api_key
+    return _extract_key(request) == settings.api_key
 
 
 def require_auth(request: Request) -> None:
@@ -42,7 +63,7 @@ def require_auth(request: Request) -> None:
 
 def ws_auth_ok(websocket: WebSocket) -> bool:
     ip = websocket.client.host if websocket.client else ""
-    if is_local_ip(ip):
+    if is_local_ip(ip) and not any(h in websocket.headers for h in _PROXY_HEADERS):
         return True
     if not settings.api_key:
         return True

@@ -5,9 +5,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
+from core.auth import AUTH_COOKIE_NAME, AUTH_COOKIE_MAX_AGE, auth_ok
 from core.config import settings
 from services.ollama.client import warm_titler_model
 from workers.comfy_listener import ComfyListener
@@ -33,6 +35,7 @@ async def lifespan(app: FastAPI):
     settings.images_dir.mkdir(parents=True, exist_ok=True)
     settings.shop_prep_dir.mkdir(parents=True, exist_ok=True)
     settings.videos_dir.mkdir(parents=True, exist_ok=True)
+    settings.improv_dir.mkdir(parents=True, exist_ok=True)
 
     # Start ComfyUI WebSocket listener
     listener = ComfyListener(app.state)
@@ -74,8 +77,110 @@ async def no_cache_html(request, call_next):
     return response
 
 
+# Always-public path prefixes — Meta needs /share/* to fetch media, and the
+# login stub is itself public so users can submit their API key.
+_PUBLIC_PREFIXES = ("/share/",)
+
+_LOGIN_HTML = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>art-rium</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,system-ui,sans-serif;background:#0f0f10;color:#eee;display:flex;align-items:center;justify-content:center;padding:24px;box-sizing:border-box}
+  .card{max-width:340px;width:100%;background:#1a1a1c;border-radius:14px;padding:28px 24px;box-shadow:0 4px 24px rgba(0,0,0,.4)}
+  h1{margin:0 0 4px;font-size:22px;font-weight:600}
+  p{margin:0 0 20px;color:#888;font-size:14px}
+  label{display:block;font-size:12px;color:#888;margin-bottom:6px}
+  input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:8px;border:1px solid #333;background:#0f0f10;color:#eee;font-size:14px}
+  input:focus{outline:none;border-color:#666}
+  button{width:100%;margin-top:14px;padding:11px;border:none;border-radius:8px;background:#fff;color:#000;font-size:14px;font-weight:600;cursor:pointer}
+  .err{color:#e85;font-size:13px;margin-top:12px;text-align:center}
+</style>
+</head><body>
+<form class="card" method="get" action="/" onsubmit="try{localStorage.setItem('z_apikey',document.getElementById('k').value)}catch(e){}">
+  <h1>art-rium</h1>
+  <p>Enter your API key to continue.</p>
+  <label>API Key</label>
+  <input id="k" name="api_key" type="password" autofocus required autocomplete="off" autocorrect="off" spellcheck="false">
+  <button type="submit">Unlock</button>
+  __ERROR__
+</form>
+</body></html>"""
+
+
+def _login_response(error: bool) -> HTMLResponse:
+    body = _LOGIN_HTML.replace(
+        "__ERROR__",
+        '<div class="err">Invalid key — try again.</div>' if error else "",
+    )
+    return HTMLResponse(body, status_code=401 if error else 200)
+
+
+@app.middleware("http")
+async def gate_frontend(request: Request, call_next):
+    """
+    Block every static frontend / API request until the user has supplied the
+    API key (via header, ?api_key=, or persisted cookie). /share/* stays open
+    so Meta can fetch image/reel URLs.
+    """
+    path = request.url.path
+    if any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+        return await call_next(request)
+
+    if auth_ok(request):
+        # Fresh GET with ?api_key= on a page load → set cookie + bounce to a
+        # clean URL so the key doesn't linger in browser history. Skips the
+        # wasted static-file lookup for the dirty URL.
+        if (
+            request.method == "GET"
+            and request.query_params.get("api_key")
+            and "text/html" in request.headers.get("accept", "")
+        ):
+            clean_qs = "&".join(
+                f"{k}={v}" for k, v in request.query_params.multi_items() if k != "api_key"
+            )
+            target = path + (f"?{clean_qs}" if clean_qs else "")
+            redirect = RedirectResponse(target, status_code=303)
+            redirect.set_cookie(
+                AUTH_COOKIE_NAME,
+                settings.api_key,
+                max_age=AUTH_COOKIE_MAX_AGE,
+                httponly=True,
+                secure=request.url.scheme == "https",
+                samesite="lax",
+            )
+            return redirect
+
+        response = await call_next(request)
+        # Promote a freshly-supplied header key to a cookie too (handy when an
+        # external tool calls the API with X-API-Key from a browser context).
+        header_key = request.headers.get("X-API-Key")
+        if (
+            settings.api_key
+            and header_key == settings.api_key
+            and request.cookies.get(AUTH_COOKIE_NAME) != header_key
+        ):
+            response.set_cookie(
+                AUTH_COOKIE_NAME,
+                header_key,
+                max_age=AUTH_COOKIE_MAX_AGE,
+                httponly=True,
+                secure=request.url.scheme == "https",
+                samesite="lax",
+            )
+        return response
+
+    accepts_html = "text/html" in request.headers.get("accept", "")
+    if request.method == "GET" and accepts_html:
+        # A query-param key was supplied but didn't match → show "invalid" hint.
+        return _login_response(error=request.query_params.get("api_key") is not None)
+    return JSONResponse({"detail": "Auth required"}, status_code=401)
+
+
 # ── Routers ──────────────────────────────────────────────────────────────────
-from routers import generate, images, titler, instagram, video, wordpress, system  # noqa: E402  (after app is created)
+from routers import generate, images, titler, instagram, video, wordpress, system, improv  # noqa: E402  (after app is created)
 
 app.include_router(generate.router)
 app.include_router(images.router)
@@ -84,6 +189,7 @@ app.include_router(instagram.router)
 app.include_router(video.router)
 app.include_router(wordpress.router)
 app.include_router(system.router)
+app.include_router(improv.router)
 
 # ── Static frontends ──────────────────────────────────────────────────────────
 # Shared assets (CSS / JS) must be mounted before tool and root catch-alls
@@ -115,6 +221,10 @@ if _video.exists():
 _articles = Path(__file__).parent / "frontends" / "tools" / "articles"
 if _articles.exists():
     app.mount("/tools/articles", StaticFiles(directory=str(_articles), html=True), name="articles")
+
+_improv = Path(__file__).parent / "frontends" / "tools" / "improv"
+if _improv.exists():
+    app.mount("/tools/improv", StaticFiles(directory=str(_improv), html=True), name="improv")
 
 _dashboard = Path(__file__).parent / "frontends" / "dashboard"
 if _dashboard.exists():

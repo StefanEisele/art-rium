@@ -21,7 +21,7 @@ linking has to be done via the WP admin (one click per post in Polylang's
 translation column) or a future custom mu-plugin endpoint.
 """
 import html
-import json as _json
+import json
 import logging
 import re
 import unicodedata
@@ -324,7 +324,7 @@ def _gallery_block(images: list[Image]) -> str:
         return ""
     image_blocks: list[str] = []
     for img in images:
-        attrs = _json.dumps(
+        attrs = json.dumps(
             {"lightbox": {"enabled": True}, "id": img.wp_media_id, "sizeSlug": "large", "linkDestination": "none"},
             separators=(",", ":"),
         )
@@ -352,7 +352,7 @@ def _singulart_image_block(link: dict, caption: str) -> str:
     title = link.get("title") or ""
     url   = link.get("url") or ""
     thumb = link.get("thumbnail_url") or ""
-    attrs = _json.dumps({"sizeSlug": "large", "linkDestination": "custom"}, separators=(",", ":"))
+    attrs = json.dumps({"sizeSlug": "large", "linkDestination": "custom"}, separators=(",", ":"))
     return (
         f"<!-- wp:image {attrs} -->\n"
         f'<figure class="wp-block-image size-large">'

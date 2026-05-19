@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import traceback
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -137,25 +138,19 @@ async def publish_feed(post_id: uuid.UUID) -> tuple[PublishStatus, str | None]:
 # ── Internal ─────────────────────────────────────────────────────────────────
 
 
+@dataclass(slots=True)
 class _Snapshot:
     """Plain-Python snapshot of post + image filenames, decoupled from any DB session."""
-    __slots__ = (
-        "is_carousel", "caption", "primary_id", "all_ids",
-        "filenames_by_id", "story_delay", "reel_delay", "companion_time",
-        "scheduled_at", "feed_creation_id",
-    )
-
-    def __init__(self, post: InstagramPost, filenames_by_id: dict[uuid.UUID, str]):
-        self.is_carousel    = bool(post.carousel_image_ids)
-        self.caption        = post.caption or ""
-        self.primary_id     = post.image_id
-        self.all_ids        = [post.image_id] + list(post.carousel_image_ids or [])
-        self.filenames_by_id = filenames_by_id
-        self.story_delay    = post.story_delay_minutes
-        self.reel_delay     = post.reel_delay_minutes
-        self.companion_time = post.companion_time
-        self.scheduled_at   = post.scheduled_at
-        self.feed_creation_id = post.feed_creation_id
+    is_carousel:      bool
+    caption:          str
+    primary_id:       uuid.UUID | None
+    all_ids:          list[uuid.UUID]
+    filenames_by_id:  dict[uuid.UUID, str]
+    story_delay:      int | None
+    reel_delay:       int | None
+    companion_time:   str | None
+    scheduled_at:     datetime
+    feed_creation_id: str | None
 
 
 async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
@@ -166,7 +161,18 @@ async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
         all_ids = [post.image_id] + list(post.carousel_image_ids or [])
         img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
         filenames = {img.id: img.filename for img in img_result.scalars().all()}
-        return _Snapshot(post, filenames)
+        return _Snapshot(
+            is_carousel=bool(post.carousel_image_ids),
+            caption=post.caption or "",
+            primary_id=post.image_id,
+            all_ids=all_ids,
+            filenames_by_id=filenames,
+            story_delay=post.story_delay_minutes,
+            reel_delay=post.reel_delay_minutes,
+            companion_time=post.companion_time,
+            scheduled_at=post.scheduled_at,
+            feed_creation_id=post.feed_creation_id,
+        )
 
 
 async def _call_graph_api(

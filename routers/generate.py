@@ -106,15 +106,23 @@ def _verify_share_token(token: str = "") -> None:
         raise HTTPException(status_code=403, detail="Invalid share token")
 
 
+def _find_image_on_disk(safe_name: str) -> Path | None:
+    """Locate an image by its bare filename. Looks in managed storage first,
+    then the raw ComfyUI output directory. Returns None when missing."""
+    for search_dir in (settings.images_dir, settings.comfyui_output_dir):
+        for candidate in search_dir.rglob(safe_name):
+            if candidate.exists():
+                return candidate
+    return None
+
+
 @router.get("/share/image/{filename}", dependencies=[Depends(_verify_share_token)])
 async def get_shared_image(filename: str):
     """Public image endpoint for external services (e.g. Instagram)."""
-    safe_name = Path(filename).name
-    for search_dir in [settings.images_dir, settings.comfyui_output_dir]:
-        for candidate in search_dir.rglob(safe_name):
-            if candidate.exists():
-                return FileResponse(candidate, media_type="image/png")
-    raise HTTPException(status_code=404, detail="Image not found")
+    candidate = _find_image_on_disk(Path(filename).name)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(candidate, media_type="image/png")
 
 
 @router.get("/share/reel/{filename}", dependencies=[Depends(_verify_share_token)])
@@ -177,12 +185,10 @@ async def get_shared_video_loop(filename: str):
 
 @router.get("/api/image/{filename}", dependencies=[Depends(require_auth)])
 async def get_image(filename: str):
-    safe_name = Path(filename).name
-    for search_dir in [settings.images_dir, settings.comfyui_output_dir]:
-        for candidate in search_dir.rglob(safe_name):
-            if candidate.exists():
-                return FileResponse(candidate, media_type="image/png")
-    raise HTTPException(status_code=404, detail="Image not found")
+    candidate = _find_image_on_disk(Path(filename).name)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(candidate, media_type="image/png")
 
 
 @router.get("/api/image/{filename}/thumb", dependencies=[Depends(require_auth)])
@@ -199,12 +205,11 @@ async def get_image_thumb(filename: str, db: AsyncSession = Depends(get_db)):
         if thumb.exists():
             return FileResponse(thumb, media_type="image/jpeg")
 
-    # Fall back: serve full image (same logic as get_image)
-    for search_dir in [settings.images_dir, settings.comfyui_output_dir]:
-        for candidate in search_dir.rglob(safe_name):
-            if candidate.exists():
-                return FileResponse(candidate, media_type="image/png")
-    raise HTTPException(status_code=404, detail="Image not found")
+    # Fall back: serve the full image.
+    candidate = _find_image_on_disk(safe_name)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(candidate, media_type="image/png")
 
 
 @router.post("/api/images/backfill-thumbnails", dependencies=[Depends(require_auth)])

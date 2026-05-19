@@ -364,9 +364,7 @@ async def update_post(
     if invalidates_remote and post.status == "scheduled":
         asyncio.create_task(_remote_schedule(post.id))
 
-    all_ids = _all_image_ids(post)
-    img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-    images = {i.id: i for i in img_result.scalars().all()}
+    images = await _load_images_for_post(post, db)
     return _serialize(post, images)
 
 
@@ -486,10 +484,7 @@ async def _update_outpost_post(
 
     if all(v is None for v in (pi_caption, pi_scheduled_at, pi_reel_publish_at, pi_story_publish_at)):
         # Nothing to send to the Pi — return current state.
-        all_ids = _all_image_ids(post)
-        img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-        images = {i.id: i for i in img_result.scalars().all()}
-        return _serialize(post, images)
+        return _serialize(post, await _load_images_for_post(post, db))
 
     try:
         await outpost_svc.update_on_outpost(
@@ -507,10 +502,7 @@ async def _update_outpost_post(
     post.updated_at = datetime.now(timezone.utc)
     await db.commit()
 
-    all_ids = _all_image_ids(post)
-    img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-    images = {i.id: i for i in img_result.scalars().all()}
-    return _serialize(post, images)
+    return _serialize(post, await _load_images_for_post(post, db))
 
 
 async def _drop_remote_containers(creation_ids: list[str]) -> None:

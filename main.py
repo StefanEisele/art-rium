@@ -192,41 +192,20 @@ app.include_router(system.router)
 app.include_router(improv.router)
 
 # ── Static frontends ──────────────────────────────────────────────────────────
-# Shared assets (CSS / JS) must be mounted before tool and root catch-alls
-_shared = Path(__file__).parent / "frontends" / "shared"
+# Mount order matters: /shared and /tools/* must precede the / catch-all.
+_frontends_dir = Path(__file__).parent / "frontends"
+
+_shared = _frontends_dir / "shared"
 if _shared.exists():
     app.mount("/shared", StaticFiles(directory=str(_shared)), name="shared")
 
-# Tools must be mounted before the root catch-all
-_z_image = Path(__file__).parent / "frontends" / "tools" / "z-image"
-if _z_image.exists():
-    app.mount("/tools/z-image", StaticFiles(directory=str(_z_image), html=True), name="z-image")
+_TOOL_NAMES = ("z-image", "gallery", "titler", "instagram", "video", "articles", "improv")
+for _tool in _TOOL_NAMES:
+    _dir = _frontends_dir / "tools" / _tool
+    if _dir.exists():
+        app.mount(f"/tools/{_tool}", StaticFiles(directory=str(_dir), html=True), name=_tool)
 
-_gallery = Path(__file__).parent / "frontends" / "tools" / "gallery"
-if _gallery.exists():
-    app.mount("/tools/gallery", StaticFiles(directory=str(_gallery), html=True), name="gallery")
-
-_titler = Path(__file__).parent / "frontends" / "tools" / "titler"
-if _titler.exists():
-    app.mount("/tools/titler", StaticFiles(directory=str(_titler), html=True), name="titler")
-
-_instagram = Path(__file__).parent / "frontends" / "tools" / "instagram"
-if _instagram.exists():
-    app.mount("/tools/instagram", StaticFiles(directory=str(_instagram), html=True), name="instagram")
-
-_video = Path(__file__).parent / "frontends" / "tools" / "video"
-if _video.exists():
-    app.mount("/tools/video", StaticFiles(directory=str(_video), html=True), name="video")
-
-_articles = Path(__file__).parent / "frontends" / "tools" / "articles"
-if _articles.exists():
-    app.mount("/tools/articles", StaticFiles(directory=str(_articles), html=True), name="articles")
-
-_improv = Path(__file__).parent / "frontends" / "tools" / "improv"
-if _improv.exists():
-    app.mount("/tools/improv", StaticFiles(directory=str(_improv), html=True), name="improv")
-
-_dashboard = Path(__file__).parent / "frontends" / "dashboard"
+_dashboard = _frontends_dir / "dashboard"
 if _dashboard.exists():
     app.mount("/", StaticFiles(directory=str(_dashboard), html=True), name="dashboard")
 

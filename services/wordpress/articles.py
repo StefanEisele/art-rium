@@ -32,7 +32,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.imaging import prepare_jpg_for_web
+from core.imaging import prepare_for_vlm
 from core.models import Article, Image
 from services.ollama.client import write_article, write_rich_article
 from services.wordpress.client import request_json
@@ -64,6 +64,99 @@ def _slugify(text: str, lang: str) -> str | None:
     if not slug:
         return None
     return f"{slug}-{lang}"
+
+
+# ── Shared pre-/post-processing for both article writers ────────────────────
+
+
+async def _encode_for_vlm(images: list[Image]) -> list[bytes]:
+    """Re-encode each image's source to a VLM-sized JPG (parallel to *images*).
+    Raises FileNotFoundError if any source is missing on disk."""
+    jpgs: list[bytes] = []
+    for img in images:
+        src = settings.storage_dir / img.filepath
+        if not src.exists():
+            raise FileNotFoundError(f"Source image missing on disk: {src}")
+        vlm_jpg, _ = await prepare_for_vlm(src)
+        jpgs.append(vlm_jpg)
+    return jpgs
+
+
+def _meta_hints_for(
+    images: list[Image],
+) -> tuple[list[str | None], list[str | None], list[str | None]]:
+    """Pull (title_hint, alt_text, notes) lists from images, parallel to *images*."""
+    return (
+        [img.title or img.wp_seo_title for img in images],
+        [img.wp_alt_text for img in images],
+        [img.notes for img in images],
+    )
+
+
+async def _publish_translation(
+    db: AsyncSession,
+    *,
+    lang: str,
+    block: dict,
+    body_html: str,
+    body_md_for_db: str,
+    featured_media: int,
+    translation_group_id: uuid.UUID,
+    image_ids: list[uuid.UUID],
+    publish: bool,
+    yoast_meta: dict[str, str] | None = None,
+    extra_result_fields: dict[str, Any] | None = None,
+) -> dict:
+    """POST one language to WP + queue the Article row + return the result dict.
+
+    The caller owns db.commit() — we only db.add() so the whole translation
+    set commits in a single tx.
+    """
+    slug = _slugify(block["title"], lang)
+    target_status = "publish" if publish else "draft"
+
+    post_payload: dict[str, Any] = {
+        "title":          block["title"],
+        "content":        body_html,
+        "excerpt":        block["excerpt"],
+        "status":         target_status,
+        "featured_media": featured_media,
+    }
+    if slug:
+        post_payload["slug"] = slug
+    if yoast_meta:
+        post_payload["meta"] = yoast_meta
+
+    post = await request_json("POST", "/wp/v2/posts", json=post_payload, params={"lang": lang})
+    wp_post_id = post["id"]
+    wp_link    = post.get("link", "")
+
+    article = Article(
+        title=block["title"],
+        body_md=body_md_for_db,
+        excerpt=block["excerpt"],
+        tags=block["tags"] or None,
+        language=lang,
+        translation_group_id=translation_group_id,
+        wp_post_id=wp_post_id,
+        wp_link=wp_link,
+        status="published" if publish else "draft",
+        image_ids=image_ids,
+    )
+    db.add(article)
+
+    result: dict[str, Any] = {
+        "language":   lang,
+        "wp_post_id": wp_post_id,
+        "wp_link":    wp_link,
+        "status":     article.status,
+        "title":      block["title"],
+        "excerpt":    block["excerpt"],
+        "tags":       block["tags"],
+    }
+    if extra_result_fields:
+        result.update(extra_result_fields)
+    return result
 
 
 async def generate_articles_for_images(
@@ -106,15 +199,8 @@ async def generate_articles_for_images(
     series_label = f"series of {len(images)}" if len(images) > 1 else "image"
     logger.info("Article gen %s — re-encoding %d image(s) for VLM", series_label, len(images))
 
-    jpgs: list[bytes] = []
-    for img in images:
-        src = settings.storage_dir / img.filepath
-        if not src.exists():
-            raise FileNotFoundError(f"Source image missing on disk: {src}")
-        vlm_jpg, _ = await prepare_jpg_for_web(
-            src, max_edge=settings.vlm_analysis_max_edge, quality=80
-        )
-        jpgs.append(vlm_jpg)
+    jpgs = await _encode_for_vlm(images)
+    title_hints, alt_texts, notes_list = _meta_hints_for(images)
 
     logger.info(
         "Article gen %s — calling %s (%d image(s), %dKB total, edge %d)",
@@ -123,9 +209,9 @@ async def generate_articles_for_images(
     )
     bodies = await write_article(
         jpgs,
-        title_hints=[img.title or img.wp_seo_title for img in images],
-        alt_texts=[img.wp_alt_text for img in images],
-        notes_list=[img.notes for img in images],
+        title_hints=title_hints,
+        alt_texts=alt_texts,
+        notes_list=notes_list,
     )
 
     translation_group_id = uuid.uuid4()
@@ -135,55 +221,22 @@ async def generate_articles_for_images(
 
     for lang in _LANGS:
         block = bodies[lang]
-        slug = _slugify(block["title"], lang)
-        body_html = _md_to_html(block["body_md"])
-
-        post_payload = {
-            "title":          block["title"],
-            "content":        body_html,
-            "excerpt":        block["excerpt"],
-            "status":         target_status,
-            "featured_media": featured_media,
-        }
-        if slug:
-            post_payload["slug"] = slug
-
         logger.info(
             "Article gen %s — POST /wp/v2/posts?lang=%s (status=%s, slug=%s)",
-            series_label, lang, target_status, slug,
+            series_label, lang, target_status, _slugify(block["title"], lang),
         )
-        post = await request_json(
-            "POST",
-            "/wp/v2/posts",
-            json=post_payload,
-            params={"lang": lang},
-        )
-        wp_post_id = post["id"]
-        wp_link    = post.get("link", "")
-
-        article = Article(
-            title=block["title"],
-            body_md=block["body_md"],
-            excerpt=block["excerpt"],
-            tags=block["tags"] or None,
-            language=lang,
+        result = await _publish_translation(
+            db,
+            lang=lang,
+            block=block,
+            body_html=_md_to_html(block["body_md"]),
+            body_md_for_db=block["body_md"],
+            featured_media=featured_media,
             translation_group_id=translation_group_id,
-            wp_post_id=wp_post_id,
-            wp_link=wp_link,
-            status="published" if publish else "draft",
             image_ids=image_ids,
+            publish=publish,
         )
-        db.add(article)
-
-        results.append({
-            "language":   lang,
-            "wp_post_id": wp_post_id,
-            "wp_link":    wp_link,
-            "status":     article.status,
-            "title":      block["title"],
-            "excerpt":    block["excerpt"],
-            "tags":       block["tags"],
-        })
+        results.append(result)
 
     await db.commit()
     logger.info(
@@ -472,15 +525,8 @@ async def generate_rich_articles_for_series(
         len(singulart_links or []),
     )
 
-    jpgs: list[bytes] = []
-    for img in images:
-        src = settings.storage_dir / img.filepath
-        if not src.exists():
-            raise FileNotFoundError(f"Source image missing on disk: {src}")
-        vlm_jpg, _ = await prepare_jpg_for_web(
-            src, max_edge=settings.vlm_analysis_max_edge, quality=80
-        )
-        jpgs.append(vlm_jpg)
+    jpgs = await _encode_for_vlm(images)
+    title_hints, alt_texts, notes_list = _meta_hints_for(images)
 
     logger.info(
         "Rich article gen — calling %s (%d image(s), %dKB total)",
@@ -491,9 +537,9 @@ async def generate_rich_articles_for_series(
         series_name=series_name,
         parent_series=parent_series,
         has_singulart=bool(singulart_links),
-        title_hints=[img.title or img.wp_seo_title for img in images],
-        alt_texts=[img.wp_alt_text for img in images],
-        notes_list=[img.notes for img in images],
+        title_hints=title_hints,
+        alt_texts=alt_texts,
+        notes_list=notes_list,
         user_notes=user_notes,
         artist_mode=artist_mode,
     )
@@ -510,61 +556,35 @@ async def generate_rich_articles_for_series(
     for lang in selected_langs:
         block = bodies[lang]
         body_html = _render_rich_post(block, lang, images, singulart_links, parent_series)
-        slug = _slugify(block["title"], lang)
-
-        post_payload: dict[str, Any] = {
-            "title":          block["title"],
-            "content":        body_html,
-            "excerpt":        block["excerpt"],
-            "status":         target_status,
-            "featured_media": featured_media,
-        }
-        if slug:
-            post_payload["slug"] = slug
 
         yoast_meta: dict[str, str] = {}
         if block.get("meta_description"):
             yoast_meta["_yoast_wpseo_metadesc"] = block["meta_description"]
         if block.get("focus_keyphrase"):
             yoast_meta["_yoast_wpseo_focuskw"] = block["focus_keyphrase"]
-        if yoast_meta:
-            post_payload["meta"] = yoast_meta
 
         logger.info(
             "Rich article — POST /wp/v2/posts?lang=%s (status=%s, slug=%s, %d blocks, yoast_meta=%s)",
-            lang, target_status, slug, body_html.count("<!-- wp:"),
+            lang, target_status, _slugify(block["title"], lang), body_html.count("<!-- wp:"),
             ",".join(sorted(k.replace("_yoast_wpseo_", "") for k in yoast_meta)) or "(none)",
         )
-        post = await request_json("POST", "/wp/v2/posts", json=post_payload, params={"lang": lang})
-        wp_post_id = post["id"]
-        wp_link    = post.get("link", "")
-
-        body_md = _flatten_rich_body_for_search(block, parent_series)
-        article = Article(
-            title=block["title"],
-            body_md=body_md,
-            excerpt=block["excerpt"],
-            tags=block["tags"] or None,
-            language=lang,
+        result = await _publish_translation(
+            db,
+            lang=lang,
+            block=block,
+            body_html=body_html,
+            body_md_for_db=_flatten_rich_body_for_search(block, parent_series),
+            featured_media=featured_media,
             translation_group_id=translation_group_id,
-            wp_post_id=wp_post_id,
-            wp_link=wp_link,
-            status="published" if publish else "draft",
             image_ids=image_ids,
+            publish=publish,
+            yoast_meta=yoast_meta or None,
+            extra_result_fields={
+                "meta_description": block.get("meta_description") or "",
+                "focus_keyphrase":  block.get("focus_keyphrase") or "",
+            },
         )
-        db.add(article)
-
-        results.append({
-            "language":         lang,
-            "wp_post_id":       wp_post_id,
-            "wp_link":          wp_link,
-            "status":           article.status,
-            "title":            block["title"],
-            "excerpt":          block["excerpt"],
-            "meta_description": block.get("meta_description") or "",
-            "focus_keyphrase":  block.get("focus_keyphrase") or "",
-            "tags":             block["tags"],
-        })
+        results.append(result)
 
     await db.commit()
     logger.info(

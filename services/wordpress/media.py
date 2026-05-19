@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.imaging import prepare_jpg_for_web
+from core.imaging import prepare_for_upload, prepare_for_vlm
 from core.models import Image
 from services.ollama.client import analyze_image
 from services.wordpress.client import request_json, upload_binary
@@ -86,8 +86,8 @@ async def upload_image_to_wp(image: Image, db: AsyncSession) -> dict:
 
         # Two encodings: full-quality for WP upload, downscaled for the VLM.
         logger.info("WP upload %s — re-encoding %s", image.id, src.name)
-        jpg_bytes,    jpg_filename = await prepare_jpg_for_web(src, max_edge=1080, quality=88)
-        vlm_jpg_bytes, _           = await prepare_jpg_for_web(src, max_edge=settings.vlm_analysis_max_edge, quality=80)
+        jpg_bytes,    jpg_filename = await prepare_for_upload(src)
+        vlm_jpg_bytes, _           = await prepare_for_vlm(src)
 
         logger.info(
             "WP upload %s — analysing with %s (vlm payload %d KB, edge %d)",

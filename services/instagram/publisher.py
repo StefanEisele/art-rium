@@ -36,8 +36,9 @@ from core.db import AsyncSessionLocal
 from core.models import Image, InstagramPost
 from core.scheduling import companion_at
 from services.instagram.graph import (
-    check_response,
+    create_media_container,
     missing_config,
+    publish_container,
     share_url,
     wait_container_ready,
 )
@@ -124,16 +125,7 @@ async def publish_feed(post_id: uuid.UUID) -> tuple[PublishStatus, str | None]:
             async with httpx.AsyncClient(timeout=30) as client:
                 logger.info("publish_feed %s — waiting for container %s…", post_id, creation_id)
                 await wait_container_ready(client, creation_id)
-                r = await client.post(
-                    f"{settings.instagram_graph_api_base}/{settings.instagram_user_id}/media_publish",
-                    data={
-                        "creation_id":  creation_id,
-                        "access_token": settings.instagram_access_token,
-                    },
-                )
-                body = r.json()
-                check_response(body, "publish container")
-                media_id = body["id"]
+                media_id = await publish_container(client, creation_id, "publish container")
         except Exception as exc:
             api_error = f"{type(exc).__name__}: {exc}"
             logger.error("publish_feed %s publish step failed: %s\n%s", post_id, exc, traceback.format_exc())
@@ -190,22 +182,12 @@ async def _call_graph_api(
     that field set and the caller MUST NOT call /media_publish — Instagram
     schedules the publish itself.
     """
-    graph = settings.instagram_graph_api_base
-    uid   = settings.instagram_user_id
-    token = settings.instagram_access_token
-
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            container_id = (
-                await _create_carousel_container(
-                    client, graph, uid, token, post_id, snap,
-                    scheduled_publish_time=scheduled_publish_time,
-                )
-                if snap.is_carousel
-                else await _create_single_container(
-                    client, graph, uid, token, snap,
-                    scheduled_publish_time=scheduled_publish_time,
-                )
+            builder = _create_carousel_container if snap.is_carousel else _create_single_container
+            container_id = await builder(
+                client, post_id, snap,
+                scheduled_publish_time=scheduled_publish_time,
             )
             return container_id, None
     except Exception as exc:
@@ -215,28 +197,20 @@ async def _call_graph_api(
 
 
 async def _create_single_container(
-    client: httpx.AsyncClient, graph: str, uid: str, token: str, snap: _Snapshot,
+    client: httpx.AsyncClient, post_id: uuid.UUID, snap: _Snapshot,
     *, scheduled_publish_time: int | None = None,
 ) -> str:
     fname = snap.filenames_by_id.get(snap.primary_id)
     if not fname:
         raise ValueError(f"Primary image {snap.primary_id} not found in DB")
-    data: dict[str, str] = {
-        "image_url":    share_url(fname),
-        "caption":      snap.caption,
-        "access_token": token,
-    }
+    data: dict[str, str] = {"image_url": share_url(fname), "caption": snap.caption}
     if scheduled_publish_time is not None:
         data["scheduled_publish_time"] = str(scheduled_publish_time)
-    r = await client.post(f"{graph}/{uid}/media", data=data)
-    body = r.json()
-    check_response(body, "create single container")
-    return body["id"]
+    return await create_media_container(client, data, "create single container")
 
 
 async def _create_carousel_container(
-    client: httpx.AsyncClient, graph: str, uid: str, token: str,
-    post_id: uuid.UUID, snap: _Snapshot,
+    client: httpx.AsyncClient, post_id: uuid.UUID, snap: _Snapshot,
     *, scheduled_publish_time: int | None = None,
 ) -> str:
     child_ids: list[str] = []
@@ -244,30 +218,23 @@ async def _create_carousel_container(
         fname = snap.filenames_by_id.get(img_id)
         if not fname:
             raise ValueError(f"Carousel image {img_id} not found in DB")
-        r = await client.post(f"{graph}/{uid}/media", data={
-            "image_url":        share_url(fname),
-            "is_carousel_item": "true",
-            "access_token":     token,
-        })
-        body = r.json()
-        check_response(body, f"create carousel item {fname}")
-        item_id = body["id"]
+        item_id = await create_media_container(
+            client,
+            {"image_url": share_url(fname), "is_carousel_item": "true"},
+            f"create carousel item {fname}",
+        )
         child_ids.append(item_id)
         logger.info("publish_feed %s — waiting for item %s (%s)…", post_id, item_id, fname)
         await wait_container_ready(client, item_id)
 
     data: dict[str, str] = {
-        "media_type":   "CAROUSEL",
-        "children":     ",".join(child_ids),
-        "caption":      snap.caption,
-        "access_token": token,
+        "media_type": "CAROUSEL",
+        "children":   ",".join(child_ids),
+        "caption":    snap.caption,
     }
     if scheduled_publish_time is not None:
         data["scheduled_publish_time"] = str(scheduled_publish_time)
-    r2 = await client.post(f"{graph}/{uid}/media", data=data)
-    body2 = r2.json()
-    check_response(body2, "create carousel container")
-    return body2["id"]
+    return await create_media_container(client, data, "create carousel container")
 
 
 async def _finalize_post(

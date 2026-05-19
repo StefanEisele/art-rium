@@ -30,7 +30,7 @@ from core.scheduling import companion_at
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
     REEL_POLL_TIMEOUT,
-    check_response,
+    create_media_container,
     missing_config,
     share_url,
     wait_container_ready,
@@ -90,21 +90,17 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
     creation_id, api_error = None, None
     try:
         async with httpx.AsyncClient(timeout=60) as client:
-            video_url = share_url(video_filename, kind=kind)
-            r = await client.post(
-                f"{settings.instagram_graph_api_base}/{settings.instagram_user_id}/media",
-                data={
+            creation_id = await create_media_container(
+                client,
+                {
                     "media_type":             "REELS",
-                    "video_url":              video_url,
+                    "video_url":              share_url(video_filename, kind=kind),
                     "caption":                caption,
                     "share_to_feed":          "true",
                     "scheduled_publish_time": str(int(publish_at.timestamp())),
-                    "access_token":           settings.instagram_access_token,
                 },
+                "reel container",
             )
-            body = r.json()
-            check_response(body, "reel container")
-            creation_id = body["id"]
             logger.info("schedule_reel %s — container %s, polling for FINISHED…", post_id, creation_id)
 
             await wait_container_ready(

@@ -24,8 +24,9 @@ from core.models import Image, InstagramPost, Video
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
     REEL_POLL_TIMEOUT,
-    check_response,
+    create_media_container,
     missing_config,
+    publish_container,
     share_url,
     wait_container_ready,
 )
@@ -41,10 +42,6 @@ async def publish_stories(post_id: uuid.UUID) -> None:
     if missing:
         logger.warning("Stories skipped for %s — missing config: %s", post_id, ", ".join(missing))
         return
-
-    graph = settings.instagram_graph_api_base
-    uid   = settings.instagram_user_id
-    token = settings.instagram_access_token
 
     async with AsyncSessionLocal() as db:
         post = await db.get(InstagramPost, post_id)
@@ -63,23 +60,16 @@ async def publish_stories(post_id: uuid.UUID) -> None:
                 if not img:
                     logger.warning("Story: image %s not found, skipping", img_id)
                     continue
-                r = await client.post(f"{graph}/{uid}/media", data={
-                    "image_url":    share_url(img.filename),
-                    "media_type":   "STORIES",
-                    "access_token": token,
-                })
-                body = r.json()
-                check_response(body, f"story container for {img.filename}")
-                container_id = body["id"]
-
-                r2 = await client.post(f"{graph}/{uid}/media_publish", data={
-                    "creation_id":  container_id,
-                    "access_token": token,
-                })
-                body2 = r2.json()
-                check_response(body2, f"story publish for {img.filename}")
-                media_ids.append(body2["id"])
-                logger.info("Story published: %s (%s)", body2["id"], img.filename)
+                container_id = await create_media_container(
+                    client,
+                    {"image_url": share_url(img.filename), "media_type": "STORIES"},
+                    f"story container for {img.filename}",
+                )
+                story_media_id = await publish_container(
+                    client, container_id, f"story publish for {img.filename}",
+                )
+                media_ids.append(story_media_id)
+                logger.info("Story published: %s (%s)", story_media_id, img.filename)
                 await asyncio.sleep(3)  # avoid "Media ID not available" on rapid successive stories
 
         status = "posted"
@@ -103,10 +93,6 @@ async def publish_reel(post_id: uuid.UUID) -> None:
     if missing:
         logger.warning("Reel skipped for %s — missing config: %s", post_id, ", ".join(missing))
         return
-
-    graph = settings.instagram_graph_api_base
-    uid   = settings.instagram_user_id
-    token = settings.instagram_access_token
 
     async with AsyncSessionLocal() as db:
         post = await db.get(InstagramPost, post_id)
@@ -151,18 +137,17 @@ async def publish_reel(post_id: uuid.UUID) -> None:
 
         # ── 3. Create Reel container ──────────────────────────────────────────
         kind = "video" if not video_is_temp else "reel"
-        video_url = share_url(video_path.name, kind=kind)
         async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(f"{graph}/{uid}/media", data={
-                "media_type":    "REELS",
-                "video_url":     video_url,
-                "caption":       caption,
-                "share_to_feed": "true",
-                "access_token":  token,
-            })
-            body = r.json()
-            check_response(body, "reel container")
-            container_id = body["id"]
+            container_id = await create_media_container(
+                client,
+                {
+                    "media_type":    "REELS",
+                    "video_url":     share_url(video_path.name, kind=kind),
+                    "caption":       caption,
+                    "share_to_feed": "true",
+                },
+                "reel container",
+            )
             logger.info("Reel container: %s", container_id)
 
             # ── 4. Poll until FINISHED ────────────────────────────────────────
@@ -173,13 +158,7 @@ async def publish_reel(post_id: uuid.UUID) -> None:
             )
 
             # ── 5. Publish ────────────────────────────────────────────────────
-            r2 = await client.post(f"{graph}/{uid}/media_publish", data={
-                "creation_id":  container_id,
-                "access_token": token,
-            })
-            body2 = r2.json()
-            check_response(body2, "reel publish")
-            reel_media_id = body2["id"]
+            reel_media_id = await publish_container(client, container_id, "reel publish")
             logger.info("Reel published: %s", reel_media_id)
 
         status = "posted"

@@ -4,20 +4,23 @@ Ollama client — local LLM/VLM calls for image analysis and article writing.
 Used by:
   - services/wordpress/media.py     (alt-text + SEO metadata at upload time)
   - services/wordpress/articles.py  (multilingual blog post generation)
+  - routers/titler.py               (title brainstorming)
 
 Models:
-  OLLAMA_VLM_MODEL — vision; per-image metadata (default qwen2.5vl:latest)
-  OLLAMA_LLM_MODEL — vision; multilingual article writer  (default qwen3.5:latest)
+  OLLAMA_VLM_MODEL    — vision; per-image metadata (default qwen2.5vl:latest)
+  OLLAMA_LLM_MODEL    — vision; multilingual article writer (default qwen3.6:27b)
+  OLLAMA_TITLER_MODEL — vision; lightweight title brainstorming
 
-Both models must be vision-capable; the article writer needs to see the image
-to honour the voice guide's "concrete first" rule.
+Both LLM/VLM models for analyze/article must be vision-capable; the article
+writer needs to see the image to honour the voice guide's "concrete first" rule.
 """
 import base64
 import json
 import logging
 import re
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -26,26 +29,142 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
-_VOICE_GUIDE_PATH = _PROMPTS_DIR / "voice.md"
-_VOICE_RICH_PATH  = _PROMPTS_DIR / "voice-rich.md"
-_voice_guide_cache:      str | None = None
-_voice_rich_cache:       str | None = None
 
 
-def _voice_guide() -> str:
-    """Lazy-load prompts/voice.md once per process."""
-    global _voice_guide_cache
-    if _voice_guide_cache is None:
-        _voice_guide_cache = _VOICE_GUIDE_PATH.read_text(encoding="utf-8")
-    return _voice_guide_cache
+@lru_cache(maxsize=4)
+def _read_prompt(filename: str) -> str:
+    """Lazy-load a file from prompts/ once per process."""
+    return (_PROMPTS_DIR / filename).read_text(encoding="utf-8")
 
 
-def _voice_rich() -> str:
-    """Lazy-load prompts/voice-rich.md once per process."""
-    global _voice_rich_cache
-    if _voice_rich_cache is None:
-        _voice_rich_cache = _VOICE_RICH_PATH.read_text(encoding="utf-8")
-    return _voice_rich_cache
+# ── Generic Ollama /api/chat helper ──────────────────────────────────────────
+
+
+def _b64_jpgs(jpgs: list[bytes]) -> list[str]:
+    return [base64.b64encode(j).decode("ascii") for j in jpgs]
+
+
+def _strip_json_fences(content: str) -> str:
+    """qwen3-family models occasionally wrap JSON in ```json fences despite
+    the no-fences instruction. Idempotent for fence-free content."""
+    s = content.strip()
+    if s.startswith("```"):
+        first_nl = s.find("\n")
+        if first_nl != -1:
+            s = s[first_nl + 1:]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3].rstrip()
+    return s
+
+
+async def _chat_json(
+    *,
+    model: str,
+    user_text: str,
+    system: str | None = None,
+    jpgs: list[bytes] | None = None,
+    options: dict[str, Any] | None = None,
+    keep_alive: str | None = None,
+    think: bool | None = None,
+    timeout: float,
+    label: str,
+    salvage: Callable[[str], str] | None = None,
+    max_attempts: int = 1,
+) -> dict[str, Any]:
+    """
+    POST to Ollama /api/chat with format=json and return the parsed message.
+
+    On JSONDecodeError, apply `salvage(content) -> repaired` (when given) and
+    retry parsing. Up to `max_attempts` fresh model calls are made when content
+    is empty or unparseable. The fence-stripper is always applied as a pre-step.
+
+    Raises:
+      RuntimeError on Ollama-side error, empty content past last attempt, or
+        non-parseable JSON past last attempt.
+      httpx.HTTPError on network/timeout failures (propagated).
+    """
+    messages: list[dict[str, Any]] = []
+    if system is not None:
+        messages.append({"role": "system", "content": system})
+    user_msg: dict[str, Any] = {"role": "user", "content": user_text}
+    if jpgs:
+        user_msg["images"] = _b64_jpgs(jpgs)
+    messages.append(user_msg)
+
+    payload: dict[str, Any] = {
+        "model":    model,
+        "messages": messages,
+        "format":   "json",
+        "stream":   False,
+    }
+    if options is not None:
+        payload["options"] = options
+    if keep_alive is not None:
+        payload["keep_alive"] = keep_alive
+    if think is not None:
+        payload["think"] = think
+
+    last_exc: json.JSONDecodeError | None = None
+    last_content = ""
+
+    for attempt in range(1, max_attempts + 1):
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
+            r.raise_for_status()
+            data = r.json()
+
+        if "error" in data:
+            raise RuntimeError(f"{label}: Ollama error: {data['error']}")
+
+        content = data.get("message", {}).get("content", "") or ""
+        if not content.strip():
+            logger.warning("%s: attempt %d returned empty content", label, attempt)
+            if attempt < max_attempts:
+                continue
+            raise RuntimeError(f"{label}: Ollama returned empty content")
+        last_content = content
+
+        stripped = _strip_json_fences(content)
+        try:
+            parsed = json.loads(stripped)
+            if attempt > 1:
+                logger.info("%s: attempt %d produced valid JSON.", label, attempt)
+            return parsed
+        except json.JSONDecodeError as exc:
+            if salvage is not None:
+                salvaged = salvage(stripped)
+                if salvaged != stripped:
+                    try:
+                        parsed = json.loads(salvaged)
+                        logger.warning(
+                            "%s: JSON parse failed but salvage succeeded (orig err: %s)",
+                            label, exc,
+                        )
+                        return parsed
+                    except json.JSONDecodeError as exc2:
+                        logger.warning(
+                            "%s: salvage made progress but did not parse (orig=%s, salvaged=%s)",
+                            label, exc, exc2,
+                        )
+            last_exc = exc
+            if attempt < max_attempts:
+                logger.warning(
+                    "%s: attempt %d failed JSON parse (%s); retrying (%d/%d).",
+                    label, attempt, exc, attempt + 1, max_attempts,
+                )
+
+    logger.error(
+        "%s: returned non-JSON after %d attempt(s) — last err: %s — content head: %s",
+        label, max_attempts, last_exc, last_content[:500],
+    )
+    snippet = (last_content[:300] + "...") if len(last_content) > 300 else (last_content or "(empty)")
+    raise RuntimeError(
+        f"{label}: Ollama returned non-JSON after {max_attempts} attempt(s) "
+        f"(parse err: {last_exc}) — start: {snippet!r}"
+    ) from last_exc
+
+
+# ── Per-image metadata (alt-text + SEO) ──────────────────────────────────────
 
 
 _SYSTEM_PROMPT = """You are an art-blog image analyst. Analyze the artwork image and return STRICT JSON with exactly four fields:
@@ -77,42 +196,76 @@ async def analyze_image(
         f"Notes: {notes or '(none)'}\n\n"
         f"Language for output: {language}"
     )
-    payload: dict[str, Any] = {
-        "model": settings.ollama_vlm_model,
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": user_text,
-                "images": [base64.b64encode(jpg_bytes).decode("ascii")],
-            },
-        ],
-        "format": "json",
-        "stream": False,
-        "options": {"temperature": 0.4},
-    }
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
-        r.raise_for_status()
-        data = r.json()
-
-    if "error" in data:
-        raise RuntimeError(f"Ollama error: {data['error']}")
-
-    content = data.get("message", {}).get("content", "")
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        logger.error("VLM returned non-JSON content: %s", content[:500])
-        raise RuntimeError(f"VLM returned non-JSON content: {exc}") from exc
-
+    parsed = await _chat_json(
+        model=settings.ollama_vlm_model,
+        system=_SYSTEM_PROMPT,
+        user_text=user_text,
+        jpgs=[jpg_bytes],
+        options={"temperature": 0.4},
+        timeout=timeout,
+        label="analyze_image",
+    )
     return {
         "seo_title":       (parsed.get("seo_title") or "").strip().rstrip(".").strip()[:60],
         "alt_text":        (parsed.get("alt_text") or "").strip()[:125],
         "seo_description": (parsed.get("seo_description") or "").strip()[:155],
         "caption":         (parsed.get("caption") or "").strip()[:300],
     }
+
+
+# ── Per-image metadata block — shared by both article writers ────────────────
+
+
+def _normalize_meta_lists(
+    n: int,
+    title_hints: list[str | None] | None,
+    alt_texts:   list[str | None] | None,
+    notes_list:  list[str | None] | None,
+) -> tuple[list, list, list]:
+    th = title_hints if title_hints is not None else [None] * n
+    at = alt_texts   if alt_texts   is not None else [None] * n
+    nl = notes_list  if notes_list  is not None else [None] * n
+    if not (len(th) == len(at) == len(nl) == n):
+        raise ValueError("metadata lists must be parallel to jpgs")
+    return th, at, nl
+
+
+def _format_image_meta_block(
+    title_hints: list[str | None],
+    alt_texts:   list[str | None],
+    notes_list:  list[str | None],
+    *,
+    always_per_image_header: bool,
+) -> list[str]:
+    """Render the 'Image metadata' block consumed by both article prompts.
+
+    When *always_per_image_header* is False (single-image legacy article path),
+    a single-image input renders without an 'Image 1:' header — matches the
+    pre-refactor user_text exactly. Multi-image always shows headers.
+    """
+    n = len(title_hints)
+    parts: list[str] = []
+    use_header = always_per_image_header or n > 1
+    indent = "    " if use_header else "  "
+    for i, (t, a, no) in enumerate(zip(title_hints, alt_texts, notes_list), 1):
+        if use_header:
+            parts.append(f"  Image {i}:")
+        any_meta = False
+        if t:
+            parts.append(f"{indent}title hint: {t}")
+            any_meta = True
+        if a:
+            parts.append(f"{indent}alt text:   {a}")
+            any_meta = True
+        if no:
+            parts.append(f"{indent}notes:      {no}")
+            any_meta = True
+        if not any_meta:
+            parts.append(f"{indent}(none)")
+    return parts
+
+
+# ── Voice-aligned single/series article (legacy path) ────────────────────────
 
 
 _ARTICLE_TASK = """You are writing a single blog post about the artwork shown in the image, in three sibling languages: German (de), English (en), and 简体中文 (zh). Generate all three in one pass so the voice stays aligned — same structure, same key images observed in the artwork, same mood, idiomatic in each language (NEVER word-for-word translation).
@@ -208,13 +361,9 @@ async def write_article(
         raise ValueError("write_article requires at least one image")
 
     n = len(jpgs)
-    title_hints = title_hints if title_hints is not None else [None] * n
-    alt_texts   = alt_texts   if alt_texts   is not None else [None] * n
-    notes_list  = notes_list  if notes_list  is not None else [None] * n
-    if not (len(title_hints) == len(alt_texts) == len(notes_list) == n):
-        raise ValueError("metadata lists must be parallel to jpgs")
-
-    system_prompt = _voice_guide() + "\n\n---\n\n" + _ARTICLE_TASK
+    title_hints, alt_texts, notes_list = _normalize_meta_lists(
+        n, title_hints, alt_texts, notes_list,
+    )
 
     parts: list[str] = []
     if n > 1:
@@ -228,60 +377,26 @@ async def write_article(
         )
         parts.append("")
     parts.append("Image metadata (use as context, do not quote verbatim):")
-    for i, (t, a, no) in enumerate(zip(title_hints, alt_texts, notes_list), 1):
-        header = f"  Image {i}:" if n > 1 else None
-        indent = "    " if n > 1 else "  "
-        if header:
-            parts.append(header)
-        any_meta = False
-        if t:
-            parts.append(f"{indent}title hint: {t}")
-            any_meta = True
-        if a:
-            parts.append(f"{indent}alt text:   {a}")
-            any_meta = True
-        if no:
-            parts.append(f"{indent}notes:      {no}")
-            any_meta = True
-        if not any_meta:
-            parts.append(f"{indent}(none)")
+    parts.extend(_format_image_meta_block(
+        title_hints, alt_texts, notes_list, always_per_image_header=False,
+    ))
     parts.append("\nWrite the article now. JSON only.")
     user_text = "\n".join(parts)
-
-    payload: dict[str, Any] = {
-        "model": settings.ollama_llm_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": user_text,
-                "images": [base64.b64encode(j).decode("ascii") for j in jpgs],
-            },
-        ],
-        "format": "json",
-        "stream": False,
-        "think": False,                # thinking + format:json hangs on Qwen3-family models
-        "options": {"temperature": 0.7, "num_ctx": 8192, "num_predict": 4096},
-    }
 
     logger.info(
         "Article generation: model=%s, %d image(s), total=%dKB",
         settings.ollama_llm_model, n, sum(len(j) for j in jpgs) // 1024,
     )
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
-        r.raise_for_status()
-        data = r.json()
-
-    if "error" in data:
-        raise RuntimeError(f"Ollama error: {data['error']}")
-
-    content = data.get("message", {}).get("content", "")
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        logger.error("Article LLM returned non-JSON content: %s", content[:500])
-        raise RuntimeError(f"Article LLM returned non-JSON content: {exc}") from exc
+    parsed = await _chat_json(
+        model=settings.ollama_llm_model,
+        system=_read_prompt("voice.md") + "\n\n---\n\n" + _ARTICLE_TASK,
+        user_text=user_text,
+        jpgs=jpgs,
+        options={"temperature": 0.7, "num_ctx": 8192, "num_predict": 4096},
+        think=False,                # thinking + format:json hangs on Qwen3-family models
+        timeout=timeout,
+        label="write_article",
+    )
 
     out: dict[str, dict[str, Any]] = {}
     for lang in ("de", "en", "zh"):
@@ -302,9 +417,7 @@ async def write_article(
     return out
 
 
-# ───────────────────────────────────────────────────────────────────────────
-# Rich-article writer — SEO-friendly multi-section series articles
-# ───────────────────────────────────────────────────────────────────────────
+# ── Rich-article writer — SEO-friendly multi-section series articles ─────────
 
 
 def _rich_article_task(
@@ -489,14 +602,12 @@ async def write_rich_article(
         raise ValueError("parent_series must have both 'name' and 'url' keys")
 
     n = len(jpgs)
-    title_hints = title_hints if title_hints is not None else [None] * n
-    alt_texts   = alt_texts   if alt_texts   is not None else [None] * n
-    notes_list  = notes_list  if notes_list  is not None else [None] * n
-    if not (len(title_hints) == len(alt_texts) == len(notes_list) == n):
-        raise ValueError("metadata lists must be parallel to jpgs")
+    title_hints, alt_texts, notes_list = _normalize_meta_lists(
+        n, title_hints, alt_texts, notes_list,
+    )
 
     task_spec = _rich_article_task(n, series_name, parent_series, has_singulart, artist_mode)
-    system_prompt = _voice_rich() + "\n\n---\n\n" + task_spec
+    system_prompt = _read_prompt("voice-rich.md") + "\n\n---\n\n" + task_spec
 
     parts: list[str] = []
     if series_name:
@@ -513,38 +624,11 @@ async def write_rich_article(
     parts.append(f"Number of images attached: {n}")
     parts.append("")
     parts.append("Per-image metadata (use as context, do not quote verbatim):")
-    for i, (t, a, no) in enumerate(zip(title_hints, alt_texts, notes_list), 1):
-        parts.append(f"  Image {i}:")
-        any_meta = False
-        if t:
-            parts.append(f"    title hint: {t}")
-            any_meta = True
-        if a:
-            parts.append(f"    alt text:   {a}")
-            any_meta = True
-        if no:
-            parts.append(f"    notes:      {no}")
-            any_meta = True
-        if not any_meta:
-            parts.append(f"    (none)")
+    parts.extend(_format_image_meta_block(
+        title_hints, alt_texts, notes_list, always_per_image_header=True,
+    ))
     parts.append("\nWrite the article now. JSON only.")
     user_text = "\n".join(parts)
-
-    payload: dict[str, Any] = {
-        "model": settings.ollama_llm_model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": user_text,
-                "images": [base64.b64encode(j).decode("ascii") for j in jpgs],
-            },
-        ],
-        "format": "json",
-        "stream": False,
-        "think": False,                # thinking + format:json hangs on Qwen3-family models
-        "options": {"temperature": 0.65, "num_ctx": 16384, "num_predict": 6000},
-    }
 
     logger.info(
         "Rich article: model=%s, %d image(s), %dKB total, series=%s, parent=%s, singulart=%s",
@@ -554,83 +638,18 @@ async def write_rich_article(
         has_singulart,
     )
 
-    async def _call_ollama() -> tuple[str, dict[str, Any]]:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
-            r.raise_for_status()
-            d = r.json()
-        if "error" in d:
-            raise RuntimeError(f"Ollama error: {d['error']}")
-        return d.get("message", {}).get("content", "") or "", d
-
-    def _strip_fences(content: str) -> str:
-        # qwen3.6 occasionally wraps the JSON in ```json fences despite the no-fences instruction.
-        s = content.strip()
-        if s.startswith("```"):
-            first_nl = s.find("\n")
-            if first_nl != -1:
-                s = s[first_nl + 1:]
-            if s.rstrip().endswith("```"):
-                s = s.rstrip()[:-3].rstrip()
-        return s
-
-    def _parse_with_salvage(content: str) -> dict:
-        """Parse JSON from model output. On JSONDecodeError try iterative
-        salvage; on still-failure raise the JSONDecodeError."""
-        stripped = _strip_fences(content)
-        try:
-            return json.loads(stripped)
-        except json.JSONDecodeError as exc:
-            salvaged = _iterative_salvage(stripped)
-            if salvaged != stripped:
-                try:
-                    result = json.loads(salvaged)
-                    logger.warning(
-                        "Rich-article LLM returned non-JSON; iterative quote-salvage succeeded (orig parse err: %s)",
-                        exc,
-                    )
-                    return result
-                except json.JSONDecodeError as exc2:
-                    logger.warning(
-                        "Rich-article LLM returned non-JSON; salvage made progress but did not parse (orig=%s, salvaged=%s)",
-                        exc, exc2,
-                    )
-            raise
-
-    # Up to 3 attempts total — the model is non-deterministic, fresh samples
-    # often parse cleanly even when previous attempts produced unfixable JSON.
-    MAX_ATTEMPTS = 3
-    parsed = None
-    last_exc: json.JSONDecodeError | None = None
-    last_content = ""
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        content, data = await _call_ollama()
-        if not content.strip():
-            logger.warning("Rich-article LLM attempt %d returned empty content; retrying.", attempt)
-            continue
-        last_content = content
-        try:
-            parsed = _parse_with_salvage(content)
-            if attempt > 1:
-                logger.info("Rich-article LLM attempt %d produced valid JSON.", attempt)
-            break
-        except json.JSONDecodeError as exc:
-            last_exc = exc
-            if attempt < MAX_ATTEMPTS:
-                logger.warning(
-                    "Rich-article LLM attempt %d failed JSON parse (%s); retrying (attempt %d/%d).",
-                    attempt, exc, attempt + 1, MAX_ATTEMPTS,
-                )
-
-    if parsed is None:
-        logger.error(
-            "Rich-article LLM failed JSON parse after %d attempts — last err: %s — content head: %s",
-            MAX_ATTEMPTS, last_exc, last_content[:500],
-        )
-        snippet = (last_content[:300] + "...") if len(last_content) > 300 else (last_content or "(empty)")
-        raise RuntimeError(
-            f"Rich-article LLM returned non-JSON after {MAX_ATTEMPTS} attempts (len={len(last_content)}, parse err: {last_exc}) — start: {snippet!r}"
-        ) from last_exc
+    parsed = await _chat_json(
+        model=settings.ollama_llm_model,
+        system=system_prompt,
+        user_text=user_text,
+        jpgs=jpgs,
+        options={"temperature": 0.65, "num_ctx": 16384, "num_predict": 6000},
+        think=False,                # thinking + format:json hangs on Qwen3-family models
+        timeout=timeout,
+        label="write_rich_article",
+        salvage=_iterative_salvage,
+        max_attempts=3,             # qwen3.6 is non-deterministic; fresh samples often parse cleanly
+    )
 
     out: dict[str, dict[str, Any]] = {}
     for lang in ("de", "en", "zh"):
@@ -691,6 +710,9 @@ async def write_rich_article(
         }
 
     return out
+
+
+# ── Titler — title suggestions + warm-up ─────────────────────────────────────
 
 
 _TITLER_SYSTEM = "You are an art curator specialising in contemporary media art."
@@ -760,36 +782,16 @@ async def generate_titles(
         f"no surrounding quotes, no numbering, no commentary.\n\n"
         f'Return STRICT JSON: {{"titles": ["title one", "title two", ...]}}'
     )
-    payload: dict[str, Any] = {
-        "model": settings.ollama_titler_model,
-        "messages": [
-            {"role": "system", "content": _TITLER_SYSTEM},
-            {
-                "role": "user",
-                "content": user_text,
-                "images": [base64.b64encode(jpg_bytes).decode("ascii")],
-            },
-        ],
-        "format":     "json",
-        "stream":     False,
-        "keep_alive": _TITLER_KEEP_ALIVE,
-        "options":    {"temperature": 0.8},
-    }
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
-        r.raise_for_status()
-        data = r.json()
-
-    if "error" in data:
-        raise RuntimeError(f"Ollama error: {data['error']}")
-
-    content = data.get("message", {}).get("content", "")
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as exc:
-        logger.error("Titler VLM returned non-JSON content: %s", content[:500])
-        raise RuntimeError(f"Titler VLM returned non-JSON content: {exc}") from exc
+    parsed = await _chat_json(
+        model=settings.ollama_titler_model,
+        system=_TITLER_SYSTEM,
+        user_text=user_text,
+        jpgs=[jpg_bytes],
+        options={"temperature": 0.8},
+        keep_alive=_TITLER_KEEP_ALIVE,
+        timeout=timeout,
+        label="generate_titles",
+    )
 
     raw = parsed.get("titles") or []
     if not isinstance(raw, list):

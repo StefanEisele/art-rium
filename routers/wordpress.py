@@ -26,6 +26,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/wordpress", dependencies=[Depends(require_auth)])
 
 
+def _require_wp_configured() -> None:
+    """Reject the request with 400 if WordPress env vars are missing.
+
+    Calls missing_config() once and reuses the result for the error message
+    — the prior inline pattern called it twice in the same handler.
+    """
+    missing = wp_client.missing_config()
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"WordPress not configured: {missing}",
+        )
+
+
 class UploadRequest(BaseModel):
     image_ids: list[uuid.UUID]
 
@@ -51,7 +65,7 @@ async def status():
     }
 
 
-@router.post("/media/upload")
+@router.post("/media/upload", dependencies=[Depends(_require_wp_configured)])
 async def upload_media(body: UploadRequest, db: AsyncSession = Depends(get_db)):
     """
     Upload one or more gallery images to WordPress.
@@ -60,12 +74,6 @@ async def upload_media(body: UploadRequest, db: AsyncSession = Depends(get_db)):
     Note: VLM analysis takes several seconds per image; large batches may
     take a minute or more. Frontends should set generous timeouts.
     """
-    if wp_client.missing_config():
-        raise HTTPException(
-            status_code=400,
-            detail=f"WordPress not configured: {wp_client.missing_config()}",
-        )
-
     results: list[dict] = []
     errors:  list[dict] = []
 
@@ -96,7 +104,7 @@ class ArticleGenerateRequest(BaseModel):
     )
 
 
-@router.post("/article/generate")
+@router.post("/article/generate", dependencies=[Depends(_require_wp_configured)])
 async def generate_article(
     body: ArticleGenerateRequest,
     db: AsyncSession = Depends(get_db),
@@ -107,12 +115,6 @@ async def generate_article(
     image count). All images must already be uploaded to WP via /media/upload.
     The first image's wp_media_id becomes the WP featured_media.
     """
-    if wp_client.missing_config():
-        raise HTTPException(
-            status_code=400,
-            detail=f"WordPress not configured: {wp_client.missing_config()}",
-        )
-
     images: list[Image] = []
     for image_id in body.image_ids:
         image = await db.get(Image, image_id)
@@ -182,7 +184,7 @@ class ArticleGenerateRichRequest(BaseModel):
         return list(dict.fromkeys(v))  # dedupe, preserve order
 
 
-@router.post("/article/generate-rich")
+@router.post("/article/generate-rich", dependencies=[Depends(_require_wp_configured)])
 async def generate_rich_article(
     body: ArticleGenerateRichRequest,
     db: AsyncSession = Depends(get_db),
@@ -198,11 +200,6 @@ async def generate_rich_article(
     does not auto-link translations — that step still has to be done by hand
     in WP admin after the job completes.
     """
-    if wp_client.missing_config():
-        raise HTTPException(
-            status_code=400,
-            detail=f"WordPress not configured: {wp_client.missing_config()}",
-        )
     if not settings.artist_website_url or not settings.artist_instagram_url:
         raise HTTPException(
             status_code=400,

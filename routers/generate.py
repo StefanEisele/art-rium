@@ -99,12 +99,16 @@ async def generate(req: GenerateRequest, request: Request):
     return {"batch_id": batch_id, "prompt_ids": prompt_ids, "batch_count": batch_count}
 
 
-@router.get("/share/image/{filename}")
-async def get_shared_image(filename: str, token: str = ""):
-    """Public image endpoint for external services (e.g. Instagram).
-    Protected by IMAGE_SHARE_TOKEN instead of the regular API key."""
+def _verify_share_token(token: str = "") -> None:
+    """Public-share gate: when IMAGE_SHARE_TOKEN is set, the request must
+    carry it as ?token=…. When unset (dev mode), the endpoints are open."""
     if settings.image_share_token and token != settings.image_share_token:
         raise HTTPException(status_code=403, detail="Invalid share token")
+
+
+@router.get("/share/image/{filename}", dependencies=[Depends(_verify_share_token)])
+async def get_shared_image(filename: str):
+    """Public image endpoint for external services (e.g. Instagram)."""
     safe_name = Path(filename).name
     for search_dir in [settings.images_dir, settings.comfyui_output_dir]:
         for candidate in search_dir.rglob(safe_name):
@@ -113,12 +117,9 @@ async def get_shared_image(filename: str, token: str = ""):
     raise HTTPException(status_code=404, detail="Image not found")
 
 
-@router.get("/share/reel/{filename}")
-async def get_shared_reel(filename: str, token: str = ""):
-    """Public video endpoint for Reel uploads to Instagram Graph API.
-    Protected by IMAGE_SHARE_TOKEN (same token as images)."""
-    if settings.image_share_token and token != settings.image_share_token:
-        raise HTTPException(status_code=403, detail="Invalid share token")
+@router.get("/share/reel/{filename}", dependencies=[Depends(_verify_share_token)])
+async def get_shared_reel(filename: str):
+    """Public video endpoint for Reel uploads to Instagram Graph API."""
     safe_name = Path(filename).name
     candidate = settings.reels_dir / safe_name
     if candidate.exists():
@@ -126,11 +127,9 @@ async def get_shared_reel(filename: str, token: str = ""):
     raise HTTPException(status_code=404, detail="Reel not found")
 
 
-@router.get("/share/video/{filename}")
-async def get_shared_video(filename: str, token: str = ""):
+@router.get("/share/video/{filename}", dependencies=[Depends(_verify_share_token)])
+async def get_shared_video(filename: str):
     """Public endpoint for serving generated videos to Instagram Graph API."""
-    if settings.image_share_token and token != settings.image_share_token:
-        raise HTTPException(status_code=403, detail="Invalid share token")
     safe_name = Path(filename).name
     candidate = settings.videos_dir / safe_name
     if candidate.exists():
@@ -162,13 +161,11 @@ _LOOP_PLAYER_HTML = """<!doctype html>
 </body></html>"""
 
 
-@router.get("/share/video-loop/{filename}")
-async def get_shared_video_loop(filename: str, token: str = ""):
+@router.get("/share/video-loop/{filename}", dependencies=[Depends(_verify_share_token)])
+async def get_shared_video_loop(filename: str):
     """Public HTML player that loops a generated video — used by the Improv
     tool's share-URL/QR-code so a second device (iPad next to the piano) can
     play the source over and over without manual restarts."""
-    if settings.image_share_token and token != settings.image_share_token:
-        raise HTTPException(status_code=403, detail="Invalid share token")
     safe_name = Path(filename).name
     if not (settings.videos_dir / safe_name).exists():
         raise HTTPException(status_code=404, detail="Video not found")

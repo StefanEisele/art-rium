@@ -1,9 +1,14 @@
 """
 Image preparation for web upload — re-encode any source image to a
-size- and quality-bounded JPEG suitable for WordPress / Instagram.
+size- and quality-bounded JPEG suitable for WordPress / Instagram /
+local VLM analysis.
 
-Used by:
-  - services/wordpress/media.py  (upload pipeline)
+Two domain wrappers (preferred entry points):
+  prepare_for_upload(src)  — 1080px / Q88 — WP media & IG dispatch
+  prepare_for_vlm(src)     — settings.vlm_analysis_max_edge / Q80 — Ollama analyze
+
+The low-level prepare_jpg_for_web stays available for one-off scripts and
+the titler endpoint (which has its own UX-driven dimensions).
 """
 import asyncio
 import logging
@@ -11,6 +16,8 @@ from io import BytesIO
 from pathlib import Path
 
 from PIL import Image as PILImage
+
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -54,3 +61,15 @@ async def prepare_jpg_for_web(
     (jpeg_bytes, suggested_filename). Pillow runs in a thread pool.
     """
     return await asyncio.to_thread(_prepare_jpg_sync, src, max_edge, quality)
+
+
+async def prepare_for_upload(src: Path) -> tuple[bytes, str]:
+    """Web-upload preset: 1080px longest edge, JPEG Q88 — WP media + IG dispatch."""
+    return await prepare_jpg_for_web(src, max_edge=1080, quality=88)
+
+
+async def prepare_for_vlm(src: Path) -> tuple[bytes, str]:
+    """VLM analysis preset: settings.vlm_analysis_max_edge, JPEG Q80."""
+    return await prepare_jpg_for_web(
+        src, max_edge=settings.vlm_analysis_max_edge, quality=80,
+    )

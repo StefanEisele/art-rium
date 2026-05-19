@@ -78,6 +78,42 @@ def missing_config() -> list[str]:
     ]
 
 
+# ── Container creation & publish ─────────────────────────────────────────────
+
+
+def _media_url() -> str:
+    return f"{settings.instagram_graph_api_base}/{settings.instagram_user_id}/media"
+
+
+def _publish_url() -> str:
+    return f"{settings.instagram_graph_api_base}/{settings.instagram_user_id}/media_publish"
+
+
+async def create_media_container(
+    client: httpx.AsyncClient, data: dict[str, str], label: str,
+) -> str:
+    """POST /{user_id}/media to create a media container; returns the container id.
+    `access_token` is injected automatically; callers must NOT include it."""
+    payload = {**data, "access_token": settings.instagram_access_token}
+    r = await client.post(_media_url(), data=payload)
+    body = r.json()
+    check_response(body, label)
+    return body["id"]
+
+
+async def publish_container(
+    client: httpx.AsyncClient, creation_id: str, label: str,
+) -> str:
+    """POST /{user_id}/media_publish for a ready container; returns the published media id."""
+    r = await client.post(_publish_url(), data={
+        "creation_id":  creation_id,
+        "access_token": settings.instagram_access_token,
+    })
+    body = r.json()
+    check_response(body, label)
+    return body["id"]
+
+
 # ── Container polling ────────────────────────────────────────────────────────
 
 async def wait_container_ready(

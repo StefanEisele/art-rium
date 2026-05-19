@@ -319,6 +319,25 @@ def _segments_dir(video_id: uuid.UUID) -> Path:
     return settings.videos_dir / "segments" / str(video_id)
 
 
+# ── Progress / failure helpers (shared by _run_generation + _assemble_video) ──
+
+def _set_progress(vid_key: str, phase: str, message: str, pct: int) -> None:
+    _progress[vid_key] = {"phase": phase, "message": message, "pct": pct}
+
+
+async def _finalize_video_failure(video_id: uuid.UUID, exc: Exception, vid_key: str) -> None:
+    """Common error path: clear progress, record exception on the Video row."""
+    _progress.pop(vid_key, None)
+    msg = str(exc).strip()
+    err = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+    async with AsyncSessionLocal() as db:
+        video = await db.get(Video, video_id)
+        if video:
+            video.status = "failed"
+            video.error  = err[:1000]
+            await db.commit()
+
+
 # ── Background generation task ────────────────────────────────────────────────
 
 # httpx connection/read errors thrown when ComfyUI is mid-restart between
@@ -350,15 +369,198 @@ async def _post_workflow_with_retry(
     raise RuntimeError("post_workflow retry loop exited without result")  # unreachable
 
 
+async def _upload_images_to_comfy(
+    client: httpx.AsyncClient,
+    ordered_images: list[Image],
+    prefix: str,
+    vid_key: str,
+) -> list[str]:
+    """Upload each managed image to ComfyUI; return the assigned ComfyUI filenames."""
+    comfy_names: list[str] = []
+    n = len(ordered_images)
+    for i, img in enumerate(ordered_images):
+        src = settings.storage_dir / img.filepath
+        assigned_name = await upload_image(client, src, f"{prefix}_kf{i + 1}.png")
+        comfy_names.append(assigned_name)
+        pct = 5 + int(12 * (i + 1) / n)
+        _set_progress(vid_key, "uploading", f"Uploaded image {i+1}/{n}", pct)
+        logger.info("Uploaded %s → ComfyUI:%s", src.name, assigned_name)
+    return comfy_names
+
+
+async def _save_comfy_prompt_id(video_id: uuid.UUID, prompt_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+        video = await db.get(Video, video_id)
+        if video:
+            video.comfy_prompt_id = prompt_id
+            await db.commit()
+
+
+def _comfy_save_path(save_out: dict, segment_label: str) -> Path:
+    """Resolve the ComfyUI-side output filename from a VHS_VideoCombine save node."""
+    gifs = save_out.get("gifs") or save_out.get("videos") or []
+    if not gifs:
+        raise RuntimeError(f"{segment_label}: VHS_VideoCombine output missing: {save_out}")
+    entry = gifs[0]
+    comfy_src = settings.comfyui_output_dir / entry.get("subfolder", "") / entry["filename"]
+    if not comfy_src.exists():
+        raise FileNotFoundError(f"{segment_label} not found at {comfy_src}")
+    return comfy_src
+
+
+async def _run_flf2v(
+    client: httpx.AsyncClient,
+    video_id: uuid.UUID,
+    comfy_names: list[str],
+    req: GenerateVideoRequest,
+    prefix: str,
+    vid_key: str,
+) -> Path:
+    """Submit a single FLF2V workflow, poll, copy result into videos_dir. Returns the dest path."""
+    if len(comfy_names) < 2:
+        raise ValueError("FLF2V requires at least 2 images")
+
+    _set_progress(vid_key, "submitting", "Submitting workflow to ComfyUI…", 20)
+    wf = _build_flf2v_workflow(
+        comfy_names, req.width, req.height, req.frame_count, req.fps, req.prompt, prefix,
+    )
+    prompt_id = await post_workflow(client, wf)
+    logger.info("Video job %s → ComfyUI prompt %s", video_id, prompt_id)
+    await _save_comfy_prompt_id(video_id, prompt_id)
+
+    _set_progress(vid_key, "queued", "Waiting in ComfyUI queue…", 25)
+    outputs = await poll_history(client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL)
+    comfy_src = _comfy_save_path(outputs.get(SAVE_NODE_ID, {}), "VHS_VideoCombine output")
+
+    dest = settings.videos_dir / f"{video_id}_{comfy_src.name}"
+    await asyncio.to_thread(shutil.copy2, comfy_src, dest)
+    return dest
+
+
+async def _run_i2v_multi(
+    client: httpx.AsyncClient,
+    video_id: uuid.UUID,
+    comfy_names: list[str],
+    ordered_images: list[Image],
+    req: GenerateVideoRequest,
+    prefix: str,
+    vid_key: str,
+) -> Path | None:
+    """Generate each image as an independent ComfyUI submission, persist segments
+    as discrete files + meta.json. For n==1 returns the assembled mp4 path; for
+    n>1 transitions the row to status=review and returns None (caller skips finalize)."""
+    n_imgs = len(comfy_names)
+    prompts_list = req.prompts if len(req.prompts) == n_imgs else [req.prompt] * n_imgs
+    fc_list = req.frame_counts if len(req.frame_counts) == n_imgs else [req.frame_count] * n_imgs
+    seg_dir = _segments_dir(video_id)
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    segment_meta: list[dict] = []
+    seg_band_lo, seg_band_hi = 20, 86
+    seg_span = seg_band_hi - seg_band_lo
+
+    for i, (fname, p_i, fc_i, img_obj) in enumerate(
+        zip(comfy_names, prompts_list, fc_list, ordered_images)
+    ):
+        seg_prefix  = f"{prefix}_seg{i + 1}"
+        pct_seg_lo  = seg_band_lo + int(seg_span * i           / n_imgs)
+        pct_seg_mid = seg_band_lo + int(seg_span * (i + 0.3) / n_imgs)
+        pct_seg_hi  = seg_band_lo + int(seg_span * (i + 1)   / n_imgs)
+
+        _set_progress(vid_key, "submitting", f"Clip {i + 1}/{n_imgs} — submitting to ComfyUI…", pct_seg_lo)
+        wf, save_node = _build_i2v_single_workflow(
+            fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
+            req.rife_multiplier, req.pingpong,
+        )
+        prompt_id = await _post_workflow_with_retry(client, wf)
+        logger.info("Video job %s segment %d → ComfyUI prompt %s", video_id, i + 1, prompt_id)
+        if i == 0:
+            await _save_comfy_prompt_id(video_id, prompt_id)
+
+        _set_progress(vid_key, "running", f"Clip {i + 1}/{n_imgs} — generating frames…", pct_seg_mid)
+        seg_outputs = await poll_history(client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL)
+        seg_src = _comfy_save_path(seg_outputs.get(save_node, {}), f"Segment {i + 1}")
+
+        # Persist segment under a stable name so the review UI + assemble
+        # endpoint can refer to it by index regardless of ComfyUI's output.
+        seg_dest  = seg_dir / f"seg_{i}.mp4"
+        seg_thumb = seg_dir / f"seg_{i}_thumb.jpg"
+        await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
+        await make_video_thumbnail(seg_dest, seg_thumb)
+        segment_meta.append({
+            "index":       i,
+            "filename":    seg_dest.name,
+            "thumb":       seg_thumb.name,
+            "prompt":      p_i,
+            "frame_count": fc_i,
+            "image_id":    str(img_obj.id),
+        })
+        _set_progress(vid_key, "running", f"Clip {i + 1}/{n_imgs} — saved ✓", pct_seg_hi)
+
+        # Before the next segment, force ComfyUI to fully unload models and free VRAM.
+        # Without this, ComfyUI keeps Wan 14B fp8 partially evicted and hits an mmap
+        # access violation in load_torch_file on the next prompt's partial-reload.
+        if i < n_imgs - 1:
+            _set_progress(vid_key, "running", f"Freeing GPU memory for clip {i + 2}/{n_imgs}…", pct_seg_hi)
+            await free_memory(client)
+            await asyncio.sleep(8)  # let CUDA actually release before the next cold load
+
+    # Sidecar metadata — consumed by /jobs/{id}/segments and _assemble_video.
+    meta = {
+        "video_id":        str(video_id),
+        "workflow":        "i2v_multi",
+        "width":           req.width,
+        "height":          req.height,
+        "fps":             req.fps,
+        "rife_multiplier": req.rife_multiplier,
+        "pingpong":        req.pingpong,
+        "segments":        segment_meta,
+    }
+    await asyncio.to_thread(
+        (seg_dir / "meta.json").write_text, json.dumps(meta, indent=2), encoding="utf-8",
+    )
+
+    if n_imgs > 1:
+        # Multi-segment: user picks which to merge — caller skips finalize.
+        _set_progress(vid_key, "review", f"{n_imgs} clips ready — pick which to merge", 88)
+        async with AsyncSessionLocal() as db:
+            video = await db.get(Video, video_id)
+            if video:
+                video.status = "review"
+                await db.commit()
+        return None
+
+    # n == 1: nothing to choose between, copy the single segment into place.
+    dest = settings.videos_dir / f"{video_id}_artrium.mp4"
+    await asyncio.to_thread(shutil.copy2, seg_dir / "seg_0.mp4", dest)
+    return dest
+
+
+async def _finalize_video_done(video_id: uuid.UUID, dest: Path, vid_key: str) -> None:
+    """Common success path: thumbnail + persist filename/filepath + status='done'."""
+    _set_progress(vid_key, "finalizing", "Saving video…", 94)
+    rel_path = dest.relative_to(settings.storage_dir)
+    logger.info("Video stored: %s", dest)
+
+    _set_progress(vid_key, "finalizing", "Generating thumbnail…", 96)
+    await make_video_thumbnail(dest, settings.videos_dir / f"{video_id}_thumb.jpg")
+
+    async with AsyncSessionLocal() as db:
+        video = await db.get(Video, video_id)
+        if video:
+            video.filename = dest.name
+            video.filepath = str(rel_path)
+            video.status   = "done"
+            video.error    = None
+            await db.commit()
+    _progress.pop(vid_key, None)
+
+
 async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> None:
     vid_key = str(video_id)
     prefix  = f"artrium_{video_id.hex[:10]}"
 
-    def _set(phase: str, message: str, pct: int) -> None:
-        _progress[vid_key] = {"phase": phase, "message": message, "pct": pct}
-
     try:
-        _set("uploading", "Uploading images to ComfyUI…", 5)
+        _set_progress(vid_key, "uploading", "Uploading images to ComfyUI…", 5)
 
         async with AsyncSessionLocal() as db:
             video = await db.get(Video, video_id)
@@ -374,178 +576,23 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
             raise ValueError("Need at least 1 valid image")
 
         async with httpx.AsyncClient(timeout=60) as client:
-            comfy_names: list[str] = []
-            for i, img in enumerate(ordered_images):
-                src = settings.storage_dir / img.filepath
-                assigned_name = await upload_image(client, src, f"{prefix}_kf{i + 1}.png")
-                comfy_names.append(assigned_name)
-                pct = 5 + int(12 * (i + 1) / len(ordered_images))
-                _set("uploading", f"Uploaded image {i+1}/{len(ordered_images)}", pct)
-                logger.info("Uploaded %s → ComfyUI:%s", src.name, assigned_name)
-
-            n_imgs = len(comfy_names)
+            comfy_names = await _upload_images_to_comfy(client, ordered_images, prefix, vid_key)
             settings.videos_dir.mkdir(parents=True, exist_ok=True)
 
             if req.workflow == "flf2v":
-                if n_imgs < 2:
-                    raise ValueError("FLF2V requires at least 2 images")
-                _set("submitting", "Submitting workflow to ComfyUI…", 20)
-                wf = _build_flf2v_workflow(
-                    comfy_names, req.width, req.height, req.frame_count, req.fps, req.prompt, prefix,
+                dest = await _run_flf2v(client, video_id, comfy_names, req, prefix, vid_key)
+            else:
+                dest = await _run_i2v_multi(
+                    client, video_id, comfy_names, ordered_images, req, prefix, vid_key,
                 )
-                prompt_id = await post_workflow(client, wf)
-                logger.info("Video job %s → ComfyUI prompt %s", video_id, prompt_id)
-                async with AsyncSessionLocal() as db:
-                    video = await db.get(Video, video_id)
-                    if video:
-                        video.comfy_prompt_id = prompt_id
-                        await db.commit()
-                _set("queued", "Waiting in ComfyUI queue…", 25)
-                outputs = await poll_history(
-                    client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL,
-                )
-                save_out = outputs.get(SAVE_NODE_ID, {})
-                gifs = save_out.get("gifs") or save_out.get("videos") or []
-                if not gifs:
-                    raise RuntimeError(f"VHS_VideoCombine output missing from history: {save_out}")
-                entry = gifs[0]
-                comfy_src = settings.comfyui_output_dir / entry.get("subfolder", "") / entry["filename"]
-                if not comfy_src.exists():
-                    raise FileNotFoundError(f"Video not found at {comfy_src}")
-                dest_name = f"{video_id}_{entry['filename']}"
-                dest = settings.videos_dir / dest_name
-                await asyncio.to_thread(shutil.copy2, comfy_src, dest)
-            else:  # i2v_multi — generate each segment independently, persist them as
-                   # discrete files, then either stop at status=review (n>1) or assemble
-                   # the single segment in place (n==1).
-                prompts_list = req.prompts if len(req.prompts) == n_imgs else [req.prompt] * n_imgs
-                fc_list = req.frame_counts if len(req.frame_counts) == n_imgs else [req.frame_count] * n_imgs
-                seg_dir = _segments_dir(video_id)
-                seg_dir.mkdir(parents=True, exist_ok=True)
-                segment_meta: list[dict] = []
-                seg_band_lo, seg_band_hi = 20, 86
-
-                for i, (fname, p_i, fc_i, img_obj) in enumerate(
-                    zip(comfy_names, prompts_list, fc_list, ordered_images)
-                ):
-                    seg_prefix = f"{prefix}_seg{i + 1}"
-                    seg_span    = seg_band_hi - seg_band_lo
-                    pct_seg_lo  = seg_band_lo + int(seg_span * i           / n_imgs)
-                    pct_seg_mid = seg_band_lo + int(seg_span * (i + 0.3) / n_imgs)
-                    pct_seg_hi  = seg_band_lo + int(seg_span * (i + 1)   / n_imgs)
-
-                    _set("submitting", f"Clip {i + 1}/{n_imgs} — submitting to ComfyUI…", pct_seg_lo)
-                    wf, save_node = _build_i2v_single_workflow(
-                        fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
-                        req.rife_multiplier, req.pingpong,
-                    )
-                    prompt_id = await _post_workflow_with_retry(client, wf)
-                    logger.info("Video job %s segment %d → ComfyUI prompt %s", video_id, i + 1, prompt_id)
-                    if i == 0:
-                        async with AsyncSessionLocal() as db:
-                            video = await db.get(Video, video_id)
-                            if video:
-                                video.comfy_prompt_id = prompt_id
-                                await db.commit()
-                    _set("running", f"Clip {i + 1}/{n_imgs} — generating frames…", pct_seg_mid)
-                    seg_outputs = await poll_history(
-                        client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL,
-                    )
-                    save_out = seg_outputs.get(save_node, {})
-                    gifs = save_out.get("gifs") or save_out.get("videos") or []
-                    if not gifs:
-                        raise RuntimeError(f"Segment {i + 1}: VHS_VideoCombine output missing: {save_out}")
-                    entry = gifs[0]
-                    seg_src = settings.comfyui_output_dir / entry.get("subfolder", "") / entry["filename"]
-                    if not seg_src.exists():
-                        raise FileNotFoundError(f"Segment {i + 1} not found at {seg_src}")
-
-                    # Persist segment under a stable name so the review UI + assemble
-                    # endpoint can refer to it by index regardless of ComfyUI's output.
-                    seg_dest  = seg_dir / f"seg_{i}.mp4"
-                    seg_thumb = seg_dir / f"seg_{i}_thumb.jpg"
-                    await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
-                    await make_video_thumbnail(seg_dest, seg_thumb)
-                    segment_meta.append({
-                        "index":       i,
-                        "filename":    seg_dest.name,
-                        "thumb":       seg_thumb.name,
-                        "prompt":      p_i,
-                        "frame_count": fc_i,
-                        "image_id":    str(img_obj.id),
-                    })
-                    _set("running", f"Clip {i + 1}/{n_imgs} — saved ✓", pct_seg_hi)
-
-                    # Before the next segment, force ComfyUI to fully unload models and free VRAM.
-                    # Without this, ComfyUI keeps Wan 14B fp8 partially evicted and hits an mmap
-                    # access violation in load_torch_file on the next prompt's partial-reload.
-                    if i < n_imgs - 1:
-                        _set("running", f"Freeing GPU memory for clip {i + 2}/{n_imgs}…", pct_seg_hi)
-                        await free_memory(client)
-                        await asyncio.sleep(8)  # let CUDA actually release before the next cold load
-
-                # Sidecar metadata — what /jobs/{id}/segments and _assemble_video need.
-                meta = {
-                    "video_id":        str(video_id),
-                    "workflow":        "i2v_multi",
-                    "width":           req.width,
-                    "height":          req.height,
-                    "fps":             req.fps,
-                    "rife_multiplier": req.rife_multiplier,
-                    "pingpong":        req.pingpong,
-                    "segments":        segment_meta,
-                }
-                await asyncio.to_thread(
-                    (seg_dir / "meta.json").write_text,
-                    json.dumps(meta, indent=2),
-                    encoding="utf-8",
-                )
-
-                # Multi-segment: hand off to the user for selection — leave the job in
-                # status=review and let the assemble endpoint kick off the concat.
-                if n_imgs > 1:
-                    _set("review", f"{n_imgs} clips ready — pick which to merge", 88)
-                    async with AsyncSessionLocal() as db:
-                        video = await db.get(Video, video_id)
-                        if video:
-                            video.status = "review"
-                            await db.commit()
+                if dest is None:  # multi-segment → review status, caller skips finalize
                     return
 
-                # n == 1: nothing to choose between, copy the single segment into place
-                # and fall through to the finalize block below.
-                dest_name = f"{video_id}_artrium.mp4"
-                dest = settings.videos_dir / dest_name
-                await asyncio.to_thread(shutil.copy2, seg_dir / "seg_0.mp4", dest)
-
-        _set("finalizing", "Saving video…", 94)
-        rel_path = dest.relative_to(settings.storage_dir)
-        logger.info("Video stored: %s", dest)
-
-        _set("finalizing", "Generating thumbnail…", 96)
-        await make_video_thumbnail(dest, settings.videos_dir / f"{video_id}_thumb.jpg")
-
-        async with AsyncSessionLocal() as db:
-            video = await db.get(Video, video_id)
-            if video:
-                video.filename = dest_name
-                video.filepath = str(rel_path)
-                video.status   = "done"
-                await db.commit()
-
-        _progress.pop(vid_key, None)
+        await _finalize_video_done(video_id, dest, vid_key)
 
     except Exception as exc:
         logger.exception("Video generation %s failed", video_id)
-        _progress.pop(vid_key, None)
-        msg = str(exc).strip()
-        err = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
-        async with AsyncSessionLocal() as db:
-            video = await db.get(Video, video_id)
-            if video:
-                video.status = "failed"
-                video.error  = err[:1000]
-                await db.commit()
+        await _finalize_video_failure(video_id, exc, vid_key)
 
 
 async def _assemble_video(video_id: uuid.UUID, indices: list[int]) -> None:
@@ -556,9 +603,6 @@ async def _assemble_video(video_id: uuid.UUID, indices: list[int]) -> None:
     existing polling endpoint keeps working without any client-side branching.
     """
     vid_key = str(video_id)
-
-    def _set(phase: str, message: str, pct: int) -> None:
-        _progress[vid_key] = {"phase": phase, "message": message, "pct": pct}
 
     try:
         seg_dir = _segments_dir(video_id)
@@ -579,10 +623,9 @@ async def _assemble_video(video_id: uuid.UUID, indices: list[int]) -> None:
             chosen_files.append(sf)
 
         fps = int(meta.get("fps", 24))
-        dest_name = f"{video_id}_artrium.mp4"
-        dest = settings.videos_dir / dest_name
+        dest = settings.videos_dir / f"{video_id}_artrium.mp4"
 
-        _set("finalizing", f"Concatenating {len(chosen_files)} clip(s)…", 92)
+        _set_progress(vid_key, "finalizing", f"Concatenating {len(chosen_files)} clip(s)…", 92)
         if len(chosen_files) == 1:
             await asyncio.to_thread(shutil.copy2, chosen_files[0], dest)
         else:
@@ -614,32 +657,12 @@ async def _assemble_video(video_id: uuid.UUID, indices: list[int]) -> None:
                 tail = stderr_b.decode(errors="replace")[-1500:]
                 raise RuntimeError(f"ffmpeg concat failed (rc={proc.returncode}): {tail}")
 
-        _set("finalizing", "Generating thumbnail…", 96)
-        await make_video_thumbnail(dest, settings.videos_dir / f"{video_id}_thumb.jpg")
-
-        rel_path = dest.relative_to(settings.storage_dir)
-        async with AsyncSessionLocal() as db:
-            video = await db.get(Video, video_id)
-            if video:
-                video.filename = dest_name
-                video.filepath = str(rel_path)
-                video.status   = "done"
-                video.error    = None
-                await db.commit()
-        _progress.pop(vid_key, None)
+        await _finalize_video_done(video_id, dest, vid_key)
         logger.info("Video %s assembled from %d segment(s)", video_id, len(chosen_files))
 
     except Exception as exc:
         logger.exception("Video assembly %s failed", video_id)
-        _progress.pop(vid_key, None)
-        msg = str(exc).strip()
-        err = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
-        async with AsyncSessionLocal() as db:
-            video = await db.get(Video, video_id)
-            if video:
-                video.status = "failed"
-                video.error  = err[:1000]
-                await db.commit()
+        await _finalize_video_failure(video_id, exc, vid_key)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

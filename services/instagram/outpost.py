@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from core.config import settings
 from core.db import AsyncSessionLocal
-from core.imaging import prepare_jpg_for_web
+from core.imaging import prepare_for_upload
 from core.models import Image, InstagramPost, Video
 from core.scheduling import companion_at
 from services.instagram.reel_concat import concat_reel_videos
@@ -146,7 +146,7 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
         encoded: list[tuple[bytes, str]] = []
         for img in ordered_images:
             src = settings.storage_dir / img.filepath
-            jpg_bytes, jpg_name = await prepare_jpg_for_web(src)
+            jpg_bytes, jpg_name = await prepare_for_upload(src)
             encoded.append((jpg_bytes, jpg_name))
     except Exception as exc:
         await _record_failure(post_id, f"Image re-encode failed: {exc}")
@@ -171,64 +171,39 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
             return
 
     # ── Multipart upload to /enqueue ──────────────────────────────────────
-    try:
-        files: list[tuple[str, tuple[str, bytes, str]]] = [
-            ("images", (name, data, "image/jpeg")) for data, name in encoded
-        ]
-        if reel_path is not None:
-            with open(reel_path, "rb") as f:
-                files.append(("reel_mp4", (reel_path.name, f.read(), "video/mp4")))
+    files: list[tuple[str, tuple[str, bytes, str]]] = [
+        ("images", (name, jpg, "image/jpeg")) for jpg, name in encoded
+    ]
+    if reel_path is not None:
+        with open(reel_path, "rb") as f:
+            files.append(("reel_mp4", (reel_path.name, f.read(), "video/mp4")))
 
-        data = {
-            "caption": caption,
-            "scheduled_at": _iso(scheduled_at),
-        }
-        if reel_publish_at is not None:
-            data["reel_publish_at"] = _iso(reel_publish_at)
-        if story_publish_at is not None:
-            data["story_publish_at"] = _iso(story_publish_at)
+    data = {"caption": caption, "scheduled_at": _iso(scheduled_at)}
+    if reel_publish_at is not None:
+        data["reel_publish_at"] = _iso(reel_publish_at)
+    if story_publish_at is not None:
+        data["story_publish_at"] = _iso(story_publish_at)
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            r = await client.post(
-                f"{_base()}/enqueue",
-                headers=_headers(),
-                data=data,
-                files=files,
-            )
-        if r.status_code >= 300:
-            await _record_failure(
-                post_id,
-                f"Outpost /enqueue HTTP {r.status_code}: {r.text[:300]}",
-            )
-            return
-        body = r.json()
-        outpost_id = body.get("id")
-        if not outpost_id:
-            await _record_failure(post_id, f"Outpost response missing id: {body}")
-            return
-    except Exception as exc:
-        await _record_failure(
-            post_id,
-            f"Outpost dispatch failed: {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-        )
+    result = await _post_to_outpost(
+        post_id, "/enqueue",
+        data=data, files=files, error_label="Outpost dispatch failed",
+    )
+    if result is None:
         return
+    outpost_id, body = result
 
-    async with AsyncSessionLocal() as db:
-        fresh = await db.get(InstagramPost, post_id)
-        if not fresh:
-            return
-        fresh.outpost_id = outpost_id
-        fresh.outpost_status = body.get("status", "queued")
-        fresh.outpost_reel_status = "pending" if reel_path is not None else None
-        if story_publish_at is not None and not fresh.story_status:
-            fresh.story_status = "pending"
-            fresh.story_scheduled_at = story_publish_at
-        fresh.outpost_dispatched_at = datetime.now(timezone.utc)
-        fresh.error = None
-        fresh.updated_at = datetime.now(timezone.utc)
-        await db.commit()
-        logger.info("dispatch_to_outpost %s → outpost_id=%s (reel=%s)",
-                    post_id, outpost_id, reel_path is not None)
+    await _finalize_outpost_dispatch(
+        post_id,
+        outpost_id=outpost_id,
+        body=body,
+        has_reel=reel_path is not None,
+        reel_filename=None,
+        story_publish_at=story_publish_at,
+    )
+    logger.info(
+        "dispatch_to_outpost %s → outpost_id=%s (reel=%s)",
+        post_id, outpost_id, reel_path is not None,
+    )
 
 
 async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
@@ -277,60 +252,34 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
         return
 
     # ── Multipart upload to /enqueue-reel ──────────────────────────────────
-    try:
-        with open(reel_path, "rb") as f:
-            reel_bytes = f.read()
-        data = {
-            "caption": caption,
-            "scheduled_at": _iso(scheduled_at),
-        }
-        if story_publish_at is not None:
-            data["story_publish_at"] = _iso(story_publish_at)
+    with open(reel_path, "rb") as f:
+        reel_bytes = f.read()
+    data = {"caption": caption, "scheduled_at": _iso(scheduled_at)}
+    if story_publish_at is not None:
+        data["story_publish_at"] = _iso(story_publish_at)
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            r = await client.post(
-                f"{_base()}/enqueue-reel",
-                headers=_headers(),
-                data=data,
-                files=[("reel_mp4", (reel_path.name, reel_bytes, "video/mp4"))],
-            )
-        if r.status_code >= 300:
-            await _record_failure(
-                post_id,
-                f"Outpost /enqueue-reel HTTP {r.status_code}: {r.text[:300]}",
-            )
-            return
-        body = r.json()
-        outpost_id = body.get("id")
-        if not outpost_id:
-            await _record_failure(post_id, f"Outpost response missing id: {body}")
-            return
-    except Exception as exc:
-        await _record_failure(
-            post_id,
-            f"Outpost reel dispatch failed: {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
-        )
+    result = await _post_to_outpost(
+        post_id, "/enqueue-reel",
+        data=data,
+        files=[("reel_mp4", (reel_path.name, reel_bytes, "video/mp4"))],
+        error_label="Outpost reel dispatch failed",
+    )
+    if result is None:
         return
+    outpost_id, body = result
 
-    async with AsyncSessionLocal() as db:
-        fresh = await db.get(InstagramPost, post_id)
-        if not fresh:
-            return
-        fresh.outpost_id = outpost_id
-        fresh.outpost_status = body.get("status", "queued")
-        fresh.outpost_reel_status = "pending"   # kind='reel' always has a reel
-        fresh.reel_video_filename = reel_path.name
-        if story_publish_at is not None and not fresh.story_status:
-            fresh.story_status = "pending"
-            fresh.story_scheduled_at = story_publish_at
-        fresh.outpost_dispatched_at = datetime.now(timezone.utc)
-        fresh.error = None
-        fresh.updated_at = datetime.now(timezone.utc)
-        await db.commit()
-        logger.info(
-            "_dispatch_reel_only %s → outpost_id=%s (n_videos=%d)",
-            post_id, outpost_id, len(video_ids),
-        )
+    await _finalize_outpost_dispatch(
+        post_id,
+        outpost_id=outpost_id,
+        body=body,
+        has_reel=True,                      # kind='reel' always has a reel
+        reel_filename=reel_path.name,
+        story_publish_at=story_publish_at,
+    )
+    logger.info(
+        "_dispatch_reel_only %s → outpost_id=%s (n_videos=%d)",
+        post_id, outpost_id, len(video_ids),
+    )
 
 
 # ── Sync ────────────────────────────────────────────────────────────────────
@@ -529,6 +478,71 @@ async def _record_failure(post_id: uuid.UUID, message: str) -> None:
         post.outpost_status = "failed"
         post.error = message[:1000]
         post.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+
+
+async def _post_to_outpost(
+    post_id: uuid.UUID,
+    path: str,
+    *,
+    data: dict,
+    files: list,
+    error_label: str,
+) -> tuple[str, dict] | None:
+    """Multipart POST to the Pi outpost. On success returns (outpost_id, body).
+    On any failure (HTTP/network/missing id), records the failure on the row
+    and returns None."""
+    try:
+        async with httpx.AsyncClient(timeout=300) as client:
+            r = await client.post(
+                f"{_base()}{path}", headers=_headers(), data=data, files=files,
+            )
+        if r.status_code >= 300:
+            await _record_failure(
+                post_id, f"Outpost {path} HTTP {r.status_code}: {r.text[:300]}",
+            )
+            return None
+        body = r.json()
+        outpost_id = body.get("id")
+        if not outpost_id:
+            await _record_failure(post_id, f"Outpost response missing id: {body}")
+            return None
+        return outpost_id, body
+    except Exception as exc:
+        await _record_failure(
+            post_id,
+            f"{error_label}: {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+        )
+        return None
+
+
+async def _finalize_outpost_dispatch(
+    post_id: uuid.UUID,
+    *,
+    outpost_id: str,
+    body: dict,
+    has_reel: bool,
+    reel_filename: str | None,
+    story_publish_at: datetime | None,
+) -> None:
+    """Mirror a successful dispatch into the local row. Idempotency / commit
+    ownership: opens its own session, commits exactly once."""
+    now = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as db:
+        fresh = await db.get(InstagramPost, post_id)
+        if not fresh:
+            return
+        fresh.outpost_id          = outpost_id
+        fresh.outpost_status      = body.get("status", "queued")
+        fresh.outpost_reel_status = "pending" if has_reel else None
+        if reel_filename is not None:
+            fresh.reel_video_filename = reel_filename
+        if story_publish_at is not None and not fresh.story_status:
+            fresh.story_status       = "pending"
+            fresh.story_scheduled_at = story_publish_at
+        fresh.outpost_dispatched_at = now
+        fresh.error                 = None
+        fresh.updated_at            = now
         await db.commit()
 
 

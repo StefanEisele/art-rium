@@ -918,6 +918,8 @@ const enhance = async () => {
 };
 
 // Step 2 of enhance flow: take selected enhanced prompts and run them through /api/generate.
+// Each prompt is prefixed with the current LoRA trigger so the LoRA fires at
+// maximum weight (Z-Image weights early tokens for content).
 const generateFromPrompts = async () => {
   const selected = state.enhancedPrompts.filter(p => p.selected);
   if (!selected.length) { ArtRium.toast('Select at least one prompt.'); return; }
@@ -927,7 +929,7 @@ const generateFromPrompts = async () => {
   state.doneCount = 0;
 
   await startGenerationRequest({
-    prompts: selected.map(p => p.prompt),
+    prompts: selected.map(p => withTrigger(p.prompt)),
   });
 };
 
@@ -966,6 +968,18 @@ const startGenerationRequest = async (extra) => {
 
 // ── Mode + enhance review ──────────────────────────────────────────────────
 
+/**
+ * Prepend the current LoRA trigger word to an enhanced prompt so the LoRA
+ * fires at maximum weight (Z-Image weights early tokens for content).
+ * No-op when no LoRA is selected or when the prompt already starts with it.
+ */
+const withTrigger = (prompt) => {
+  const trigger = loraRegistry.triggerOf(state.loraName);
+  if (!trigger) return prompt;
+  if (prompt.startsWith(trigger)) return prompt;
+  return `${trigger} ${prompt}`;
+};
+
 const setMode = (mode) => {
   if (mode === state.mode) return;
   state.mode = mode;
@@ -976,21 +990,32 @@ const setMode = (mode) => {
   $(DOM_IDS.modeDirectBtn).classList.toggle('active', mode === 'direct');
   $(DOM_IDS.modeEnhanceBtn).classList.toggle('active', mode === 'enhance');
 
-  // Field decorations
+  // Field decorations + trigger handling:
+  //   direct  → prompt textarea owns the trigger at position 0
+  //   enhance → idea text must NOT contain the trigger (Qwen would treat
+  //             it as a literal noun); we strip it on entry, re-add on exit.
   const promptEl = $(DOM_IDS.prompt);
   const tplEl = $(DOM_IDS.templateSelect);
+  const trigger = loraRegistry.triggerOf(state.loraName);
+
   if (mode === 'enhance') {
     setText(DOM_IDS.promptLabel, 'Idea');
     promptEl.placeholder = "e.g. 'iron oxide spreading through deep blue water'";
     promptEl.maxLength = CONFIG.maxIdeaLength;
     setText(DOM_IDS.charLimit, String(CONFIG.maxIdeaLength));
     tplEl.style.display = 'none';
+    if (trigger && promptEl.value.startsWith(trigger)) {
+      promptEl.value = promptEl.value.slice(trigger.length).replace(/^[\s,]+/, '');
+    }
   } else {
     setText(DOM_IDS.promptLabel, 'Prompt');
     promptEl.placeholder = 'Describe your image…';
     promptEl.maxLength = CONFIG.maxPromptLength;
     setText(DOM_IDS.charLimit, String(CONFIG.maxPromptLength));
     tplEl.style.display = '';
+    if (trigger && !promptEl.value.startsWith(trigger)) {
+      promptEl.value = promptEl.value ? `${trigger} ${promptEl.value}` : trigger;
+    }
   }
   onPromptInput();
 
@@ -1026,7 +1051,7 @@ const renderEnhanceReview = () => {
     styleName.textContent = `Style ${item.style} · ${item.name}`;
     const promptText = document.createElement('div');
     promptText.className = 'prompt-text';
-    promptText.textContent = item.prompt;
+    promptText.textContent = withTrigger(item.prompt);   // show with LoRA trigger prepended
     const expand = document.createElement('div');
     expand.className = 'prompt-card-expand';
     expand.textContent = 'tap to expand';
@@ -1139,22 +1164,28 @@ const loraRegistry = {
 };
 
 const setLora = (name, btn) => {
-  const promptEl   = $(DOM_IDS.prompt);
-  const oldTrigger = loraRegistry.triggerOf(state.loraName);
-  const newTrigger = loraRegistry.triggerOf(name);
+  // Direct mode: massage the prompt textarea so the trigger lives at position 0.
+  // Enhance mode: the textarea holds the idea, not the final prompt — leave it
+  // alone and re-render the review cards (if any) so the trigger preview updates.
+  if (state.mode === 'direct') {
+    const promptEl   = $(DOM_IDS.prompt);
+    const oldTrigger = loraRegistry.triggerOf(state.loraName);
+    const newTrigger = loraRegistry.triggerOf(name);
 
-  // Strip old trigger from the start of the prompt (if present)
-  let text = promptEl.value;
-  if (oldTrigger && text.startsWith(oldTrigger)) {
-    text = text.slice(oldTrigger.length).replace(/^[\s,]+/, '');
+    let text = promptEl.value;
+    if (oldTrigger && text.startsWith(oldTrigger)) {
+      text = text.slice(oldTrigger.length).replace(/^[\s,]+/, '');
+    }
+    promptEl.value = newTrigger ? (text ? `${newTrigger} ${text}` : newTrigger) : text;
+    onPromptInput();
   }
-
-  // Prepend new trigger
-  promptEl.value = newTrigger ? (text ? `${newTrigger} ${text}` : newTrigger) : text;
-  onPromptInput();
 
   state.loraName = name;
   selectButton('.lora-btn', btn);
+
+  if (state.mode === 'enhance' && state.enhancePhase === 'review') {
+    renderEnhanceReview();
+  }
 };
 
 const onLoraStrength = (val) => {

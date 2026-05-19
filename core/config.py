@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     ollama_vlm_model:    str = "qwen2.5vl:latest"   # vision; alt-text + media metadata
     ollama_llm_model:    str = "qwen3.6:27b"        # vision; multilingual article writer (think:false required)
     ollama_titler_model: str = "qwen2.5vl:3b"       # vision; lightweight title brainstorming
+    ollama_prompt_model: str = "qwen3:4b-instruct-2507"  # text-only; Z-Image Turbo prompt enhancer
     vlm_analysis_max_edge: int = 512          # downscale before sending to VLM
 
     # ── Instagram (optional) ─────────────────────────────────────────────────

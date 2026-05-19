@@ -276,6 +276,86 @@
       padding: 0; margin-right: 10px;
       -webkit-tap-highlight-color: transparent;
     }
+
+    /* ── Mode toggle (Direct / Enhance) ── */
+    .mode-toggle {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+      background: var(--surface2);
+      border-radius: 10px;
+      padding: 3px;
+    }
+    .mode-toggle button {
+      background: transparent; border: none;
+      color: var(--text-dim);
+      font-size: 13px; font-weight: 600;
+      padding: 8px 12px; border-radius: 8px;
+      cursor: pointer; font-family: inherit;
+      transition: all 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .mode-toggle button.active {
+      background: var(--surface); color: var(--text);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+    }
+
+    /* ── Enhance review (prompt cards) ── */
+    .enhance-review {
+      display: none;
+      flex-direction: column; gap: 10px;
+    }
+    .enhance-review.show { display: flex; }
+
+    .review-header {
+      display: flex; justify-content: space-between; align-items: baseline;
+      color: var(--text-dim); font-size: 13px;
+    }
+    .review-header strong { color: var(--text); font-size: 14px; }
+
+    .prompt-card {
+      background: var(--surface2);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      display: flex; gap: 11px; align-items: flex-start;
+      cursor: pointer;
+      transition: border-color 0.13s, background 0.13s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .prompt-card.selected {
+      border-color: var(--text);
+      background: var(--surface);
+    }
+    .prompt-card input[type="checkbox"] {
+      margin-top: 4px;
+      width: 16px; height: 16px;
+      accent-color: var(--text);
+      flex-shrink: 0;
+      cursor: pointer;
+    }
+    .prompt-card-body { flex: 1; min-width: 0; }
+    .prompt-card .style-name {
+      font-size: 12px; font-weight: 700;
+      color: var(--text-dim); text-transform: uppercase;
+      letter-spacing: 0.6px; margin-bottom: 5px;
+    }
+    .prompt-card.selected .style-name { color: var(--text); }
+    .prompt-card .prompt-text {
+      font-size: 13px; line-height: 1.5;
+      color: var(--text);
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      word-break: break-word;
+    }
+    .prompt-card.expanded .prompt-text {
+      -webkit-line-clamp: unset;
+      overflow: visible;
+    }
+    .prompt-card-expand {
+      font-size: 11px; color: var(--text-dim);
+      margin-top: 6px; user-select: none;
+    }
   </style>
 </head>
 <body>
@@ -294,13 +374,28 @@
 
   <main>
 
+    <!-- Mode toggle -->
+    <div class="mode-toggle" id="mode-toggle">
+      <button type="button" id="mode-direct" class="active" onclick="setMode('direct')">Direct</button>
+      <button type="button" id="mode-enhance" onclick="setMode('enhance')">Enhance from idea</button>
+    </div>
+
     <!-- Prompt -->
     <div class="field">
-      <label>Prompt</label>
+      <label id="prompt-label">Prompt</label>
       <select id="template-select" class="template-select"></select>
       <textarea id="prompt" placeholder="Describe your image…"
                 maxlength="3000" oninput="onPromptInput()"></textarea>
-      <div class="char-count"><span id="char-count">0</span> / 3000</div>
+      <div class="char-count"><span id="char-count">0</span> / <span id="char-limit">3000</span></div>
+    </div>
+
+    <!-- Enhance review (prompt cards) — populated after /api/prompts/enhance -->
+    <div class="enhance-review" id="enhance-review">
+      <div class="review-header">
+        <span><strong id="review-title">Generated prompts</strong></span>
+        <span id="review-summary"></span>
+      </div>
+      <div id="prompt-cards"></div>
     </div>
 
     <!-- Advanced toggle -->
@@ -411,6 +506,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
 const CONFIG = {
   maxPromptLength: 3000,
+  maxIdeaLength:   500,    // shorter limit when running the enhancer
+  enhanceN:        6,      // styles A–F by default; bump to 7 to include the aerial overlay
   maxBatchCount: 10,
   maxBatchMin: 1,
   wsReconnectDelay: 3500,
@@ -419,7 +516,9 @@ const CONFIG = {
 
 const DOM_IDS = {
   prompt: 'prompt',
+  promptLabel: 'prompt-label',
   charCount: 'char-count',
+  charLimit: 'char-limit',
   genBtn: 'gen-btn',
   progress: 'progress',
   progBatch: 'prog-batch',
@@ -439,6 +538,12 @@ const DOM_IDS = {
   loraRow: 'lora-row',
   shareInstagramBtn: 'share-instagram-btn',
   templateSelect: 'template-select',
+  modeDirectBtn: 'mode-direct',
+  modeEnhanceBtn: 'mode-enhance',
+  enhanceReview: 'enhance-review',
+  reviewSummary: 'review-summary',
+  reviewTitle: 'review-title',
+  promptCards: 'prompt-cards',
 };
 
 const EVENTS = {
@@ -519,6 +624,14 @@ const state = {
   generatedImages: [],
   loraName:     '',     // populated by buildLoraButtons() from GET /api/loras
   loraStrength: 0.5,
+  // Enhance-from-idea flow:
+  //   mode='direct'  → prompt text + batch_count (classic)
+  //   mode='enhance' → idea text → POST /api/prompts/enhance → review list → POST /api/generate{prompts}
+  // enhancePhase tracks where the enhance flow is: 'idea' (enter idea, button reads "Enhance prompts")
+  //                                                'review' (cards visible, button reads "Generate N images")
+  mode: 'direct',
+  enhancePhase: 'idea',
+  enhancedPrompts: [],  // [{style, name, prompt, selected: true}, ...]
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -745,7 +858,14 @@ const onBatchDone = (onComplete) => {
   if (state.doneCount >= state.batchTotal) onComplete();
 };
 
+// Main button dispatcher — what "generate" means depends on mode + phase.
 const generate = async () => {
+  if (state.mode === 'enhance' && state.enhancePhase === 'idea') return enhance();
+  if (state.mode === 'enhance' && state.enhancePhase === 'review') return generateFromPrompts();
+  return generateDirect();
+};
+
+const generateDirect = async () => {
   const promptText = $(DOM_IDS.prompt).value.trim();
   if (!promptText) { ArtRium.toast('Please enter a prompt.'); return; }
   if (!wsConn.ready) { ArtRium.toast('Not connected yet — please wait.'); return; }
@@ -753,13 +873,72 @@ const generate = async () => {
   state.batchTotal = state.batchCount;
   state.doneCount = 0;
 
+  await startGenerationRequest({
+    prompt: promptText,
+    batch_count: state.batchCount,
+  });
+};
+
+// Step 1 of enhance flow: send idea → get 6 stylised prompts back.
+const enhance = async () => {
+  const idea = $(DOM_IDS.prompt).value.trim();
+  if (!idea) { ArtRium.toast('Enter an idea to enhance.'); return; }
+
+  const btn = $(DOM_IDS.genBtn);
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Enhancing prompts…';
+
+  try {
+    const r = await apiFetch('/api/prompts/enhance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idea, n: CONFIG.enhanceN }),
+    });
+    const d = await r.json();
+    state.enhancedPrompts = (d.prompts || []).map(p => ({ ...p, selected: true }));
+    if (!state.enhancedPrompts.length) {
+      ArtRium.toast('No prompts produced — try a different idea.', true);
+      btn.textContent = originalText;
+      btn.disabled = false;
+      return;
+    }
+    if (d.produced < d.requested) {
+      ArtRium.toast(`${d.produced} of ${d.requested} styles produced (others skipped).`);
+    }
+    state.enhancePhase = 'review';
+    renderEnhanceReview();
+    updateGenButton();
+  } catch (e) {
+    ArtRium.toast(e.message || 'Enhance failed.', true);
+    btn.textContent = originalText;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// Step 2 of enhance flow: take selected enhanced prompts and run them through /api/generate.
+const generateFromPrompts = async () => {
+  const selected = state.enhancedPrompts.filter(p => p.selected);
+  if (!selected.length) { ArtRium.toast('Select at least one prompt.'); return; }
+  if (!wsConn.ready) { ArtRium.toast('Not connected yet — please wait.'); return; }
+
+  state.batchTotal = selected.length;
+  state.doneCount = 0;
+
+  await startGenerationRequest({
+    prompts: selected.map(p => p.prompt),
+  });
+};
+
+// Shared finalize for both direct + enhance paths.
+const startGenerationRequest = async (extra) => {
   $(DOM_IDS.result).classList.add('show');
   progress.show();
   $(DOM_IDS.genBtn).disabled = true;
 
-  setText(DOM_IDS.progBatch,
-    state.batchCount > 1 ? `Queuing ${state.batchCount} images…` : 'Queuing…'
-  );
+  const total = state.batchTotal;
+  setText(DOM_IDS.progBatch, total > 1 ? `Queuing ${total} images…` : 'Queuing…');
 
   const seed = parseInt($(DOM_IDS.seed).value ?? '-1');
 
@@ -768,25 +947,119 @@ const generate = async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        prompt: promptText,
         seed,
         width: state.imgWidth,
         height: state.imgHeight,
         client_id: state.clientId,
-        batch_count: state.batchCount,
         lora_name: state.loraName,
         lora_strength: state.loraStrength,
+        ...extra,
       }),
     });
-
     const d = await r.json();
-    setText(DOM_IDS.progBatch,
-      d.batch_count > 1 ? `Image 1 / ${d.batch_count}` : 'Waiting for GPU…'
-    );
+    setText(DOM_IDS.progBatch, d.batch_count > 1 ? `Image 1 / ${d.batch_count}` : 'Waiting for GPU…');
   } catch (e) {
     ArtRium.toast(e.message || 'Failed to reach server.', true);
     progress.reset();
   }
+};
+
+// ── Mode + enhance review ──────────────────────────────────────────────────
+
+const setMode = (mode) => {
+  if (mode === state.mode) return;
+  state.mode = mode;
+  state.enhancePhase = 'idea';
+  state.enhancedPrompts = [];
+
+  // Toggle buttons
+  $(DOM_IDS.modeDirectBtn).classList.toggle('active', mode === 'direct');
+  $(DOM_IDS.modeEnhanceBtn).classList.toggle('active', mode === 'enhance');
+
+  // Field decorations
+  const promptEl = $(DOM_IDS.prompt);
+  const tplEl = $(DOM_IDS.templateSelect);
+  if (mode === 'enhance') {
+    setText(DOM_IDS.promptLabel, 'Idea');
+    promptEl.placeholder = "e.g. 'iron oxide spreading through deep blue water'";
+    promptEl.maxLength = CONFIG.maxIdeaLength;
+    setText(DOM_IDS.charLimit, String(CONFIG.maxIdeaLength));
+    tplEl.style.display = 'none';
+  } else {
+    setText(DOM_IDS.promptLabel, 'Prompt');
+    promptEl.placeholder = 'Describe your image…';
+    promptEl.maxLength = CONFIG.maxPromptLength;
+    setText(DOM_IDS.charLimit, String(CONFIG.maxPromptLength));
+    tplEl.style.display = '';
+  }
+  onPromptInput();
+
+  // Review panel
+  $(DOM_IDS.enhanceReview).classList.remove('show');
+  $(DOM_IDS.promptCards).innerHTML = '';
+
+  updateGenButton();
+};
+
+const renderEnhanceReview = () => {
+  const container = $(DOM_IDS.promptCards);
+  container.innerHTML = '';
+
+  state.enhancedPrompts.forEach((item, i) => {
+    const card = document.createElement('div');
+    card.className = 'prompt-card selected';
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = true;
+    cb.onclick = (e) => e.stopPropagation();
+    cb.onchange = () => {
+      item.selected = cb.checked;
+      card.classList.toggle('selected', cb.checked);
+      updateGenButton();
+    };
+
+    const body = document.createElement('div');
+    body.className = 'prompt-card-body';
+    const styleName = document.createElement('div');
+    styleName.className = 'style-name';
+    styleName.textContent = `Style ${item.style} · ${item.name}`;
+    const promptText = document.createElement('div');
+    promptText.className = 'prompt-text';
+    promptText.textContent = item.prompt;
+    const expand = document.createElement('div');
+    expand.className = 'prompt-card-expand';
+    expand.textContent = 'tap to expand';
+    body.append(styleName, promptText, expand);
+
+    card.append(cb, body);
+
+    // Tap on card body toggles expand; tap on checkbox toggles selection.
+    body.onclick = () => {
+      const expanded = card.classList.toggle('expanded');
+      expand.textContent = expanded ? 'tap to collapse' : 'tap to expand';
+    };
+
+    container.appendChild(card);
+  });
+
+  setText(DOM_IDS.reviewTitle, `Generated ${state.enhancedPrompts.length} prompt${state.enhancedPrompts.length === 1 ? '' : 's'}`);
+  $(DOM_IDS.enhanceReview).classList.add('show');
+};
+
+const updateGenButton = () => {
+  const btn = $(DOM_IDS.genBtn);
+  if (state.mode === 'direct') {
+    btn.textContent = 'Generate';
+    return;
+  }
+  if (state.enhancePhase === 'idea') {
+    btn.textContent = 'Enhance prompts';
+    return;
+  }
+  const n = state.enhancedPrompts.filter(p => p.selected).length;
+  btn.textContent = n > 0 ? `Generate ${n} image${n === 1 ? '' : 's'}` : 'Select prompts to generate';
+  btn.disabled = n === 0;
 };
 
 const shareInstagram = async () => {

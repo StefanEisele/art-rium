@@ -44,7 +44,8 @@ def _build_workflow(
 
 
 class GenerateRequest(BaseModel):
-    prompt: str
+    prompt: str = ""
+    prompts: list[str] | None = None  # when set, overrides prompt + batch_count: one submission per item
     seed: int = -1
     width: int = 1024
     height: int = 1024
@@ -52,6 +53,11 @@ class GenerateRequest(BaseModel):
     batch_count: int = 1
     lora_name: str = DEFAULT_LORA
     lora_strength: float = 0.5
+
+
+class EnhancePromptsRequest(BaseModel):
+    idea: str
+    n: int = 6
 
 
 @router.get("/api/loras", dependencies=[Depends(require_auth)])
@@ -62,19 +68,31 @@ async def list_loras():
 
 @router.post("/api/generate", dependencies=[Depends(require_auth)])
 async def generate(req: GenerateRequest, request: Request):
-    if not req.prompt.strip():
-        raise HTTPException(status_code=400, detail="Prompt is required")
+    # Resolve the prompt list — either one-prompt × batch_count (classic mode)
+    # or an explicit list of N distinct prompts (enhancer mode).
+    if req.prompts:
+        prompt_list = [p.strip() for p in req.prompts if p.strip()]
+        if not prompt_list:
+            raise HTTPException(status_code=400, detail="prompts list is empty")
+        if len(prompt_list) > 10:
+            raise HTTPException(status_code=400, detail="At most 10 prompts per batch")
+    else:
+        if not req.prompt.strip():
+            raise HTTPException(status_code=400, detail="Prompt is required")
+        batch_count = max(1, min(10, req.batch_count))
+        prompt_list = [req.prompt] * batch_count
+
     if req.lora_name not in ALLOWED_LORAS:
         raise HTTPException(status_code=400, detail=f"Unknown LoRA: {req.lora_name}")
 
     listener = request.app.state.comfy_listener
-    batch_count = max(1, min(10, req.batch_count))
+    total = len(prompt_list)
     batch_id = str(uuid.uuid4())
     prompt_ids = []
 
-    for i in range(batch_count):
+    for i, prompt_text in enumerate(prompt_list):
         seed = (req.seed + i) if req.seed >= 0 else random.randint(0, 2**32 - 1)
-        workflow = _build_workflow(req.prompt, seed, req.width, req.height, req.lora_name, req.lora_strength)
+        workflow = _build_workflow(prompt_text, seed, req.width, req.height, req.lora_name, req.lora_strength)
 
         result = await post_prompt(workflow, listener.client_id)
 
@@ -86,17 +104,43 @@ async def generate(req: GenerateRequest, request: Request):
             prompt_id=prompt_id,
             client_id=req.client_id,
             index=i + 1,
-            total=batch_count,
+            total=total,
             batch_id=batch_id,
-            prompt_text=req.prompt,
+            prompt_text=prompt_text,
             seed=seed,
             width=req.width,
             height=req.height,
         )
         prompt_ids.append(prompt_id)
-        logger.info(f"Queued [{i+1}/{batch_count}] prompt={prompt_id}")
+        logger.info(f"Queued [{i+1}/{total}] prompt={prompt_id}")
 
-    return {"batch_id": batch_id, "prompt_ids": prompt_ids, "batch_count": batch_count}
+    return {"batch_id": batch_id, "prompt_ids": prompt_ids, "batch_count": total}
+
+
+@router.post("/api/prompts/enhance", dependencies=[Depends(require_auth)])
+async def enhance_prompts(body: EnhancePromptsRequest):
+    """Run the local Qwen prompt-enhancer over a short idea and return one
+    prompt per style family (A..F default, +G if n=7). Styles that fail
+    are silently skipped — the response may contain fewer than n entries."""
+    from services.ollama.client import enhance_zimage_prompts
+
+    if not body.idea.strip():
+        raise HTTPException(status_code=400, detail="idea is required")
+    if not (1 <= body.n <= 7):
+        raise HTTPException(status_code=400, detail="n must be between 1 and 7")
+
+    try:
+        prompts = await enhance_zimage_prompts(body.idea, n=body.n)
+    except Exception as exc:
+        logger.error("enhance_prompts failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")
+
+    if not prompts:
+        raise HTTPException(
+            status_code=502,
+            detail="Prompt enhancer returned no usable variants (all styles failed).",
+        )
+    return {"requested": body.n, "produced": len(prompts), "prompts": prompts}
 
 
 def _verify_share_token(token: str = "") -> None:

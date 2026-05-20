@@ -115,5 +115,6 @@ def list_jobs(limit: int = 20) -> list[dict[str, Any]]:
 def _summarize(params: dict[str, Any]) -> str:
     n = len(params.get("image_ids") or [])
     series = params.get("series_name") or "(none)"
-    langs = params.get("languages") or ["de", "en", "zh"]
-    return f"{n} image(s), series={series}, langs={','.join(langs)}"
+    mode = params.get("mode") or "?"
+    langs = params.get("languages") or ["en", "de"]
+    return f"mode={mode}, {n} image(s), series={series}, langs={','.join(langs)}"

@@ -1,24 +1,28 @@
 """
 WordPress article publisher — Single Source of Truth for generating
-multilingual blog posts and pushing them to WordPress as Polylang
-language-tagged posts.
+EN+DE blog posts and pushing them to WordPress as Polylang language-tagged
+posts.
 
-Two flavours, sharing language-creation order, slugs, and translation grouping:
+Live flavour (used by the Articles tool):
+
+  generate_modal_article(images, db, *, mode, ...)
+    Three modes — essay / work / lab — sharing the EN+DE generation pass
+    and per-mode Gutenberg renderers. Voice: prompts/voice-system.md +
+    prompts/mode-{mode}.md.
+
+Back-compat flavours (kept for direct callers, no longer routed via the
+HTTP API):
 
   generate_articles_for_images(images, db, *, publish)
-    Contemplative single-artwork (or small-series) art-rium voice. 4 paragraphs.
-    Voice rules: prompts/voice.md.
+    Plain 4-paragraph article-rium voice path. Voice: prompts/voice.md.
 
-  generate_rich_articles_for_series(images, db, *, series_name, parent_series,
-                                    singulart_links, publish)
-    SEO-friendly rich series article. Multi-section structure with H2
-    headings, embedded image galleries, optional Singulart product cards,
-    optional inline parent-series link. Voice rules: prompts/voice-rich.md.
+  generate_rich_articles_for_series(images, db, *, series_name, ...)
+    Older SEO-friendly series article. Voice: prompts/voice-rich.md.
 
-Polylang note: neither flavour auto-links the three posts as translations.
-Polylang Pro's REST surface only exposes /pll/v1/languages and /settings;
-linking has to be done via the WP admin (one click per post in Polylang's
-translation column) or a future custom mu-plugin endpoint.
+Polylang note: nothing auto-links the EN+DE pair as translations. Polylang
+Pro's REST surface only exposes /pll/v1/languages and /settings; linking
+is done by hand in the WP admin (one click per post in Polylang's
+translation column) or via a future custom mu-plugin endpoint.
 """
 import html
 import json
@@ -34,13 +38,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.imaging import prepare_for_vlm
 from core.models import Article, Image
-from services.ollama.client import write_article, write_rich_article
+from services.ollama.client import write_article, write_modal_article, write_rich_article
 from services.wordpress.client import request_json
 
 logger = logging.getLogger(__name__)
 
 
-_LANGS = ("en", "de", "zh")  # creation order: EN first so DE/ZH can reference it later if we add linking
+_LANGS = ("en", "de")  # creation order: EN first so DE can reference it later if we add linking
 
 
 def _md_to_html(md: str) -> str:
@@ -106,11 +110,14 @@ async def _publish_translation(
     publish: bool,
     yoast_meta: dict[str, str] | None = None,
     extra_result_fields: dict[str, Any] | None = None,
+    category_id: int | None = None,
 ) -> dict:
     """POST one language to WP + queue the Article row + return the result dict.
 
     The caller owns db.commit() — we only db.add() so the whole translation
-    set commits in a single tx.
+    set commits in a single tx. When *category_id* is set, the post is
+    assigned to that taxonomy term — required for the new permalink
+    structure /%category%/%postname%/.
     """
     slug = _slugify(block["title"], lang)
     target_status = "publish" if publish else "draft"
@@ -126,6 +133,8 @@ async def _publish_translation(
         post_payload["slug"] = slug
     if yoast_meta:
         post_payload["meta"] = yoast_meta
+    if category_id is not None:
+        post_payload["categories"] = [category_id]
 
     post = await request_json("POST", "/wp/v2/posts", json=post_payload, params={"lang": lang})
     wp_post_id = post["id"]
@@ -256,24 +265,38 @@ async def generate_articles_for_images(
 # ───────────────────────────────────────────────────────────────────────────
 
 _HEADINGS = {
-    "concept":            {"de": "Das Konzept",                 "en": "The Concept",                "zh": "创作理念"},
-    "visual_language":    {"de": "Visuelle Sprache",            "en": "Visual Language",            "zh": "视觉语言"},
-    "technical_approach": {"de": "Technischer Ansatz",          "en": "Technical Approach",         "zh": "技术方法"},
-    "available_works":    {"de": "Verfügbare Werke",            "en": "Available Works",            "zh": "可购作品"},
-    "larger_practice":    {"de": "Teil einer größeren Praxis",  "en": "Part of a Larger Practice",  "zh": "更大实践的一部分"},
+    # Rich-article (back-compat) + Work-mode shared
+    "concept":            {"en": "The Concept",                "de": "Das Konzept"},
+    "visual_language":    {"en": "Visual Language",            "de": "Visuelle Sprache"},
+    "technical_approach": {"en": "Technical Approach",         "de": "Technischer Ansatz"},
+    "available_works":    {"en": "Available Works",            "de": "Verfügbare Werke"},
+    "larger_practice":    {"en": "Part of a Larger Practice",  "de": "Teil einer größeren Praxis"},
+    # Lab-mode
+    "problem":            {"en": "Problem",                    "de": "Das Problem"},
+    "approach":           {"en": "Approach",                   "de": "Ansatz"},
+    "steps":              {"en": "Steps",                      "de": "Schritte"},
+    "result":             {"en": "Result",                     "de": "Ergebnis"},
+    "why":                {"en": "Why this matters",           "de": "Warum das zählt"},
+    "tool_stack":         {"en": "Tool stack",                 "de": "Werkzeuge"},
+}
+
+_METADATA_LABELS = {
+    "year":       {"en": "Year",       "de": "Jahr"},
+    "medium":     {"en": "Medium",     "de": "Medium"},
+    "dimensions": {"en": "Dimensions", "de": "Format"},
+    "edition":    {"en": "Edition",    "de": "Edition"},
+    "status":     {"en": "Status",     "de": "Status"},
 }
 
 _SINGULART_CAPTION = {
-    "de": "Erhältlich auf Singulart",
     "en": "Available on Singulart",
-    "zh": "在 Singulart 购买限量版",
+    "de": "Erhältlich auf Singulart",
 }
 
 # {insta} and {site} are href URLs (already escaped); {site_label} is the displayed text.
 _FOOTER_TEMPLATE = {
-    "de": 'Folgen Sie der Entwicklung dieser und anderer Serien auf <a href="{insta}">Instagram</a> oder entdecken Sie weitere Arbeiten auf <a href="{site}">{site_label}</a>',
     "en": 'Follow the development of this and other series on <a href="{insta}">Instagram</a> or explore further work at <a href="{site}">{site_label}</a>',
-    "zh": '在 <a href="{insta}">Instagram</a> 关注此系列与其他作品的进展，或访问 <a href="{site}">{site_label}</a> 探索更多作品',
+    "de": 'Folgen Sie der Entwicklung dieser und anderer Serien auf <a href="{insta}">Instagram</a> oder entdecken Sie weitere Arbeiten auf <a href="{site}">{site_label}</a>',
 }
 
 
@@ -596,5 +619,484 @@ async def generate_rich_articles_for_series(
         "translation_group_id": str(translation_group_id),
         "image_ids":            [str(i) for i in image_ids],
         "kind":                 "rich",
+        "articles":             results,
+    }
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Modal article rendering — Essay / Work / Lab (EN + DE)
+# ───────────────────────────────────────────────────────────────────────────
+
+
+_MODAL_MODES = ("essay", "work", "lab")
+
+# WordPress category slug per (mode, language). The permalink structure on
+# stefaneisele.com is /%category%/%postname%/, so a missing or wrong slug
+# means posts land under /uncategorized/. Keep this in sync with the WP
+# Categories admin — slugs are unique site-wide so each row resolves to
+# exactly one term ID.
+_MODE_CATEGORY_SLUGS: dict[tuple[str, str], str] = {
+    ("essay", "en"): "essays",
+    ("essay", "de"): "aufsaetze",
+    ("work",  "en"): "works",
+    ("work",  "de"): "werke",
+    ("lab",   "en"): "lab",
+    ("lab",   "de"): "labor",
+}
+
+# Per-process WP category-id cache (slug → id). WP term IDs don't change
+# unless the user renames the slug; safe to cache for the lifetime of the
+# server. Reset on server restart.
+_CATEGORY_ID_CACHE: dict[str, int] = {}
+
+
+async def _resolve_category_id(slug: str) -> int:
+    """Resolve a WP category slug to its integer term ID. Cached per-process.
+
+    Raises RuntimeError if the slug doesn't exist — the user should create
+    the category in WP admin before generating posts in that (mode, lang).
+    """
+    if slug in _CATEGORY_ID_CACHE:
+        return _CATEGORY_ID_CACHE[slug]
+    result = await request_json("GET", "/wp/v2/categories", params={"slug": slug})
+    if not isinstance(result, list) or not result:
+        raise RuntimeError(
+            f"WordPress category not found: slug={slug!r}. Create it in WP admin "
+            f"(Posts → Categories) so the permalink /%category%/%postname%/ resolves."
+        )
+    cat_id = int(result[0]["id"])
+    _CATEGORY_ID_CACHE[slug] = cat_id
+    logger.info("Resolved WP category %r → id=%d", slug, cat_id)
+    return cat_id
+
+
+def _ordered_list_block(items: list[str]) -> str:
+    """Render a wp:list ordered block. Items are HTML-escaped here."""
+    if not items:
+        return ""
+    list_items = "\n\n".join(
+        f"<!-- wp:list-item -->\n<li>{html.escape(it)}</li>\n<!-- /wp:list-item -->"
+        for it in items
+    )
+    return (
+        '<!-- wp:list {"ordered":true} -->\n'
+        '<ol class="wp-block-list">'
+        f"{list_items}"
+        '</ol>\n'
+        '<!-- /wp:list -->'
+    )
+
+
+def _code_block(language: str, code: str, caption: str = "") -> str:
+    """Render a wp:code block with a language class for syntax highlighting.
+
+    Gutenberg's built-in code block doesn't store a language attribute by default,
+    but adding a `language-{lang}` class on the <code> element is the prism/highlight.js
+    convention every WP code-highlight plugin (Enlighter, SyntaxHighlighter Evolved,
+    Code Syntax Block) understands.
+    """
+    safe_code = html.escape(code)
+    lang_attr = json.dumps({"language": language}, separators=(",", ":"))
+    block = (
+        f"<!-- wp:code {lang_attr} -->\n"
+        f'<pre class="wp-block-code"><code class="language-{html.escape(language)}">'
+        f"{safe_code}"
+        f"</code></pre>\n"
+        f"<!-- /wp:code -->"
+    )
+    if caption:
+        block += "\n\n" + _para_block(f"<em>{html.escape(caption)}</em>")
+    return block
+
+
+def _footer_block(lang: str) -> str:
+    """Render the shared site/instagram footer paragraph used by every mode."""
+    site_label = (settings.artist_website_url or "")
+    site_label = re.sub(r"^https?://", "", site_label).rstrip("/")
+    footer_text = _FOOTER_TEMPLATE[lang].format(
+        insta=_attr_url(settings.artist_instagram_url),
+        site=_attr_url(settings.artist_website_url),
+        site_label=html.escape(site_label),
+    )
+    return _para_block(f"<em>{footer_text}</em>")
+
+
+def _metadata_block(metadata: dict[str, str], lang: str, singulart_link: str | None) -> str:
+    """Render the Work-mode metadata as a clean wp:table block.
+
+    Empty values are skipped. If a singulart_link is provided, it's appended as
+    a trailing 'View on Singulart →' row (quiet final line — not a CTA in the body)."""
+    rows: list[tuple[str, str]] = []
+    for key in ("year", "medium", "dimensions", "edition", "status"):
+        val = (metadata.get(key) or "").strip()
+        if val:
+            rows.append((_METADATA_LABELS[key][lang], val))
+
+    if singulart_link:
+        link_label = _SINGULART_CAPTION[lang]
+        rows.append((link_label, f'<a href="{_attr_url(singulart_link)}">{html.escape(link_label)} →</a>'))
+
+    if not rows:
+        return ""
+
+    body_rows = "".join(
+        f"<tr><td><strong>{html.escape(label)}</strong></td><td>{value}</td></tr>"
+        for label, value in rows
+    )
+    return (
+        '<!-- wp:table {"className":"is-style-stripes"} -->\n'
+        '<figure class="wp-block-table is-style-stripes"><table>'
+        f"<tbody>{body_rows}</tbody>"
+        '</table></figure>\n'
+        '<!-- /wp:table -->'
+    )
+
+
+# ── Essay renderer ──────────────────────────────────────────────────────────
+
+
+def _render_essay_post(slots: dict, lang: str, images: list[Image]) -> str:
+    """Stitch Essay-mode prose into a Gutenberg post body."""
+    blocks: list[str] = []
+
+    for paragraph in slots["intro"]:
+        blocks.append(_para_block(html.escape(paragraph)))
+
+    gallery_a, gallery_b = _split_for_galleries(images)
+    if gallery_a:
+        blocks.append(_gallery_block(gallery_a))
+
+    for idx, movement in enumerate(slots["movements"]):
+        blocks.append(_h2_block(movement["heading"]))
+        for paragraph in movement["body"]:
+            blocks.append(_para_block(html.escape(paragraph)))
+        # Drop the second gallery (when present) between movements 2 and 3 — keeps
+        # the page from being a wall of text in image-heavy essays.
+        if gallery_b and idx == max(0, len(slots["movements"]) // 2 - 1):
+            blocks.append(_gallery_block(gallery_b))
+            gallery_b = []
+
+    if gallery_b:
+        blocks.append(_gallery_block(gallery_b))
+
+    if slots.get("closing"):
+        blocks.append(_para_block(html.escape(slots["closing"])))
+
+    blocks.append(_separator_block())
+    blocks.append(_footer_block(lang))
+    return "\n\n".join(blocks)
+
+
+# ── Work renderer ──────────────────────────────────────────────────────────
+
+
+def _render_work_post(
+    slots: dict,
+    lang: str,
+    images: list[Image],
+    singulart_links: list[dict] | None,
+    parent_series: dict[str, str] | None,
+) -> str:
+    """Stitch Work/Series-mode prose into a Gutenberg post body."""
+    blocks: list[str] = []
+
+    # Opening line — styled as a lead paragraph (italic) so it visually carries weight.
+    opening = html.escape(slots["opening_line"])
+    blocks.append(
+        '<!-- wp:paragraph {"className":"has-drop-cap"} -->\n'
+        f'<p class="has-drop-cap"><em>{opening}</em></p>\n'
+        '<!-- /wp:paragraph -->'
+    )
+
+    for paragraph in slots["body"]:
+        blocks.append(_para_block(html.escape(paragraph)))
+
+    gallery_a, gallery_b = _split_for_galleries(images)
+    if gallery_a:
+        blocks.append(_gallery_block(gallery_a))
+
+    if singulart_links and slots.get("available_works_intro"):
+        blocks.append(_h2_block(_HEADINGS["available_works"][lang]))
+        blocks.append(_para_block(html.escape(slots["available_works_intro"])))
+        for link in singulart_links:
+            blocks.append(_h3_block(link.get("title") or ""))
+            blocks.append(_singulart_image_block(link, _SINGULART_CAPTION[lang]))
+
+    if parent_series and slots.get("larger_practice"):
+        blocks.append(_h2_block(_HEADINGS["larger_practice"][lang]))
+        for paragraph in slots["larger_practice"]:
+            escaped = html.escape(paragraph)
+            blocks.append(_para_block(_render_parent_placeholder(escaped, parent_series)))
+
+    if gallery_b:
+        blocks.append(_gallery_block(gallery_b))
+
+    blocks.append(_separator_block())
+    # Pick the Singulart URL for the metadata-block trailing line, if any.
+    singulart_link = (singulart_links[0]["url"] if singulart_links else None)
+    metadata_block = _metadata_block(slots.get("metadata") or {}, lang, singulart_link)
+    if metadata_block:
+        blocks.append(metadata_block)
+
+    blocks.append(_separator_block())
+    blocks.append(_footer_block(lang))
+    return "\n\n".join(blocks)
+
+
+# ── Lab renderer ───────────────────────────────────────────────────────────
+
+
+def _render_lab_post(slots: dict, lang: str, images: list[Image]) -> str:
+    """Stitch Lab/Tutorial-mode prose into a Gutenberg post body."""
+    blocks: list[str] = []
+
+    # PROBLEM
+    blocks.append(_h2_block(_HEADINGS["problem"][lang]))
+    blocks.append(_para_block(html.escape(slots["problem"])))
+
+    # APPROACH
+    blocks.append(_h2_block(_HEADINGS["approach"][lang]))
+    # solution_intro can be one paragraph or several joined by blank lines — split & render each.
+    for paragraph in re.split(r"\n\s*\n", slots["solution_intro"].strip()):
+        paragraph = paragraph.strip()
+        if paragraph:
+            blocks.append(_para_block(html.escape(paragraph)))
+
+    # Tool stack — inline as a single paragraph for a tight read.
+    if slots.get("tool_stack"):
+        label = html.escape(_HEADINGS["tool_stack"][lang])
+        stack = ", ".join(html.escape(t) for t in slots["tool_stack"])
+        blocks.append(_para_block(f"<strong>{label}:</strong> {stack}"))
+
+    # Hardware context — italic callout when present.
+    if slots.get("hardware_context"):
+        blocks.append(_para_block(f"<em>{html.escape(slots['hardware_context'])}</em>"))
+
+    # Optional gallery — useful when the post documents a visual workflow.
+    gallery_a, _gallery_b = _split_for_galleries(images)
+    if gallery_a:
+        blocks.append(_gallery_block(gallery_a))
+
+    # STEPS
+    blocks.append(_h2_block(_HEADINGS["steps"][lang]))
+    if slots.get("steps"):
+        blocks.append(_ordered_list_block(slots["steps"]))
+
+    # CODE BLOCKS — all rendered immediately after the steps list.
+    for cb in slots.get("code_blocks") or []:
+        blocks.append(_code_block(cb["language"], cb["code"], cb.get("caption", "")))
+
+    # RESULT
+    if slots.get("result"):
+        blocks.append(_h2_block(_HEADINGS["result"][lang]))
+        blocks.append(_para_block(html.escape(slots["result"])))
+
+    # WHY IT MATTERS
+    if slots.get("why_it_matters"):
+        blocks.append(_h2_block(_HEADINGS["why"][lang]))
+        blocks.append(_para_block(html.escape(slots["why_it_matters"])))
+
+    blocks.append(_separator_block())
+    blocks.append(_footer_block(lang))
+    return "\n\n".join(blocks)
+
+
+# ── body_md flattener (for Article.body_md full-text search / debugging) ────
+
+
+def _flatten_modal_body_for_search(slots: dict, mode: str) -> str:
+    """Flatten a modal-mode language block into a single string for body_md.
+
+    Not shown to readers (WP holds the rendered HTML). Used for FTS + debugging
+    + the future regenerate-metadata endpoint."""
+    parts: list[str] = []
+    if mode == "essay":
+        parts.extend(slots.get("intro") or [])
+        for mv in slots.get("movements") or []:
+            parts.append(f"## {mv['heading']}")
+            parts.extend(mv.get("body") or [])
+        if slots.get("closing"):
+            parts.append(slots["closing"])
+    elif mode == "work":
+        if slots.get("opening_line"):
+            parts.append(slots["opening_line"])
+        parts.extend(slots.get("body") or [])
+        if slots.get("available_works_intro"):
+            parts.append(slots["available_works_intro"])
+        parts.extend(slots.get("larger_practice") or [])
+    elif mode == "lab":
+        if slots.get("problem"):
+            parts.append(slots["problem"])
+        if slots.get("solution_intro"):
+            parts.append(slots["solution_intro"])
+        parts.extend(f"- {s}" for s in slots.get("steps") or [])
+        for cb in slots.get("code_blocks") or []:
+            parts.append(f"```{cb['language']}\n{cb['code']}\n```")
+        if slots.get("result"):
+            parts.append(slots["result"])
+        if slots.get("why_it_matters"):
+            parts.append(slots["why_it_matters"])
+    return "\n\n".join(p for p in parts if p)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# Modal article orchestrator
+# ───────────────────────────────────────────────────────────────────────────
+
+
+async def generate_modal_article(
+    images: list[Image],
+    db: AsyncSession,
+    *,
+    mode: str,                                                   # "essay" | "work" | "lab"
+    series_name: str | None = None,
+    parent_series: dict[str, str] | None = None,                  # Work only
+    singulart_links: list[dict] | None = None,                    # Work only
+    user_notes: str | None = None,
+    artist_mode: str = "third_person",                            # Work only
+    languages: list[str] | None = None,                           # subset of ("en","de"); None = both
+    publish: bool = False,
+) -> dict:
+    """
+    Generate an EN+DE modal article in *mode* (essay / work / lab) and push
+    each language to WordPress.
+
+    Each image must have wp_media_id and wp_source_url set (the gallery blocks
+    embed the source URLs). Re-running /media/upload after a fresh DB populates
+    these. The first image's wp_media_id becomes the WP featured_media.
+
+    Returns: {translation_group_id, image_ids, mode, articles[...]} where each
+    article dict carries language, wp_post_id, wp_link, status, title, excerpt,
+    tags, meta_description, focus_keyphrase, og_image_idea.
+    """
+    if mode not in _MODAL_MODES:
+        raise ValueError(f"generate_modal_article: mode must be one of {_MODAL_MODES}, got {mode!r}")
+    if not images:
+        raise ValueError("generate_modal_article requires at least one image")
+
+    for img in images:
+        if not img.wp_media_id:
+            raise ValueError(
+                f"Image {img.id} has no wp_media_id — upload via /api/wordpress/media/upload first."
+            )
+        if not img.wp_source_url:
+            raise ValueError(
+                f"Image {img.id} has no wp_source_url — gallery rendering needs the WP source URL."
+            )
+
+    # Per-mode input validation: Work is the only mode that uses series/parent/singulart.
+    if mode != "work":
+        if parent_series:
+            logger.warning("Mode %s does not use parent_series; ignoring.", mode)
+            parent_series = None
+        if singulart_links:
+            logger.warning("Mode %s does not use singulart_links; ignoring.", mode)
+            singulart_links = None
+
+    if parent_series is not None and not (parent_series.get("name") and parent_series.get("url")):
+        raise ValueError("parent_series must have both 'name' and 'url' keys")
+    if singulart_links:
+        for i, link in enumerate(singulart_links):
+            if not (link.get("title") and link.get("url") and link.get("thumbnail_url")):
+                raise ValueError(
+                    f"singulart_links[{i}] must have 'title', 'url', and 'thumbnail_url' keys"
+                )
+
+    image_ids = [img.id for img in images]
+    logger.info(
+        "Modal article gen — mode=%s, %d image(s), series=%s, parent=%s, singulart=%d",
+        mode, len(images), series_name or "(none)",
+        parent_series["name"] if parent_series else "(none)",
+        len(singulart_links or []),
+    )
+
+    jpgs = await _encode_for_vlm(images)
+    title_hints, alt_texts, notes_list = _meta_hints_for(images)
+
+    bodies = await write_modal_article(
+        jpgs,
+        mode=mode,
+        series_name=series_name,
+        parent_series=parent_series,
+        has_singulart=bool(singulart_links),
+        title_hints=title_hints,
+        alt_texts=alt_texts,
+        notes_list=notes_list,
+        user_notes=user_notes,
+        artist_mode=artist_mode,
+    )
+
+    translation_group_id = uuid.uuid4()
+    target_status = "publish" if publish else "draft"
+    featured_media = images[0].wp_media_id
+    results: list[dict] = []
+
+    selected_langs = tuple(lang for lang in _LANGS if not languages or lang in languages)
+    if not selected_langs:
+        raise ValueError(f"No supported languages selected — got {languages!r}, supported {_LANGS}")
+
+    # Resolve the WP category ID for each (mode, lang) once. Fail fast (before
+    # we POST anything to WP) so a missing category surfaces as a job error
+    # rather than a half-published translation pair.
+    category_ids: dict[str, int] = {}
+    for lang in selected_langs:
+        slug = _MODE_CATEGORY_SLUGS.get((mode, lang))
+        if slug is None:
+            raise RuntimeError(f"No category slug mapped for mode={mode!r} lang={lang!r}")
+        category_ids[lang] = await _resolve_category_id(slug)
+
+    for lang in selected_langs:
+        block = bodies[lang]
+        if mode == "essay":
+            body_html = _render_essay_post(block, lang, images)
+        elif mode == "work":
+            body_html = _render_work_post(block, lang, images, singulart_links, parent_series)
+        else:  # lab
+            body_html = _render_lab_post(block, lang, images)
+
+        yoast_meta: dict[str, str] = {}
+        if block.get("meta_description"):
+            yoast_meta["_yoast_wpseo_metadesc"] = block["meta_description"]
+        if block.get("focus_keyphrase"):
+            yoast_meta["_yoast_wpseo_focuskw"] = block["focus_keyphrase"]
+
+        logger.info(
+            "Modal article — POST /wp/v2/posts?lang=%s (mode=%s, status=%s, slug=%s, category=%d, %d blocks)",
+            lang, mode, target_status, _slugify(block["title"], lang),
+            category_ids[lang],
+            body_html.count("<!-- wp:"),
+        )
+        result = await _publish_translation(
+            db,
+            lang=lang,
+            block=block,
+            body_html=body_html,
+            body_md_for_db=_flatten_modal_body_for_search(block, mode),
+            featured_media=featured_media,
+            category_id=category_ids[lang],
+            translation_group_id=translation_group_id,
+            image_ids=image_ids,
+            publish=publish,
+            yoast_meta=yoast_meta or None,
+            extra_result_fields={
+                "mode":             mode,
+                "meta_description": block.get("meta_description") or "",
+                "focus_keyphrase":  block.get("focus_keyphrase") or "",
+                "og_image_idea":    block.get("og_image_idea") or "",
+            },
+        )
+        results.append(result)
+
+    await db.commit()
+    logger.info(
+        "Modal article gen done — mode=%s, group=%s, %d post(s) %s",
+        mode, translation_group_id, len(results), target_status,
+    )
+
+    return {
+        "translation_group_id": str(translation_group_id),
+        "image_ids":            [str(i) for i in image_ids],
+        "mode":                 mode,
+        "kind":                 "modal",
         "articles":             results,
     }

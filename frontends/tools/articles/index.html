@@ -147,16 +147,28 @@
         <div class="hint" id="img-status"></div>
       </div>
 
-      <!-- Series identity -->
+      <!-- Article mode -->
       <div class="card">
+        <h2>Article mode</h2>
+        <div class="hint">Each mode follows the Stefan Eisele writing system prompt — different audience, length, structure.</div>
+        <div class="chips" id="mode-chips">
+          <button type="button" class="chip active" data-mode="essay" onclick="setMode('essay', this)">Essay</button>
+          <button type="button" class="chip" data-mode="work" onclick="setMode('work', this)">Work / Series</button>
+          <button type="button" class="chip" data-mode="lab" onclick="setMode('lab', this)">Lab (Tutorial)</button>
+        </div>
+        <div class="hint" id="mode-hint" style="margin-top:4px">1,200–3,500 words. Thesis-driven, critic-audience. Concrete opening → thesis by paragraph 2 → 3–5 movements → hardest claim. Cites real sources with date + venue.</div>
+      </div>
+
+      <!-- Series identity (Work mode only) -->
+      <div class="card" id="series-card">
         <h2>Series</h2>
         <div>
           <label class="label" for="series-name-input">Series name</label>
           <input type="text" id="series-name-input" placeholder='e.g. "Materials at Rest"' maxlength="120">
-          <div class="hint" style="margin-top:4px">Used as article title and quoted in the intro across all languages. Leave blank to let the model pick.</div>
+          <div class="hint" style="margin-top:4px" id="series-hint">Used as the article title and quoted in the intro. Leave blank to let the model pick.</div>
         </div>
 
-        <details class="collapsible">
+        <details class="collapsible" id="parent-collapsible">
           <summary>Parent series (optional)</summary>
           <div class="body">
             <div class="hint">If this series continues a prior body of work, link to its page. The LLM weaves an inline anchor into the “Larger Practice” section.</div>
@@ -171,7 +183,7 @@
           </div>
         </details>
 
-        <details class="collapsible">
+        <details class="collapsible" id="singulart-collapsible">
           <summary>Singulart products (optional)</summary>
           <div class="body">
             <div class="hint">Add up to 10 product links. Each renders as a card in the “Available Works” section.</div>
@@ -186,17 +198,17 @@
         <h2>Voice & content</h2>
         <div>
           <label class="label" for="notes-input">Notes / context for the model</label>
-          <textarea id="notes-input" rows="3" placeholder="Optional. Mood, technical notes, references, anything you want anchored in the prose. e.g. 'Focus on the way light dies inside the rust. The series came from a residency in Lisbon.'" maxlength="2000"></textarea>
-          <div class="hint" style="margin-top:4px">Free text, ≤2000 chars. The LLM uses this as context — it does not quote verbatim.</div>
+          <textarea id="notes-input" rows="3" placeholder="" maxlength="2000"></textarea>
+          <div class="hint" style="margin-top:4px" id="notes-hint">Free text, ≤2000 chars. The LLM uses this as context — it does not quote verbatim.</div>
         </div>
 
-        <div>
+        <div id="perspective-row">
           <label class="label">Perspective</label>
           <div class="chips" id="artist-mode-chips">
             <button type="button" class="chip active" data-mode="third_person" onclick="setArtistMode('third_person', this)">Third-person (curatorial)</button>
             <button type="button" class="chip" data-mode="first_person" onclick="setArtistMode('first_person', this)">First-person (artist voice)</button>
           </div>
-          <div class="hint" style="margin-top:4px">Third-person reads as a curator; first-person lets you speak as the artist (especially in the “Technical Approach” section).</div>
+          <div class="hint" style="margin-top:4px">Third-person reads as a curator; first-person lets you speak as the artist.</div>
         </div>
       </div>
 
@@ -208,9 +220,8 @@
           <div class="chips" id="lang-chips">
             <button type="button" class="chip active" data-lang="en" onclick="toggleLang('en', this)">English</button>
             <button type="button" class="chip active" data-lang="de" onclick="toggleLang('de', this)">Deutsch</button>
-            <button type="button" class="chip active" data-lang="zh" onclick="toggleLang('zh', this)">中文</button>
           </div>
-          <div class="hint" style="margin-top:4px">Pick at least one. The model still generates all three internally for voice alignment, but only chosen languages are pushed to WordPress.</div>
+          <div class="hint" style="margin-top:4px">Pick at least one. The model generates both internally for voice alignment, but only chosen languages are pushed to WordPress.</div>
         </div>
 
         <div class="switch">
@@ -229,7 +240,7 @@
       <div class="card" id="status-card">
         <h2>Generating…</h2>
         <div class="progress-track"><div class="progress-fill"></div></div>
-        <div class="hint" id="status-message">Calling the LLM. The model writes DE/EN/ZH in one pass.</div>
+        <div class="hint" id="status-message">Calling the LLM. The model writes EN/DE in one pass.</div>
         <div class="hint" id="status-elapsed" style="font-variant-numeric: tabular-nums;">Elapsed: 0s</div>
       </div>
 
@@ -270,8 +281,9 @@
 const state = {
   apiKey: ArtRium.getApiKey(),
   selectedImages: [],
+  mode: 'essay',                                  // 'essay' | 'work' | 'lab'
   artistMode: 'third_person',
-  languages: new Set(['en', 'de', 'zh']),
+  languages: new Set(['en', 'de']),
   singulart: [],   // [{title, url, thumbnail_url}, ...]
   // Picker
   pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
@@ -280,6 +292,37 @@ const state = {
   // Generation
   busy: false, elapsedTimer: null, startTs: 0,
   activeJobId: null, pollTimer: null,
+};
+
+// Per-mode copy and UI affordances. Single source of truth for the mode picker.
+const MODE_CONFIG = {
+  essay: {
+    hint: '1,200–3,500 words. Thesis-driven, critic-audience. Concrete opening → thesis by paragraph 2 → 3–5 movements → hardest claim. Cites real sources with date + venue.',
+    notesPlaceholder: "Optional. The thesis you want to defend, 2–3 reference sources (philosophers, critics, fellow artists) with dates + venues, and any concrete opening anchor. e.g. 'Argue that AI Slop is the visible tip of human disengagement. Cite Francesco D'Isa, Philosophical Salon, Dec 2025.'",
+    notesHint: 'Free text, ≤2000 chars. Essay-mode anchors: thesis statement + citation candidates.',
+    showSeriesCard: false,
+    showPerspective: false,                       // essays are first-person by default
+    seriesLabel: 'Anchoring series (optional)',
+    seriesHint: 'Mention only if it serves the thesis.',
+  },
+  work: {
+    hint: '250–600 words. Curatorial. Opening tension line → 2–4 paragraphs → optional Singulart + parent-series sections → metadata block. The work carries the post; the text frames it.',
+    notesPlaceholder: "Optional. Mood, materials, technical context. e.g. 'Focus on the way light dies inside the rust. The series came from a residency in Lisbon.'",
+    notesHint: 'Free text, ≤2000 chars. The LLM uses this as context — it does not quote verbatim.',
+    showSeriesCard: true,
+    showPerspective: true,
+    seriesLabel: 'Series name',
+    seriesHint: 'Used as the article title. Leave blank to let the model pick.',
+  },
+  lab: {
+    hint: '600–1,500 words. Tight, workmanlike, peer-to-peer. Problem → Approach → Steps + code blocks → Result → Why it matters. SEO foregrounded — title matches search intent literally.',
+    notesPlaceholder: "Optional. Tool stack, model versions, hardware (e.g. RTX 4060 Ti 16GB). Specific friction this workflow solves. e.g. 'Z-Image Turbo + Tile-VAE upscaler at 4096². Tested on RTX 4060 Ti 16GB. Goal: seam-free tactile micro-detail.'",
+    notesHint: 'Free text, ≤2000 chars. Lab-mode anchors: tools, hardware, reproducibility details.',
+    showSeriesCard: false,
+    showPerspective: false,                       // labs are first-person workmanlike
+    seriesLabel: 'Workflow title (optional)',
+    seriesHint: 'A short name for the technique. Leave blank to let the model pick.',
+  },
 };
 
 const $ = id => document.getElementById(id);
@@ -466,6 +509,30 @@ $('picker-grid').addEventListener('scroll', () => {
 });
 
 // ── Form controls ─────────────────────────────────────────────────────────────
+function setMode(mode, el) {
+  state.mode = mode;
+  document.querySelectorAll('#mode-chips .chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  _applyModeUI();
+}
+
+function _applyModeUI() {
+  const cfg = MODE_CONFIG[state.mode] || MODE_CONFIG.essay;
+  // Mode hint + notes copy.
+  $('mode-hint').textContent     = cfg.hint;
+  $('notes-input').placeholder   = cfg.notesPlaceholder;
+  $('notes-hint').textContent    = cfg.notesHint;
+  // Series card (used by Work only — others get a slim "anchoring series" input).
+  $('series-card').style.display = '';   // always shown — Essay/Lab keep just the series-name input
+  $('series-hint').textContent   = cfg.seriesHint;
+  document.querySelector('label[for="series-name-input"]').textContent = cfg.seriesLabel;
+  // Hide parent + singulart collapsibles outside Work mode.
+  $('parent-collapsible').style.display    = cfg.showSeriesCard ? '' : 'none';
+  $('singulart-collapsible').style.display = cfg.showSeriesCard ? '' : 'none';
+  // Perspective row — Work only.
+  $('perspective-row').style.display = cfg.showPerspective ? '' : 'none';
+}
+
 function setArtistMode(mode, el) {
   state.artistMode = mode;
   document.querySelectorAll('#artist-mode-chips .chip').forEach(c => c.classList.remove('active'));
@@ -552,6 +619,7 @@ async function generate() {
 
   const body = {
     image_ids:       state.selectedImages.map(i => i.id),
+    mode:            state.mode,
     series_name:     seriesName,
     parent_series:   parentSeries,
     singulart_links: validSingulart.length ? validSingulart : null,
@@ -564,7 +632,7 @@ async function generate() {
   _enterBusy('Queuing job…');
 
   try {
-    const r = await api('/api/wordpress/article/generate-rich', {
+    const r = await api('/api/wordpress/article/generate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
@@ -684,11 +752,13 @@ function renderResult(data) {
 function makePostCard(a) {
   const card = document.createElement('div');
   card.className = 'post-card';
-  const langName = {en:'English', de:'Deutsch', zh:'中文'}[a.language] || a.language;
+  const langName = {en:'English', de:'Deutsch'}[a.language] || a.language;
+  const modeName = a.mode ? ({essay:'Essay', work:'Work / Series', lab:'Lab'}[a.mode] || a.mode) : null;
   const tags = (a.tags || []).map(t => `<span class="post-tag">${_esc(t)}</span>`).join('');
   card.innerHTML = `
     <div class="post-header">
       <span class="lang-badge">${langName}</span>
+      ${modeName ? `<span class="lang-badge" style="background:rgba(125,211,252,0.15);color:#7dd3fc">${_esc(modeName)}</span>` : ''}
       <span class="post-title">${_esc(a.title)}</span>
       <span class="post-tag" style="background:${a.status === 'published' ? 'rgba(50,215,75,0.15)' : 'rgba(245,166,35,0.15)'};color:${a.status === 'published' ? 'var(--green)' : 'var(--accent)'}">${_esc(a.status)}</span>
     </div>
@@ -732,6 +802,7 @@ window.addEventListener('load', () => {
   if (!state.apiKey) {
     ArtRium.toast('Set your API key in /tools/gallery first.', true);
   }
+  _applyModeUI();
   renderStrip();
   renderSingulartRows();
   _resumeIfActiveJob();

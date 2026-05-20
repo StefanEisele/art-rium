@@ -653,6 +653,341 @@ async def write_rich_article(
     return out
 
 
+# ── Modal article writer — Essay / Work / Lab (EN + DE) ──────────────────────
+# Replaces the trilingual rich-article path. Loads voice-system.md (universal
+# voice) + mode-{mode}.md (mode-specific task spec) and validates the slot
+# shape per mode. Existing `write_article` / `write_rich_article` stay around
+# for back-compat but are no longer routed to from the Articles tool.
+
+
+_MODAL_LANGS = ("en", "de")
+_MODAL_MODES = ("essay", "work", "lab")
+
+
+def _modal_user_text(
+    *,
+    mode: str,
+    n_images: int,
+    series_name: str | None,
+    parent_series: dict[str, str] | None,
+    has_singulart: bool,
+    user_notes: str | None,
+    artist_mode: str,
+    title_hints: list[str | None],
+    alt_texts:   list[str | None],
+    notes_list:  list[str | None],
+) -> str:
+    """Build the user-message block for the modal article writer."""
+    parts: list[str] = [f"MODE: {mode}", ""]
+
+    if mode == "work":
+        # Work mode is the only one that uses series_name / parent_series /
+        # has_singulart / artist_mode meaningfully.
+        if series_name:
+            parts.append(f"Series name: {series_name}")
+        else:
+            parts.append("No series name provided. Invent a 2–6 word working title; use the same title across en and de.")
+        if parent_series:
+            parts.append(
+                f"Parent series: {parent_series['name']} (use the [PARENT_SERIES] placeholder in larger_practice; "
+                f"do NOT write the URL; do NOT translate the parent name)."
+            )
+        else:
+            parts.append("No parent series. Set larger_practice to null.")
+        if has_singulart:
+            parts.append("Singulart products: YES. Write a single available_works_intro sentence (12–25 words).")
+        else:
+            parts.append("No Singulart products. Set available_works_intro to null.")
+        parts.append(
+            "Perspective: "
+            + ("FIRST person (the artist speaking)." if artist_mode == "first_person"
+               else "THIRD person (editorial / curatorial).")
+        )
+    elif mode == "essay":
+        parts.append("Perspective: first person — the artist's own argument. Cite real sources with date + venue only.")
+        if series_name:
+            parts.append(f"Optional anchoring series: {series_name} (mention only if it serves the thesis).")
+    elif mode == "lab":
+        parts.append("Perspective: first-person workmanlike. Peer-to-peer with ComfyUI / generative-art practitioners.")
+        if series_name:
+            parts.append(f"Workflow context name: {series_name} (use as anchor for naming the technique).")
+    else:
+        raise ValueError(f"Unknown mode: {mode!r}; expected one of {_MODAL_MODES}")
+
+    if user_notes and user_notes.strip():
+        parts.append("")
+        parts.append("Author's intent / context for this article (anchor the prose in these specifics — do not quote verbatim):")
+        parts.append(user_notes.strip())
+
+    parts.append("")
+    parts.append(f"Number of images attached: {n_images}")
+    parts.append("")
+    parts.append("Per-image metadata (use as context, do not quote verbatim):")
+    parts.extend(_format_image_meta_block(
+        title_hints, alt_texts, notes_list, always_per_image_header=True,
+    ))
+    parts.append("")
+    parts.append("Write the article now. JSON only.")
+    return "\n".join(parts)
+
+
+def _strip_str(v: Any, *, max_chars: int | None = None) -> str:
+    s = (str(v) if v is not None else "").strip()
+    return s[:max_chars] if max_chars else s
+
+
+def _strip_list(v: Any, *, max_items: int | None = None, lower: bool = False) -> list[str]:
+    if not isinstance(v, list):
+        return []
+    out: list[str] = []
+    for item in v:
+        s = (str(item) if item is not None else "").strip()
+        if not s:
+            continue
+        if lower:
+            s = s.lower()
+        out.append(s)
+    return out[:max_items] if max_items else out
+
+
+def _validate_essay_block(lang: str, block: dict) -> dict:
+    title    = _strip_str(block.get("title"), max_chars=180).rstrip(".").strip()
+    intro    = _strip_list(block.get("intro"))
+    movements_raw = block.get("movements") or []
+    closing  = _strip_str(block.get("closing"))
+    excerpt  = _strip_str(block.get("excerpt"), max_chars=155)
+    meta_desc = _strip_str(block.get("meta_description") or excerpt, max_chars=155)
+    focus_kp = _strip_str(block.get("focus_keyphrase")).lower()
+    tags     = _strip_list(block.get("tags"), max_items=6, lower=True)
+    og_idea  = _strip_str(block.get("og_image_idea"))
+
+    if not title or not intro:
+        raise RuntimeError(f"Essay LLM produced empty title/intro for lang={lang}")
+    if not isinstance(movements_raw, list) or not movements_raw:
+        raise RuntimeError(f"Essay LLM produced empty movements for lang={lang}")
+
+    movements: list[dict] = []
+    for i, mv in enumerate(movements_raw, 1):
+        if not isinstance(mv, dict):
+            continue
+        heading = _strip_str(mv.get("heading"))
+        body    = _strip_list(mv.get("body"))
+        if not heading or not body:
+            raise RuntimeError(f"Essay LLM produced movement {i} without heading/body for lang={lang}")
+        movements.append({"heading": heading, "body": body})
+
+    return {
+        "title":            title,
+        "intro":            intro,
+        "movements":        movements,
+        "closing":          closing,
+        "excerpt":          excerpt,
+        "meta_description": meta_desc,
+        "focus_keyphrase":  focus_kp,
+        "tags":             tags,
+        "og_image_idea":    og_idea,
+    }
+
+
+def _validate_work_block(
+    lang: str, block: dict, *, has_singulart: bool, has_parent: bool,
+) -> dict:
+    title         = _strip_str(block.get("title"), max_chars=180).rstrip(".").strip()
+    opening       = _strip_str(block.get("opening_line"))
+    body          = _strip_list(block.get("body"))
+    excerpt       = _strip_str(block.get("excerpt"), max_chars=155)
+    meta_desc     = _strip_str(block.get("meta_description") or excerpt, max_chars=155)
+    focus_kp      = _strip_str(block.get("focus_keyphrase")).lower()
+    tags          = _strip_list(block.get("tags"), max_items=6, lower=True)
+    og_idea       = _strip_str(block.get("og_image_idea"))
+    metadata_raw  = block.get("metadata") or {}
+
+    aw_intro: str | None = None
+    if has_singulart:
+        aw_intro = _strip_str(block.get("available_works_intro")) or None
+
+    larger: list[str] | None = None
+    if has_parent:
+        larger = _strip_list(block.get("larger_practice"))
+        if not larger:
+            raise RuntimeError(f"Work LLM missing larger_practice for lang={lang} despite parent_series")
+
+    if not title or not opening or not body:
+        raise RuntimeError(f"Work LLM produced empty title/opening/body for lang={lang}")
+
+    metadata = {
+        "year":       _strip_str(metadata_raw.get("year"))      or "",
+        "medium":     _strip_str(metadata_raw.get("medium"))    or "",
+        "dimensions": _strip_str(metadata_raw.get("dimensions")) or "",
+        "edition":    _strip_str(metadata_raw.get("edition"))   or "",
+        "status":     _strip_str(metadata_raw.get("status"))    or "",
+    }
+
+    return {
+        "title":                 title,
+        "opening_line":          opening,
+        "body":                  body,
+        "available_works_intro": aw_intro,
+        "larger_practice":       larger,
+        "metadata":              metadata,
+        "excerpt":               excerpt,
+        "meta_description":      meta_desc,
+        "focus_keyphrase":       focus_kp,
+        "tags":                  tags,
+        "og_image_idea":         og_idea,
+    }
+
+
+_LAB_CODE_LANGS = {"bash", "python", "json", "yaml", "text", "shell", "sh", "js", "javascript", "ts", "typescript"}
+
+
+def _validate_lab_block(lang: str, block: dict) -> dict:
+    title        = _strip_str(block.get("title"), max_chars=180).rstrip(".").strip()
+    problem      = _strip_str(block.get("problem"))
+    solution     = _strip_str(block.get("solution_intro"))
+    tool_stack   = _strip_list(block.get("tool_stack"), max_items=10, lower=True)
+    hardware     = block.get("hardware_context")
+    hardware_s   = _strip_str(hardware) if hardware else ""
+    steps        = _strip_list(block.get("steps"), max_items=10)
+    result       = _strip_str(block.get("result"))
+    why          = _strip_str(block.get("why_it_matters"))
+    excerpt      = _strip_str(block.get("excerpt"), max_chars=155)
+    meta_desc    = _strip_str(block.get("meta_description") or excerpt, max_chars=155)
+    focus_kp     = _strip_str(block.get("focus_keyphrase")).lower()
+    tags         = _strip_list(block.get("tags"), max_items=6, lower=True)
+    og_idea      = _strip_str(block.get("og_image_idea"))
+
+    code_raw     = block.get("code_blocks") or []
+    code_blocks: list[dict] = []
+    if isinstance(code_raw, list):
+        for cb in code_raw[:8]:
+            if not isinstance(cb, dict):
+                continue
+            code = _strip_str(cb.get("code"))
+            lang_tag = _strip_str(cb.get("language")).lower()
+            if not code:
+                continue
+            if lang_tag not in _LAB_CODE_LANGS:
+                lang_tag = "text"
+            cap_v = cb.get("caption")
+            caption = _strip_str(cap_v) if cap_v else ""
+            code_blocks.append({"language": lang_tag, "code": code, "caption": caption})
+
+    if not title or not problem or not solution or not steps:
+        raise RuntimeError(f"Lab LLM produced empty title/problem/solution/steps for lang={lang}")
+
+    return {
+        "title":             title,
+        "problem":           problem,
+        "solution_intro":    solution,
+        "tool_stack":        tool_stack,
+        "hardware_context":  hardware_s or None,
+        "steps":             steps,
+        "code_blocks":       code_blocks,
+        "result":            result,
+        "why_it_matters":    why,
+        "excerpt":           excerpt,
+        "meta_description":  meta_desc,
+        "focus_keyphrase":   focus_kp,
+        "tags":              tags,
+        "og_image_idea":     og_idea,
+    }
+
+
+async def write_modal_article(
+    jpgs: list[bytes],
+    *,
+    mode: str,                                                   # "essay" | "work" | "lab"
+    series_name: str | None = None,
+    parent_series: dict[str, str] | None = None,                  # {"name": str, "url": str} — Work mode only
+    has_singulart: bool = False,                                  # Work mode only
+    title_hints: list[str | None] | None = None,
+    alt_texts:   list[str | None] | None = None,
+    notes_list:  list[str | None] | None = None,
+    user_notes:  str | None = None,
+    artist_mode: str = "third_person",                            # Work mode only ("first_person" | "third_person")
+    timeout: float = 1800.0,
+) -> dict[str, dict[str, Any]]:
+    """
+    Generate an EN+DE article in one of three modes (essay / work / lab).
+
+    Returns {"en": {...}, "de": {...}} where each value has the slot shape
+    defined by prompts/mode-{mode}.md and validated by _validate_*_block.
+
+    Voice alignment is preserved by generating both languages in a single
+    model call. The system prompt is voice-system.md + mode-{mode}.md.
+
+    Raises:
+      ValueError on unknown mode or empty jpgs.
+      RuntimeError if Ollama returns an error / non-JSON / missing required slots.
+      httpx.HTTPError on network / timeout failures.
+    """
+    if mode not in _MODAL_MODES:
+        raise ValueError(f"write_modal_article: mode must be one of {_MODAL_MODES}, got {mode!r}")
+    if not jpgs:
+        raise ValueError("write_modal_article requires at least one image")
+    if parent_series is not None and not (parent_series.get("name") and parent_series.get("url")):
+        raise ValueError("parent_series must have both 'name' and 'url' keys")
+
+    n = len(jpgs)
+    title_hints, alt_texts, notes_list = _normalize_meta_lists(
+        n, title_hints, alt_texts, notes_list,
+    )
+
+    system_prompt = (
+        _read_prompt("voice-system.md")
+        + "\n\n---\n\n"
+        + _read_prompt(f"mode-{mode}.md")
+    )
+
+    user_text = _modal_user_text(
+        mode=mode,
+        n_images=n,
+        series_name=series_name,
+        parent_series=parent_series,
+        has_singulart=has_singulart,
+        user_notes=user_notes,
+        artist_mode=artist_mode,
+        title_hints=title_hints,
+        alt_texts=alt_texts,
+        notes_list=notes_list,
+    )
+
+    logger.info(
+        "Modal article: mode=%s, model=%s, %d image(s), %dKB total, series=%s, parent=%s, singulart=%s",
+        mode, settings.ollama_llm_model, n, sum(len(j) for j in jpgs) // 1024,
+        series_name or "(none)",
+        parent_series["name"] if parent_series else "(none)",
+        has_singulart,
+    )
+
+    parsed = await _chat_json(
+        model=settings.ollama_llm_model,
+        system=system_prompt,
+        user_text=user_text,
+        jpgs=jpgs,
+        options={"temperature": 0.65, "num_ctx": 16384, "num_predict": 6000},
+        think=False,                # thinking + format:json hangs on Qwen3-family models
+        timeout=timeout,
+        label=f"write_modal_article[{mode}]",
+        salvage=_iterative_salvage,
+        max_attempts=3,             # qwen3.6 is non-deterministic; fresh samples often parse cleanly
+    )
+
+    has_parent = parent_series is not None
+    out: dict[str, dict[str, Any]] = {}
+    for lang in _MODAL_LANGS:
+        block = parsed.get(lang) or {}
+        if mode == "essay":
+            out[lang] = _validate_essay_block(lang, block)
+        elif mode == "work":
+            out[lang] = _validate_work_block(lang, block, has_singulart=has_singulart, has_parent=has_parent)
+        else:  # lab
+            out[lang] = _validate_lab_block(lang, block)
+
+    return out
+
+
 # ── Titler — title suggestions + warm-up ─────────────────────────────────────
 
 

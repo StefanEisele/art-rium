@@ -1,7 +1,7 @@
 """
 WordPress integration API — uploads gallery images to the WP media library
 with VLM-generated alt-text / SEO description / caption, and generates
-multilingual blog post drafts in the art-rium voice.
+EN+DE blog post drafts in the art-rium voice (Essay / Work / Lab modes).
 """
 import asyncio
 import logging
@@ -19,7 +19,7 @@ from core.models import Image
 from services.ollama import client as ollama_client
 from services.wordpress import article_jobs
 from services.wordpress import client as wp_client
-from services.wordpress.articles import generate_articles_for_images, generate_rich_articles_for_series
+from services.wordpress.articles import generate_modal_article
 from services.wordpress.media import upload_image_to_wp
 
 logger = logging.getLogger(__name__)
@@ -92,56 +92,8 @@ async def upload_media(body: UploadRequest, db: AsyncSession = Depends(get_db)):
     return {"uploaded": results, "errors": errors}
 
 
-class ArticleGenerateRequest(BaseModel):
-    image_ids: list[uuid.UUID] = Field(
-        min_length=1,
-        max_length=6,
-        description="1–6 image UUIDs. With more than one, the article treats them as a series.",
-    )
-    publish: bool = Field(
-        default=False,
-        description="If true, posts go up as 'publish'. Default 'draft'.",
-    )
-
-
-@router.post("/article/generate", dependencies=[Depends(_require_wp_configured)])
-async def generate_article(
-    body: ArticleGenerateRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Generate a DE/EN/ZH blog-post triple about one or more images (a series)
-    and push them to WordPress. Synchronous (~60–180s warm depending on
-    image count). All images must already be uploaded to WP via /media/upload.
-    The first image's wp_media_id becomes the WP featured_media.
-    """
-    images: list[Image] = []
-    for image_id in body.image_ids:
-        image = await db.get(Image, image_id)
-        if not image:
-            raise HTTPException(status_code=404, detail=f"Image {image_id} not found")
-        if not image.wp_media_id:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Image {image_id} is not yet uploaded to WordPress — call /media/upload first.",
-            )
-        images.append(image)
-
-    try:
-        return await generate_articles_for_images(images, db, publish=body.publish)
-    except Exception as exc:
-        logger.error(
-            "Article generation failed for %d image(s): %s",
-            len(body.image_ids), exc, exc_info=True,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"{type(exc).__name__}: {exc}",
-        )
-
-
 # ───────────────────────────────────────────────────────────────────────────
-# Rich-article endpoint — SEO-friendly multi-section series posts
+# Modal article endpoint — Essay / Work / Lab (EN + DE)
 # ───────────────────────────────────────────────────────────────────────────
 
 
@@ -156,54 +108,58 @@ class SingulartLink(BaseModel):
     thumbnail_url: str = Field(min_length=1, description="Image thumbnail URL (typically a cropped/sized image)")
 
 
-_ALLOWED_LANGUAGES = ("de", "en", "zh")
+_ALLOWED_LANGUAGES = ("en", "de")
+_ALLOWED_MODES = ("essay", "work", "lab")
 
 
-class ArticleGenerateRichRequest(BaseModel):
+class ArticleGenerateRequest(BaseModel):
     image_ids: list[uuid.UUID] = Field(
         min_length=1,
         max_length=6,
         description="1–6 image UUIDs. Featured image = first in list. Galleries auto-split for N≥4.",
     )
-    series_name:       str | None = Field(default=None, description="Name of the series (used as article title and quoted in intro). Not translated across languages.")
-    parent_series:     ParentSeries | None = Field(default=None, description="Parent series the LLM should link inline via [PARENT_SERIES] placeholder.")
-    singulart_links:   list[SingulartLink] | None = Field(default=None, max_length=10, description="Singulart product cards rendered in 'Available Works' section.")
-    notes:             str | None = Field(default=None, max_length=2000, description="Free-text intent/context for the LLM (mood, technical context, references). Anchors the prose in concrete artist intent.")
-    artist_mode:       Literal["first_person", "third_person"] = Field(default="third_person", description="Narrative perspective. 'first_person' lets the LLM speak as the artist (works for process slots); 'third_person' is editorial/curatorial.")
-    languages:         list[str] = Field(default=list(_ALLOWED_LANGUAGES), description="Subset of ('de','en','zh'). Only the chosen language(s) are pushed to WordPress; the LLM still generates all three internally for voice alignment.")
+    mode:              Literal["essay", "work", "lab"] = Field(
+        description="Article category. 'essay' = thesis-driven critic-audience long form. 'work' = curatorial work/series page with metadata block. 'lab' = ComfyUI tutorial with code blocks.",
+    )
+    series_name:       str | None = Field(default=None, description="Series name (Work) or workflow title (Lab) or anchoring series (Essay). Not translated across languages.")
+    parent_series:     ParentSeries | None = Field(default=None, description="(Work only) Parent series the LLM should link inline via [PARENT_SERIES] placeholder.")
+    singulart_links:   list[SingulartLink] | None = Field(default=None, max_length=10, description="(Work only) Singulart product cards rendered in the 'Available Works' section.")
+    notes:             str | None = Field(default=None, max_length=2000, description="Free-text intent/context for the LLM. Essay: thesis + reference sources. Work: mood/technical context. Lab: tech stack/hardware notes.")
+    artist_mode:       Literal["first_person", "third_person"] = Field(default="third_person", description="(Work only) Narrative perspective.")
+    languages:         list[str] = Field(default=list(_ALLOWED_LANGUAGES), description="Subset of ('en','de'). The LLM generates both internally for voice alignment; only the chosen language(s) are pushed to WordPress.")
     publish:           bool = Field(default=False, description="If true, posts go up as 'publish'. Default 'draft'.")
 
     @field_validator("languages")
     @classmethod
     def _check_languages(cls, v: list[str]) -> list[str]:
         if not v:
-            raise ValueError("languages must contain at least one of 'de','en','zh'")
+            raise ValueError("languages must contain at least one of 'en','de'")
         bad = [lang for lang in v if lang not in _ALLOWED_LANGUAGES]
         if bad:
             raise ValueError(f"languages contains unsupported codes: {bad}. Allowed: {_ALLOWED_LANGUAGES}")
         return list(dict.fromkeys(v))  # dedupe, preserve order
 
 
-@router.post("/article/generate-rich", dependencies=[Depends(_require_wp_configured)])
-async def generate_rich_article(
-    body: ArticleGenerateRichRequest,
+@router.post("/article/generate", dependencies=[Depends(_require_wp_configured)])
+async def generate_article(
+    body: ArticleGenerateRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Kick off a DE/EN/ZH SEO-friendly rich series article generation as a
+    Kick off an EN+DE modal article generation (Essay / Work / Lab) as a
     background job and return the job_id immediately. Total wall time can
-    exceed 6 minutes (image upload + VLM + LLM), so we run it in an
-    asyncio task and let the frontend poll /article/jobs/{job_id}.
+    exceed 6 minutes (image upload + VLM + LLM), so the work runs in an
+    asyncio task and the frontend polls /article/jobs/{job_id}.
 
     Images that have not yet been uploaded to WordPress are auto-uploaded
     (with VLM analysis) as the first phase of the job. Polylang's REST API
-    does not auto-link translations — that step still has to be done by hand
+    does not auto-link the EN+DE pair — that step has to be done by hand
     in WP admin after the job completes.
     """
     if not settings.artist_website_url or not settings.artist_instagram_url:
         raise HTTPException(
             status_code=400,
-            detail="artist_website_url and artist_instagram_url must be set in .env / config for rich-article footers.",
+            detail="artist_website_url and artist_instagram_url must be set in .env / config for article footers.",
         )
 
     # Validate image existence up-front (fast feedback, before queuing).
@@ -213,11 +169,19 @@ async def generate_rich_article(
         if not image:
             raise HTTPException(status_code=404, detail=f"Image {image_id} not found")
 
-    parent_payload = body.parent_series.model_dump() if body.parent_series else None
-    singulart_payload = [link.model_dump() for link in body.singulart_links] if body.singulart_links else None
+    # Parent series / Singulart only meaningful in Work mode — strip silently
+    # for essay/lab so the frontend can keep the fields populated without
+    # forcing the user to clear them when switching modes.
+    parent_payload = body.parent_series.model_dump() if (body.parent_series and body.mode == "work") else None
+    singulart_payload = (
+        [link.model_dump() for link in body.singulart_links]
+        if (body.singulart_links and body.mode == "work")
+        else None
+    )
 
     params = {
         "image_ids":       image_ids,
+        "mode":            body.mode,
         "series_name":     body.series_name,
         "parent_series":   parent_payload,
         "singulart_links": singulart_payload,
@@ -227,17 +191,17 @@ async def generate_rich_article(
         "publish":         body.publish,
     }
     job_id = await article_jobs.create_job(params)
-    asyncio.create_task(_run_rich_article_job(job_id, params))
+    asyncio.create_task(_run_modal_article_job(job_id, params))
 
     return {"job_id": job_id, "status": "queued"}
 
 
 @router.get("/article/jobs/{job_id}")
 async def get_article_job(job_id: str):
-    """Poll the state of a rich-article job. Returns the current job dict
+    """Poll the state of a modal-article job. Returns the current job dict
     or 404 if the job is unknown (typical after server restart, since the
     in-memory tracker is wiped). Persisted Article DB rows survive even when
-    the job is gone — list /api/wordpress/articles for those."""
+    the job is gone."""
     job = article_jobs.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found (may have been evicted or server restarted)")
@@ -246,15 +210,14 @@ async def get_article_job(job_id: str):
 
 @router.get("/article/jobs")
 async def list_article_jobs(limit: int = 20):
-    """List the most-recent rich-article jobs from the in-memory tracker."""
+    """List the most-recent modal-article jobs from the in-memory tracker."""
     return article_jobs.list_jobs(limit=limit)
 
 
-async def _run_rich_article_job(job_id: str, params: dict) -> None:
+async def _run_modal_article_job(job_id: str, params: dict) -> None:
     """Background runner: opens its own DB session, walks the job through
     upload → generate → done/failed phases, updates the job tracker."""
     from core.db import AsyncSessionLocal
-    from services.wordpress.media import upload_image_to_wp
 
     async with AsyncSessionLocal() as db:
         try:
@@ -290,11 +253,12 @@ async def _run_rich_article_job(job_id: str, params: dict) -> None:
                 job_id,
                 status="generating",
                 phase="llm",
-                message="Calling the LLM. The model writes DE/EN/ZH in one pass — this takes ~3–6 minutes.",
+                message=f"Calling the LLM ({params['mode']} mode). The model writes EN/DE in one pass — this takes ~3–6 minutes.",
             )
 
-            result = await generate_rich_articles_for_series(
+            result = await generate_modal_article(
                 images, db,
+                mode=params["mode"],
                 series_name=params["series_name"],
                 parent_series=params["parent_series"],
                 singulart_links=params["singulart_links"],
@@ -306,7 +270,7 @@ async def _run_rich_article_job(job_id: str, params: dict) -> None:
             await article_jobs.mark_done(job_id, result)
         except Exception as exc:
             logger.error(
-                "Rich article job %s failed: %s",
+                "Modal article job %s failed: %s",
                 job_id, exc, exc_info=True,
             )
             await article_jobs.mark_failed(job_id, f"{type(exc).__name__}: {exc}")

@@ -82,10 +82,10 @@ class Article(Base):
     body_md: Mapped[str | None] = mapped_column(Text)              # Markdown draft
     excerpt: Mapped[str | None] = mapped_column(Text)              # ≤155 chars, used as Yoast meta description
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String))  # 3–6 tags, generated with the article
-    language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")  # Polylang slug: en | de | zh
+    language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")  # Polylang slug: en | de (zh rows exist historically; no longer produced)
     translation_group_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), nullable=False, default=uuid.uuid4
-    )                                                               # shared across the DE/EN/ZH siblings of one piece
+    )                                                               # shared across the EN+DE siblings of one piece
     wp_post_id: Mapped[int | None] = mapped_column(Integer)        # null until pushed
     wp_link: Mapped[str | None] = mapped_column(Text)              # canonical URL after WP push
     status: Mapped[str] = mapped_column(

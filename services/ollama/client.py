@@ -676,6 +676,8 @@ def _modal_user_text(
     title_hints: list[str | None],
     alt_texts:   list[str | None],
     notes_list:  list[str | None],
+    video_descriptions: list[str] | None = None,
+    video_frame_index_ranges: list[tuple[int, int]] | None = None,
 ) -> str:
     """Build the user-message block for the modal article writer."""
     parts: list[str] = [f"MODE: {mode}", ""]
@@ -726,6 +728,35 @@ def _modal_user_text(
     parts.extend(_format_image_meta_block(
         title_hints, alt_texts, notes_list, always_per_image_header=True,
     ))
+
+    if video_descriptions:
+        parts.append("")
+        parts.append(f"Number of videos attached for embedding: {len(video_descriptions)}")
+        if video_frame_index_ranges:
+            parts.append(
+                f"After the {n_images} gallery images above, additional images in this message "
+                f"are sample frames extracted from the videos at even intervals through each clip "
+                f"(in playback order). Use them to describe what the viewer will actually see — "
+                f"colors, composition, motion arc, hands/keys for piano clips. Do NOT invent motion "
+                f"or content the frames don't show."
+            )
+        parts.append("Video manifest (index → kind/description). Each [VIDEO_K] must be placed in the")
+        parts.append("prose EXACTLY ONCE on its own paragraph line — the renderer substitutes it with")
+        parts.append("the YouTube embed at that position. Place each video where the prose naturally")
+        parts.append("introduces, pauses on, or extends what the video shows. Do NOT quote the [VIDEO_K]")
+        parts.append("token in surrounding text; do NOT write 'see [VIDEO_1] below'; just emit the bare")
+        parts.append("token as its own paragraph line. Use ALL videos. Same placement in EN and DE.")
+        for i, desc in enumerate(video_descriptions):
+            line = f"  {desc}"
+            if video_frame_index_ranges:
+                start, end = video_frame_index_ranges[i] if i < len(video_frame_index_ranges) else (0, 0)
+                if start and end and end >= start:
+                    n_frames = end - start + 1
+                    line += f" — sample frames: images {start}–{end} ({n_frames} frame{'s' if n_frames != 1 else ''})"
+                else:
+                    line += " — (no frame samples available)"
+            parts.append(line)
+
     parts.append("")
     parts.append("Write the article now. JSON only.")
     return "\n".join(parts)
@@ -906,6 +937,8 @@ async def write_modal_article(
     notes_list:  list[str | None] | None = None,
     user_notes:  str | None = None,
     artist_mode: str = "third_person",                            # Work mode only ("first_person" | "third_person")
+    video_descriptions: list[str] | None = None,                  # one entry per [VIDEO_K]; embeds via wp:embed
+    video_frame_jpgs: list[list[bytes]] | None = None,            # per-video sample frames; concatenated after gallery jpgs
     timeout: float = 1800.0,
 ) -> dict[str, dict[str, Any]]:
     """
@@ -934,6 +967,23 @@ async def write_modal_article(
         n, title_hints, alt_texts, notes_list,
     )
 
+    # Combine gallery images + per-video sample frames into a single flat list
+    # for Ollama, and remember which slice belongs to which video so the user
+    # prompt can label them ("Images N+1..N+M are frames from [VIDEO_K]").
+    all_jpgs: list[bytes] = list(jpgs)
+    video_frame_index_ranges: list[tuple[int, int]] | None = None
+    if video_frame_jpgs:
+        ranges: list[tuple[int, int]] = []
+        for frames in video_frame_jpgs:
+            if not frames:
+                ranges.append((0, 0))
+                continue
+            start = len(all_jpgs) + 1   # 1-based for the prompt
+            all_jpgs.extend(frames)
+            end = len(all_jpgs)
+            ranges.append((start, end))
+        video_frame_index_ranges = ranges
+
     system_prompt = (
         _read_prompt("voice-system.md")
         + "\n\n---\n\n"
@@ -951,22 +1001,30 @@ async def write_modal_article(
         title_hints=title_hints,
         alt_texts=alt_texts,
         notes_list=notes_list,
+        video_descriptions=video_descriptions,
+        video_frame_index_ranges=video_frame_index_ranges,
     )
 
+    n_frames = len(all_jpgs) - n
     logger.info(
-        "Modal article: mode=%s, model=%s, %d image(s), %dKB total, series=%s, parent=%s, singulart=%s",
-        mode, settings.ollama_llm_model, n, sum(len(j) for j in jpgs) // 1024,
+        "Modal article: mode=%s, model=%s, %d gallery image(s) + %d video frame(s) = %d total, %dKB, series=%s, parent=%s, singulart=%s",
+        mode, settings.ollama_llm_model, n, n_frames, len(all_jpgs),
+        sum(len(j) for j in all_jpgs) // 1024,
         series_name or "(none)",
         parent_series["name"] if parent_series else "(none)",
         has_singulart,
     )
 
+    # Bump context budget when video frames are present — each VL frame costs
+    # ~1000–2000 tokens and the default 16k cap gets tight past 2–3 videos.
+    num_ctx = 24576 if n_frames else 16384
+
     parsed = await _chat_json(
         model=settings.ollama_llm_model,
         system=system_prompt,
         user_text=user_text,
-        jpgs=jpgs,
-        options={"temperature": 0.65, "num_ctx": 16384, "num_predict": 6000},
+        jpgs=all_jpgs,
+        options={"temperature": 0.65, "num_ctx": num_ctx, "num_predict": 6000},
         think=False,                # thinking + format:json hangs on Qwen3-family models
         timeout=timeout,
         label=f"write_modal_article[{mode}]",

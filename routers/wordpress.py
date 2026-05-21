@@ -15,12 +15,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
-from core.models import Image
+from core.models import Image, Video
 from services.ollama import client as ollama_client
 from services.wordpress import article_jobs
 from services.wordpress import client as wp_client
 from services.wordpress.articles import generate_modal_article
 from services.wordpress.media import upload_image_to_wp
+from services.youtube import client as yt_client
+from services.youtube.uploader import upload_video_to_youtube
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/wordpress", dependencies=[Depends(require_auth)])
@@ -46,8 +48,9 @@ class UploadRequest(BaseModel):
 
 @router.get("/status")
 async def status():
-    """Health + config check for WP and Ollama."""
+    """Health + config check for WP, Ollama, and YouTube."""
     wp_missing = wp_client.missing_config()
+    yt_missing = yt_client.missing_config()
     return {
         "wordpress": {
             "configured": not wp_missing,
@@ -61,6 +64,12 @@ async def status():
             "vlm_model":     settings.ollama_vlm_model,
             "llm_model":     settings.ollama_llm_model,
             "reachable":     await ollama_client.reachable(),
+        },
+        "youtube": {
+            "configured":      not yt_missing,
+            "missing":         yt_missing,
+            "privacy_default": settings.youtube_privacy_default,
+            "reachable":       await yt_client.reachable() if not yt_missing else False,
         },
     }
 
@@ -118,6 +127,11 @@ class ArticleGenerateRequest(BaseModel):
         max_length=6,
         description="1–6 image UUIDs. Featured image = first in list. Galleries auto-split for N≥4.",
     )
+    video_ids: list[uuid.UUID] = Field(
+        default_factory=list,
+        max_length=6,
+        description="0–6 video UUIDs (Animate or Improv). Each is uploaded to YouTube before the LLM call; the model places [VIDEO_K] placeholders in the prose, which the renderer substitutes with wp:embed blocks.",
+    )
     mode:              Literal["essay", "work", "lab"] = Field(
         description="Article category. 'essay' = thesis-driven critic-audience long form. 'work' = curatorial work/series page with metadata block. 'lab' = ComfyUI tutorial with code blocks.",
     )
@@ -169,6 +183,29 @@ async def generate_article(
         if not image:
             raise HTTPException(status_code=404, detail=f"Image {image_id} not found")
 
+    # Validate video existence + readiness up-front.
+    video_ids = [str(vid) for vid in body.video_ids]
+    for video_id in body.video_ids:
+        video = await db.get(Video, video_id)
+        if not video:
+            raise HTTPException(status_code=404, detail=f"Video {video_id} not found")
+        if video.status != "done" or not video.filepath:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Video {video_id} is not ready (status={video.status!r}). Wait for generation to finish before embedding.",
+            )
+
+    # YouTube must be configured if any videos are requested.
+    if body.video_ids and yt_client.missing_config():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cannot embed videos — YouTube not configured. Missing: "
+                f"{yt_client.missing_config()}. Run scripts/youtube_auth.py after setting "
+                "YOUTUBE_CLIENT_ID + YOUTUBE_CLIENT_SECRET in .env."
+            ),
+        )
+
     # Parent series / Singulart only meaningful in Work mode — strip silently
     # for essay/lab so the frontend can keep the fields populated without
     # forcing the user to clear them when switching modes.
@@ -181,6 +218,7 @@ async def generate_article(
 
     params = {
         "image_ids":       image_ids,
+        "video_ids":       video_ids,
         "mode":            body.mode,
         "series_name":     body.series_name,
         "parent_series":   parent_payload,
@@ -216,7 +254,7 @@ async def list_article_jobs(limit: int = 20):
 
 async def _run_modal_article_job(job_id: str, params: dict) -> None:
     """Background runner: opens its own DB session, walks the job through
-    upload → generate → done/failed phases, updates the job tracker."""
+    upload → youtube → generate → done/failed phases, updates the job tracker."""
     from core.db import AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
@@ -235,6 +273,13 @@ async def _run_modal_article_job(job_id: str, params: dict) -> None:
                     raise RuntimeError(f"Image {iid} not found")
                 images.append(img)
 
+            videos: list[Video] = []
+            for vid in params.get("video_ids") or []:
+                v = await db.get(Video, uuid.UUID(vid))
+                if not v:
+                    raise RuntimeError(f"Video {vid} not found")
+                videos.append(v)
+
             pending = [img for img in images if not img.wp_media_id or not img.wp_source_url]
             if pending:
                 for idx, img in enumerate(pending, 1):
@@ -248,6 +293,20 @@ async def _run_modal_article_job(job_id: str, params: dict) -> None:
                 # Refresh all images to pick up wp_media_id / wp_source_url for the renderer.
                 for img in images:
                     await db.refresh(img)
+
+            pending_videos = [v for v in videos if not v.youtube_video_id or not v.youtube_url]
+            if pending_videos:
+                for idx, v in enumerate(pending_videos, 1):
+                    await article_jobs.update_job(
+                        job_id,
+                        status="uploading",
+                        phase="youtube",
+                        message=f"Uploading video {idx}/{len(pending_videos)} to YouTube…",
+                    )
+                    await upload_video_to_youtube(v, db)
+                await db.commit()
+                for v in videos:
+                    await db.refresh(v)
 
             await article_jobs.update_job(
                 job_id,
@@ -265,6 +324,7 @@ async def _run_modal_article_job(job_id: str, params: dict) -> None:
                 user_notes=params["notes"],
                 artist_mode=params["artist_mode"],
                 languages=params["languages"],
+                videos=videos or None,
                 publish=params["publish"],
             )
             await article_jobs.mark_done(job_id, result)

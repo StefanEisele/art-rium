@@ -37,7 +37,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.imaging import prepare_for_vlm
-from core.models import Article, Image
+from core.models import Article, Image, Video
+from core.video_thumb import extract_video_frames
 from services.ollama.client import write_article, write_modal_article, write_rich_article
 from services.wordpress.client import request_json
 
@@ -395,6 +396,104 @@ def _split_for_galleries(images: list[Image]) -> tuple[list[Image], list[Image]]
         return (images, [])
     half = (n + 1) // 2
     return (images[:half], images[half:])
+
+
+_VIDEO_PLACEHOLDER_RE = re.compile(r"^\s*\[VIDEO_(\d+)\]\s*$")
+
+
+# WordPress core ships CSS for exactly these aspect-ratio embed classes
+# (see wp-includes/blocks/embed/style.css). Anything outside this list
+# renders as the default 16:9 box, so we snap to the nearest supported
+# ratio rather than emit a custom class.
+_WP_ASPECT_RATIOS: list[tuple[float, str]] = [
+    (21 / 9, "wp-embed-aspect-21-9"),
+    (18 / 9, "wp-embed-aspect-18-9"),
+    (16 / 9, "wp-embed-aspect-16-9"),
+    (4 / 3,  "wp-embed-aspect-4-3"),
+    (1.0,    "wp-embed-aspect-1-1"),
+    (9 / 16, "wp-embed-aspect-9-16"),
+    (1 / 2,  "wp-embed-aspect-1-2"),
+]
+
+
+def _aspect_class(width: int | None, height: int | None) -> str:
+    """Pick the closest WordPress-core embed aspect class for the video's
+    actual dimensions. Falls back to 16:9 when width/height is unknown."""
+    if not width or not height:
+        return "wp-embed-aspect-16-9"
+    ratio = width / height
+    # Compare on log scale so distance between e.g. 4:3 and 1:1 is symmetric.
+    import math
+    target = math.log(ratio)
+    return min(_WP_ASPECT_RATIOS, key=lambda kv: abs(math.log(kv[0]) - target))[1]
+
+
+def _youtube_embed_block(url: str, width: int | None = None, height: int | None = None) -> str:
+    """Render a Gutenberg wp:embed block for a YouTube URL. The block stays
+    in sync with what the Block Editor emits when a user pastes a YouTube
+    link, so it shows up as a proper Embed block in the WP admin.
+
+    The aspect-ratio class is picked from the video's actual dimensions so
+    square Animate clips and vertical Improv recordings don't get squashed
+    into a 16:9 letterbox."""
+    safe_url = _attr_url(url)
+    aspect = _aspect_class(width, height)
+    class_attr = f"{aspect} wp-has-aspect-ratio"
+    attrs = json.dumps(
+        {
+            "url":              url,
+            "type":             "video",
+            "providerNameSlug": "youtube",
+            "responsive":       True,
+            "className":        class_attr,
+        },
+        separators=(",", ":"),
+    )
+    return (
+        f"<!-- wp:embed {attrs} -->\n"
+        f'<figure class="wp-block-embed is-type-video is-provider-youtube wp-block-embed-youtube {class_attr}">'
+        f'<div class="wp-block-embed__wrapper">\n{safe_url}\n</div></figure>\n'
+        f"<!-- /wp:embed -->"
+    )
+
+
+def _video_placeholder_index(paragraph: str) -> int | None:
+    """If *paragraph* is exactly a [VIDEO_K] token (possibly with whitespace),
+    return the 1-based index K. Otherwise None."""
+    m = _VIDEO_PLACEHOLDER_RE.match(paragraph or "")
+    return int(m.group(1)) if m else None
+
+
+def _maybe_video_block(paragraph: str, videos: list[Video] | None, consumed: set[int]) -> str | None:
+    """If *paragraph* is a [VIDEO_K] placeholder and videos[K-1] has a YouTube
+    URL, return the rendered embed block (and mark K as consumed). Otherwise
+    return None — caller should render the paragraph normally."""
+    if not videos:
+        return None
+    idx = _video_placeholder_index(paragraph)
+    if idx is None or not (1 <= idx <= len(videos)):
+        return None
+    video = videos[idx - 1]
+    if not video.youtube_url:
+        logger.warning("Video placeholder [VIDEO_%d] but video %s has no youtube_url", idx, video.id)
+        return None
+    consumed.add(idx)
+    return _youtube_embed_block(video.youtube_url, video.width, video.height)
+
+
+def _trailing_video_blocks(videos: list[Video] | None, consumed: set[int]) -> list[str]:
+    """Return embed blocks for any videos the LLM forgot to reference in
+    placeholders. Renders them in input order before the footer so the user
+    still sees what they picked."""
+    if not videos:
+        return []
+    out: list[str] = []
+    for i, video in enumerate(videos, 1):
+        if i in consumed or not video.youtube_url:
+            continue
+        logger.info("Appending unreferenced video [VIDEO_%d] %s to article tail", i, video.id)
+        out.append(_youtube_embed_block(video.youtube_url, video.width, video.height))
+    return out
 
 
 def _render_parent_placeholder(text: str, parent_series: dict[str, str]) -> str:
@@ -755,12 +854,19 @@ def _metadata_block(metadata: dict[str, str], lang: str, singulart_link: str | N
 # ── Essay renderer ──────────────────────────────────────────────────────────
 
 
-def _render_essay_post(slots: dict, lang: str, images: list[Image]) -> str:
+def _render_essay_post(
+    slots: dict,
+    lang: str,
+    images: list[Image],
+    videos: list[Video] | None = None,
+) -> str:
     """Stitch Essay-mode prose into a Gutenberg post body."""
     blocks: list[str] = []
+    consumed: set[int] = set()
 
     for paragraph in slots["intro"]:
-        blocks.append(_para_block(html.escape(paragraph)))
+        embed = _maybe_video_block(paragraph, videos, consumed)
+        blocks.append(embed if embed is not None else _para_block(html.escape(paragraph)))
 
     gallery_a, gallery_b = _split_for_galleries(images)
     if gallery_a:
@@ -769,7 +875,8 @@ def _render_essay_post(slots: dict, lang: str, images: list[Image]) -> str:
     for idx, movement in enumerate(slots["movements"]):
         blocks.append(_h2_block(movement["heading"]))
         for paragraph in movement["body"]:
-            blocks.append(_para_block(html.escape(paragraph)))
+            embed = _maybe_video_block(paragraph, videos, consumed)
+            blocks.append(embed if embed is not None else _para_block(html.escape(paragraph)))
         # Drop the second gallery (when present) between movements 2 and 3 — keeps
         # the page from being a wall of text in image-heavy essays.
         if gallery_b and idx == max(0, len(slots["movements"]) // 2 - 1):
@@ -780,7 +887,11 @@ def _render_essay_post(slots: dict, lang: str, images: list[Image]) -> str:
         blocks.append(_gallery_block(gallery_b))
 
     if slots.get("closing"):
-        blocks.append(_para_block(html.escape(slots["closing"])))
+        closing = slots["closing"]
+        embed = _maybe_video_block(closing, videos, consumed)
+        blocks.append(embed if embed is not None else _para_block(html.escape(closing)))
+
+    blocks.extend(_trailing_video_blocks(videos, consumed))
 
     blocks.append(_separator_block())
     blocks.append(_footer_block(lang))
@@ -796,9 +907,11 @@ def _render_work_post(
     images: list[Image],
     singulart_links: list[dict] | None,
     parent_series: dict[str, str] | None,
+    videos: list[Video] | None = None,
 ) -> str:
     """Stitch Work/Series-mode prose into a Gutenberg post body."""
     blocks: list[str] = []
+    consumed: set[int] = set()
 
     # Opening line — styled as a lead paragraph (italic) so it visually carries weight.
     opening = html.escape(slots["opening_line"])
@@ -809,7 +922,8 @@ def _render_work_post(
     )
 
     for paragraph in slots["body"]:
-        blocks.append(_para_block(html.escape(paragraph)))
+        embed = _maybe_video_block(paragraph, videos, consumed)
+        blocks.append(embed if embed is not None else _para_block(html.escape(paragraph)))
 
     gallery_a, gallery_b = _split_for_galleries(images)
     if gallery_a:
@@ -825,11 +939,17 @@ def _render_work_post(
     if parent_series and slots.get("larger_practice"):
         blocks.append(_h2_block(_HEADINGS["larger_practice"][lang]))
         for paragraph in slots["larger_practice"]:
-            escaped = html.escape(paragraph)
-            blocks.append(_para_block(_render_parent_placeholder(escaped, parent_series)))
+            embed = _maybe_video_block(paragraph, videos, consumed)
+            if embed is not None:
+                blocks.append(embed)
+            else:
+                escaped = html.escape(paragraph)
+                blocks.append(_para_block(_render_parent_placeholder(escaped, parent_series)))
 
     if gallery_b:
         blocks.append(_gallery_block(gallery_b))
+
+    blocks.extend(_trailing_video_blocks(videos, consumed))
 
     blocks.append(_separator_block())
     # Pick the Singulart URL for the metadata-block trailing line, if any.
@@ -846,21 +966,31 @@ def _render_work_post(
 # ── Lab renderer ───────────────────────────────────────────────────────────
 
 
-def _render_lab_post(slots: dict, lang: str, images: list[Image]) -> str:
+def _render_lab_post(
+    slots: dict,
+    lang: str,
+    images: list[Image],
+    videos: list[Video] | None = None,
+) -> str:
     """Stitch Lab/Tutorial-mode prose into a Gutenberg post body."""
     blocks: list[str] = []
+    consumed: set[int] = set()
 
     # PROBLEM
     blocks.append(_h2_block(_HEADINGS["problem"][lang]))
-    blocks.append(_para_block(html.escape(slots["problem"])))
+    problem = slots["problem"]
+    embed = _maybe_video_block(problem, videos, consumed)
+    blocks.append(embed if embed is not None else _para_block(html.escape(problem)))
 
     # APPROACH
     blocks.append(_h2_block(_HEADINGS["approach"][lang]))
     # solution_intro can be one paragraph or several joined by blank lines — split & render each.
     for paragraph in re.split(r"\n\s*\n", slots["solution_intro"].strip()):
         paragraph = paragraph.strip()
-        if paragraph:
-            blocks.append(_para_block(html.escape(paragraph)))
+        if not paragraph:
+            continue
+        embed = _maybe_video_block(paragraph, videos, consumed)
+        blocks.append(embed if embed is not None else _para_block(html.escape(paragraph)))
 
     # Tool stack — inline as a single paragraph for a tight read.
     if slots.get("tool_stack"):
@@ -889,12 +1019,18 @@ def _render_lab_post(slots: dict, lang: str, images: list[Image]) -> str:
     # RESULT
     if slots.get("result"):
         blocks.append(_h2_block(_HEADINGS["result"][lang]))
-        blocks.append(_para_block(html.escape(slots["result"])))
+        result = slots["result"]
+        embed = _maybe_video_block(result, videos, consumed)
+        blocks.append(embed if embed is not None else _para_block(html.escape(result)))
 
     # WHY IT MATTERS
     if slots.get("why_it_matters"):
         blocks.append(_h2_block(_HEADINGS["why"][lang]))
-        blocks.append(_para_block(html.escape(slots["why_it_matters"])))
+        why = slots["why_it_matters"]
+        embed = _maybe_video_block(why, videos, consumed)
+        blocks.append(embed if embed is not None else _para_block(html.escape(why)))
+
+    blocks.extend(_trailing_video_blocks(videos, consumed))
 
     blocks.append(_separator_block())
     blocks.append(_footer_block(lang))
@@ -944,6 +1080,78 @@ def _flatten_modal_body_for_search(slots: dict, mode: str) -> str:
 # ───────────────────────────────────────────────────────────────────────────
 
 
+def _video_kind_label(video: Video) -> str:
+    """Human-readable kind label for the LLM prompt.
+
+    Animate videos (workflow i2v_multi / flf2v) get described as 'animate clip';
+    Improv mixes get described by their mix kind. Anything else falls back to
+    a generic label."""
+    wf = video.workflow or ""
+    if wf in ("i2v_multi", "flf2v"):
+        return "animate clip"
+    if wf == "improv_synth":
+        return "piano improvisation (synth mix)"
+    if wf == "improv_hands":
+        return "piano improvisation (hands mix)"
+    if wf == "improv_pip":
+        return "piano improvisation (PiP mix)"
+    return "video"
+
+
+def _video_descriptions_for_prompt(videos: list[Video] | None) -> list[str] | None:
+    """One-line description per video, indexed in placeholder order ([VIDEO_1]
+    refers to videos[0]). Returns None when no videos are provided."""
+    if not videos:
+        return None
+    out: list[str] = []
+    for i, v in enumerate(videos, 1):
+        kind = _video_kind_label(v)
+        prompt = (v.prompt or "").strip().replace("\n", " ")
+        if len(prompt) > 200:
+            prompt = prompt[:200].rstrip() + "…"
+        desc = f"[VIDEO_{i}] — {kind}"
+        if prompt:
+            desc += f"; prompt: {prompt}"
+        out.append(desc)
+    return out
+
+
+async def _extract_video_frame_samples(
+    videos: list[Video] | None,
+) -> list[list[bytes]] | None:
+    """Pull a small ordered set of JPG frames per video so the VL article
+    writer can actually see what each clip looks like (not just the prompt).
+
+    Frame budget: 3 per video for ≤4 videos, otherwise 12//N (so 6 videos
+    get 2 each). Keeps the model's vision-token budget bounded under the
+    qwen3.6:27b 16k context window.
+    """
+    if not videos:
+        return None
+    n = len(videos)
+    per_video = 3 if n <= 4 else max(1, 12 // n)
+
+    frames_per_video: list[list[bytes]] = []
+    for v in videos:
+        if not v.filepath:
+            frames_per_video.append([])
+            continue
+        src = settings.storage_dir / v.filepath
+        if not src.exists():
+            logger.warning("Video %s source missing on disk: %s — no frames extracted", v.id, src)
+            frames_per_video.append([])
+            continue
+        frames = await extract_video_frames(src, count=per_video, max_edge=384)
+        frames_per_video.append(frames)
+
+    total = sum(len(f) for f in frames_per_video)
+    logger.info(
+        "Extracted %d sample frame(s) across %d video(s) (%d frames/video budget)",
+        total, n, per_video,
+    )
+    return frames_per_video
+
+
 async def generate_modal_article(
     images: list[Image],
     db: AsyncSession,
@@ -955,6 +1163,7 @@ async def generate_modal_article(
     user_notes: str | None = None,
     artist_mode: str = "third_person",                            # Work only
     languages: list[str] | None = None,                           # subset of ("en","de"); None = both
+    videos: list[Video] | None = None,                            # uploaded to YouTube, embedded via [VIDEO_K]
     publish: bool = False,
 ) -> dict:
     """
@@ -1012,6 +1221,8 @@ async def generate_modal_article(
 
     jpgs = await _encode_for_vlm(images)
     title_hints, alt_texts, notes_list = _meta_hints_for(images)
+    video_descriptions = _video_descriptions_for_prompt(videos)
+    video_frame_jpgs = await _extract_video_frame_samples(videos)
 
     bodies = await write_modal_article(
         jpgs,
@@ -1024,6 +1235,8 @@ async def generate_modal_article(
         notes_list=notes_list,
         user_notes=user_notes,
         artist_mode=artist_mode,
+        video_descriptions=video_descriptions,
+        video_frame_jpgs=video_frame_jpgs,
     )
 
     translation_group_id = uuid.uuid4()
@@ -1048,11 +1261,11 @@ async def generate_modal_article(
     for lang in selected_langs:
         block = bodies[lang]
         if mode == "essay":
-            body_html = _render_essay_post(block, lang, images)
+            body_html = _render_essay_post(block, lang, images, videos)
         elif mode == "work":
-            body_html = _render_work_post(block, lang, images, singulart_links, parent_series)
+            body_html = _render_work_post(block, lang, images, singulart_links, parent_series, videos)
         else:  # lab
-            body_html = _render_lab_post(block, lang, images)
+            body_html = _render_lab_post(block, lang, images, videos)
 
         yoast_meta: dict[str, str] = {}
         if block.get("meta_description"):

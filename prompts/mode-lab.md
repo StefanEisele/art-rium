@@ -82,6 +82,20 @@ Each language block contains EXACTLY these fields, in this order:
 
 ---
 
+## VIDEO PLACEHOLDERS (only when a Video manifest is provided)
+
+If the user message includes a "Video manifest" block listing `[VIDEO_1]`,
+`[VIDEO_2]`, … each token MUST appear EXACTLY ONCE as the FULL value of one
+of these single-string slots: `problem`, `result`, or `why_it_matters` — OR
+as a standalone string inside `solution_intro` (split your prose around the
+placeholder by leaving a blank line). Place each video where the prose
+naturally introduces, pauses on, or extends what the video shows. Do NOT
+quote the token in surrounding text. Use ALL videos. Same placement in EN
+and DE. The renderer replaces each token with a YouTube embed at that
+position.
+
+---
+
 ## HARD RULES
 
 - NO theoretical asides about Baudelaire / aura / posthumanism — save it

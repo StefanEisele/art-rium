@@ -64,6 +64,20 @@ Each language block contains EXACTLY these fields, in this order:
 
 ---
 
+## VIDEO PLACEHOLDERS (only when a Video manifest is provided)
+
+If the user message includes a "Video manifest" block listing `[VIDEO_1]`,
+`[VIDEO_2]`, … each token MUST appear EXACTLY ONCE in the prose, as a
+standalone string entry inside one of the paragraph arrays (`intro`
+strings, a movement's `body`, or `closing`). Place each token where the
+prose naturally introduces, pauses on, or extends what the video shows.
+Do NOT quote the token in surrounding text ("see [VIDEO_1] below"); just
+emit the bare token as its own paragraph entry. Use ALL videos. Same
+placement in EN and DE. The renderer replaces each token with a YouTube
+embed at that position.
+
+---
+
 ## HARD RULES
 
 - NO hedging verbs (*seems / appears / wirkt / scheint*).

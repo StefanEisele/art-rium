@@ -60,6 +60,17 @@ class Settings(BaseSettings):
     artist_website_url: str = ""    # e.g. https://www.stefaneisele.com
     artist_instagram_url: str = ""  # e.g. https://www.instagram.com/stefaneiseleart/
 
+    # ── YouTube (used by the Articles tool to embed videos via wp:embed) ─────
+    # OAuth Desktop-app credentials from Google Cloud Console:
+    #   APIs & Services → Credentials → OAuth 2.0 Client IDs (Desktop app)
+    # Refresh token is obtained once by running `python scripts/youtube_auth.py`
+    # and survives indefinitely as long as the OAuth consent screen is set to
+    # "In production" (NOT "Testing" — testing tokens expire after 7 days).
+    youtube_client_id:        str = ""
+    youtube_client_secret:    str = ""
+    youtube_refresh_token:    str = ""
+    youtube_privacy_default:  str = "public"   # "public" | "unlisted" | "private"
+
     @field_validator("ollama_host", mode="after")
     @classmethod
     def _normalize_ollama_host(cls, v: str) -> str:

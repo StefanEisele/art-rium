@@ -212,6 +212,11 @@ class Video(Base):
     error: Mapped[str | None] = mapped_column(Text)
     comfy_prompt_id: Mapped[str | None] = mapped_column(String(128))
     workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "flf2v"
+    # YouTube upload (set when pushed via services/youtube/client.py)
+    youtube_video_id: Mapped[str | None] = mapped_column(String(32))    # e.g. "dQw4w9WgXcQ"
+    youtube_url: Mapped[str | None] = mapped_column(Text)               # canonical watch URL
+    youtube_privacy: Mapped[str | None] = mapped_column(String(16))     # "public" | "unlisted" | "private"
+    youtube_uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

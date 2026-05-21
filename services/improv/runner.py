@@ -21,7 +21,7 @@ from pathlib import Path
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import ImprovSession, Video
-from core.video_thumb import make_video_thumbnail
+from core.video_thumb import make_video_thumbnail, probe_video_dimensions
 from services.improv.mux import mux_session
 
 logger = logging.getLogger(__name__)
@@ -67,11 +67,18 @@ async def _run(session_id: uuid.UUID) -> None:
         ffmpeg_path=settings.ffmpeg_path,
     )
 
+    # Probe dimensions once per mix so the WP embed renders in the right
+    # aspect ratio (iPhone hands recording is often portrait, synth+pip
+    # follow the source video's frame).
+    synth_dim = await probe_video_dimensions(mix_synth_path)
+    hands_dim = await probe_video_dimensions(mix_hands_path)
+    pip_dim   = await probe_video_dimensions(mix_pip_path)
+
     # ── Persist output Video rows + session refs ────────────────────────────
     async with AsyncSessionLocal() as db:
-        synth = _make_video_row(mix_synth_path, source_filename, kind="synth")
-        hands = _make_video_row(mix_hands_path, source_filename, kind="hands")
-        pip   = _make_video_row(mix_pip_path,   source_filename, kind="pip")
+        synth = _make_video_row(mix_synth_path, source_filename, kind="synth", dimensions=synth_dim)
+        hands = _make_video_row(mix_hands_path, source_filename, kind="hands", dimensions=hands_dim)
+        pip   = _make_video_row(mix_pip_path,   source_filename, kind="pip",   dimensions=pip_dim)
         db.add_all([synth, hands, pip])
         await db.flush()
 
@@ -104,8 +111,15 @@ _KIND_LABELS = {
 }
 
 
-def _make_video_row(path: Path, source_filename: str, *, kind: str) -> Video:
+def _make_video_row(
+    path: Path,
+    source_filename: str,
+    *,
+    kind: str,
+    dimensions: tuple[int | None, int | None] = (None, None),
+) -> Video:
     label, workflow = _KIND_LABELS[kind]
+    w, h = dimensions
     return Video(
         id=uuid.uuid4(),
         filename=path.name,
@@ -113,6 +127,8 @@ def _make_video_row(path: Path, source_filename: str, *, kind: str) -> Video:
         prompt=f"{label} of {source_filename}",
         status="done",
         workflow=workflow,
+        width=w,
+        height=h,
     )
 
 

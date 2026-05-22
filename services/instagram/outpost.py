@@ -26,8 +26,9 @@ from sqlalchemy import select
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.imaging import prepare_for_upload
-from core.models import Image, InstagramPost, Video
+from core.models import InstagramPost, Video
 from core.scheduling import companion_at
+from services.instagram.media import load_media_refs
 from services.instagram.reel_concat import concat_reel_videos
 from workers.video_generator import generate_slideshow
 
@@ -102,17 +103,21 @@ async def dispatch_to_outpost(post_id: uuid.UUID) -> None:
 
 
 async def _dispatch_feed(post_id: uuid.UUID) -> None:
-    """Re-encode images + optional reel slideshow, POST to /enqueue."""
+    """Re-encode images + optional reel slideshow + carousel videos, POST to /enqueue.
+
+    Sends the legacy `images[]`-only shape when the post is image-only; adds
+    `videos[]` + `media_order` (JSON describing the carousel kind/idx order)
+    when the post contains any video children. The Pi handles both shapes.
+    """
+    import json as _json
+
     async with AsyncSessionLocal() as db:
         post = await db.get(InstagramPost, post_id)
         if not post or post.outpost_id:
             return
-        all_ids = [post.image_id] + list(post.carousel_image_ids or [])
-        img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-        images = {img.id: img for img in img_result.scalars().all()}
-        ordered_images = [images[i] for i in all_ids if i in images]
-        if len(ordered_images) != len(all_ids):
-            await _record_failure(post_id, "One or more images not found in DB")
+        media_refs = await load_media_refs(post, db)
+        if not media_refs:
+            await _record_failure(post_id, "Feed post has no media items")
             return
 
         caption = post.caption or ""
@@ -141,15 +146,29 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
         else:
             reel_video_path = None
 
+    image_refs = [r for r in media_refs if r.kind == "image"]
+    video_refs = [r for r in media_refs if r.kind == "video"]
+    is_mixed = bool(video_refs)
+
     # ── Re-encode images (off the DB session) ─────────────────────────────
+    encoded_images: list[tuple[bytes, str]] = []
     try:
-        encoded: list[tuple[bytes, str]] = []
-        for img in ordered_images:
-            src = settings.storage_dir / img.filepath
+        for ref in image_refs:
+            src = settings.storage_dir / ref.filepath
             jpg_bytes, jpg_name = await prepare_for_upload(src)
-            encoded.append((jpg_bytes, jpg_name))
+            encoded_images.append((jpg_bytes, jpg_name))
     except Exception as exc:
         await _record_failure(post_id, f"Image re-encode failed: {exc}")
+        return
+
+    # ── Read carousel video bytes (no re-encode; Meta accepts the source MP4) ─
+    video_bytes_list: list[tuple[bytes, str]] = []
+    try:
+        for ref in video_refs:
+            src = settings.storage_dir / ref.filepath
+            video_bytes_list.append((src.read_bytes(), ref.filename))
+    except Exception as exc:
+        await _record_failure(post_id, f"Video read failed: {exc}")
         return
 
     # ── Resolve the reel video — reuse stored video if picked, else render slideshow ─
@@ -158,8 +177,14 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
         reel_path = reel_video_path
         logger.info("dispatch_to_outpost %s — reusing stored video %s", post_id, reel_path.name)
     elif reel_publish_at is not None:
+        if not image_refs:
+            await _record_failure(
+                post_id,
+                "Reel companion slideshow needs image children — none in this post",
+            )
+            return
         try:
-            image_paths = [settings.storage_dir / img.filepath for img in ordered_images]
+            image_paths = [settings.storage_dir / r.filepath for r in image_refs]
             settings.reels_dir.mkdir(parents=True, exist_ok=True)
             reel_path = await generate_slideshow(
                 image_paths,
@@ -172,8 +197,10 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
 
     # ── Multipart upload to /enqueue ──────────────────────────────────────
     files: list[tuple[str, tuple[str, bytes, str]]] = [
-        ("images", (name, jpg, "image/jpeg")) for jpg, name in encoded
+        ("images", (name, jpg, "image/jpeg")) for jpg, name in encoded_images
     ]
+    for vid_bytes, vid_name in video_bytes_list:
+        files.append(("videos", (vid_name, vid_bytes, "video/mp4")))
     if reel_path is not None:
         with open(reel_path, "rb") as f:
             files.append(("reel_mp4", (reel_path.name, f.read(), "video/mp4")))
@@ -183,6 +210,20 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
         data["reel_publish_at"] = _iso(reel_publish_at)
     if story_publish_at is not None:
         data["story_publish_at"] = _iso(story_publish_at)
+
+    # Only emit media_order on mixed posts. Image-only stays on the legacy
+    # shape so an outdated Pi (without the mixed-media patch) keeps working.
+    if is_mixed:
+        order: list[dict] = []
+        img_idx = vid_idx = 0
+        for ref in media_refs:
+            if ref.kind == "image":
+                order.append({"kind": "image", "idx": img_idx})
+                img_idx += 1
+            else:
+                order.append({"kind": "video", "idx": vid_idx})
+                vid_idx += 1
+        data["media_order"] = _json.dumps(order)
 
     result = await _post_to_outpost(
         post_id, "/enqueue",
@@ -201,8 +242,8 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
         story_publish_at=story_publish_at,
     )
     logger.info(
-        "dispatch_to_outpost %s → outpost_id=%s (reel=%s)",
-        post_id, outpost_id, reel_path is not None,
+        "dispatch_to_outpost %s → outpost_id=%s (mixed=%s, reel=%s)",
+        post_id, outpost_id, is_mixed, reel_path is not None,
     )
 
 

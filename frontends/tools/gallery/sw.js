@@ -1,7 +1,7 @@
 importScripts('/shared/sw-base.js');
 
 artRiumSetupSw({
-  cache: 'art-rium-gallery-v1',
+  cache: 'art-rium-gallery-v2',
   shell: [
     '/tools/gallery/',
     '/tools/gallery/manifest.json',

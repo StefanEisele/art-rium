@@ -9,20 +9,21 @@ import asyncio
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, asc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
-from core.models import InstagramPost, Image, Video
+from core.models import InstagramPost, InstagramPostMedia, Image, Video
 from core.scheduling import companion_at
 from services.instagram.graph import missing_config
+from services.instagram.media import replace_media_items
 from services.instagram.publisher import publish_feed, schedule_feed
 from services.instagram.reel import schedule_reel
 from services.instagram import outpost as outpost_svc
@@ -33,11 +34,21 @@ router = APIRouter(prefix="/api/instagram", dependencies=[Depends(require_auth)]
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
+
+class MediaItem(BaseModel):
+    """One ordered child of a feed-carousel: an image OR a video."""
+    kind: Literal["image", "video"]
+    id: uuid.UUID
+
+
 class PostCreate(BaseModel):
-    kind: Optional[str] = "feed"                          # "feed" (default, image-based) | "reel" (standalone, 1–4 videos)
-    image_id: Optional[uuid.UUID] = None                  # primary / first image (required for kind='feed')
-    carousel_image_ids: Optional[list[uuid.UUID]] = None  # additional images (2nd…10th) — kind='feed' only
-    reel_video_ids: Optional[list[uuid.UUID]] = None      # 1–4 source videos to concat for kind='reel'
+    kind: Optional[str] = "feed"                            # "feed" (mixed image+video carousel) | "reel" (standalone, 1–4 videos)
+    # Preferred input for kind='feed': ordered media list (1–10), can mix images and videos.
+    media: Optional[list[MediaItem]] = Field(default=None, max_length=10)
+    # Legacy image-only inputs — accepted for back-compat. Ignored when `media` is set.
+    image_id: Optional[uuid.UUID] = None                    # primary / first image
+    carousel_image_ids: Optional[list[uuid.UUID]] = None    # additional images (2nd…10th)
+    reel_video_ids: Optional[list[uuid.UUID]] = None        # 1–4 source videos to concat for kind='reel'
     caption: Optional[str] = None
     scheduled_at: datetime          # client computes this (incl. offset logic)
     story_delay_minutes: Optional[int] = None  # null = off; N = N min after feed/reel
@@ -51,6 +62,7 @@ class PostUpdate(BaseModel):
     caption: Optional[str] = None
     scheduled_at: Optional[datetime] = None
     status: Optional[str] = None    # scheduled | posted | cancelled
+    media: Optional[list[MediaItem]] = Field(default=None, max_length=10)  # full ordered replacement; overrides carousel_image_ids
     carousel_image_ids: Optional[list[uuid.UUID]] = None
     story_delay_minutes: Optional[int] = None  # use model_fields_set to detect explicit null
     reel_delay_minutes:  Optional[int] = None
@@ -60,26 +72,81 @@ class PostUpdate(BaseModel):
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _all_image_ids(post: InstagramPost) -> list[uuid.UUID]:
-    """Return ordered list of all image IDs for a feed post (primary first).
-    Empty list for kind='reel' rows, which have no images."""
-    if not post.image_id:
-        return []
-    ids = [post.image_id]
-    if post.carousel_image_ids:
-        ids.extend(post.carousel_image_ids)
-    return ids
+def _image_ids_in_order(post: InstagramPost) -> list[uuid.UUID]:
+    """Image IDs in carousel position order (skips video children).
+    Empty list for kind='reel' rows."""
+    return [m.image_id for m in sorted(post.media, key=lambda m: m.position)
+            if m.kind == "image" and m.image_id]
 
 
-def _serialize(post: InstagramPost, images: dict[uuid.UUID, "Image"] | None = None) -> dict:
-    primary = (images or {}).get(post.image_id) if post.image_id else None
+def _video_ids_in_carousel(post: InstagramPost) -> list[uuid.UUID]:
+    """Video IDs that sit inside the feed-carousel (kind='video' media items).
+    Distinct from `reel_video_ids` (kind='reel' source clips) and from
+    `reel_video_id` (companion-reel pointer)."""
+    return [m.video_id for m in sorted(post.media, key=lambda m: m.position)
+            if m.kind == "video" and m.video_id]
+
+
+def _media_tuples_from_post(post: InstagramPost) -> list[tuple[str, uuid.UUID]]:
+    """Current ordered (kind, id) list for a post, used for diff comparisons."""
+    return [
+        (m.kind, m.image_id if m.kind == "image" else m.video_id)
+        for m in sorted(post.media, key=lambda m: m.position)
+    ]
+
+
+def _legacy_to_media(image_id: uuid.UUID | None, carousel_image_ids: list[uuid.UUID] | None) -> list[MediaItem]:
+    """Convert the old image-only API shape into a unified MediaItem list."""
+    out: list[MediaItem] = []
+    if image_id:
+        out.append(MediaItem(kind="image", id=image_id))
+    for cid in (carousel_image_ids or []):
+        out.append(MediaItem(kind="image", id=cid))
+    return out
+
+
+async def _resolve_media_items(
+    items: list[MediaItem],
+    db: AsyncSession,
+) -> list[tuple[str, uuid.UUID]]:
+    """Validate that each MediaItem references an existing, ready row.
+    Raises HTTPException on missing/not-ready media. Returns (kind, id) tuples
+    suitable for replace_media_items()."""
+    if not items:
+        raise HTTPException(status_code=400, detail="At least one media item required")
+    if len(items) > 10:
+        raise HTTPException(status_code=400, detail="At most 10 media items per post")
+
+    out: list[tuple[str, uuid.UUID]] = []
+    for idx, item in enumerate(items):
+        if item.kind == "image":
+            if not await db.get(Image, item.id):
+                raise HTTPException(status_code=404, detail=f"media[{idx}]: image {item.id} not found")
+        elif item.kind == "video":
+            vid = await db.get(Video, item.id)
+            if not vid:
+                raise HTTPException(status_code=404, detail=f"media[{idx}]: video {item.id} not found")
+            if vid.status != "done" or not vid.filepath:
+                raise HTTPException(status_code=400, detail=f"media[{idx}]: video {item.id} is not ready (status={vid.status!r})")
+        out.append((item.kind, item.id))
+    return out
+
+
+def _serialize(
+    post: InstagramPost,
+    images: dict[uuid.UUID, "Image"] | None = None,
+    videos: dict[uuid.UUID, "Video"] | None = None,
+) -> dict:
+    image_ids = _image_ids_in_order(post)
+    primary_id = image_ids[0] if image_ids else None
+    primary = (images or {}).get(primary_id) if primary_id else None
     d = {
         "id": str(post.id),
         "kind": post.kind,
-        "image_id": str(post.image_id) if post.image_id else None,
-        "carousel_image_ids": [str(i) for i in post.carousel_image_ids] if post.carousel_image_ids else None,
+        "image_id": str(primary_id) if primary_id else None,
+        "carousel_image_ids": [str(i) for i in image_ids[1:]] if len(image_ids) > 1 else None,
         "reel_video_ids": [str(i) for i in post.reel_video_ids] if post.reel_video_ids else None,
-        "is_carousel": bool(post.carousel_image_ids),
+        "is_carousel": len(post.media) > 1,
         "caption": post.caption,
         "scheduled_at": post.scheduled_at.isoformat(),
         "status": post.status,
@@ -106,6 +173,33 @@ def _serialize(post: InstagramPost, images: dict[uuid.UUID, "Image"] | None = No
         "created_at": post.created_at.isoformat(),
         "updated_at": post.updated_at.isoformat(),
     }
+    # Unified ordered media list — primary input shape for the Stage 4 frontend.
+    # Mirrors instagram_post_media in position order, with the picker-relevant
+    # display fields inlined per item.
+    if images is not None or videos is not None:
+        d["media"] = []
+        for m in sorted(post.media, key=lambda m: m.position):
+            item: dict = {"kind": m.kind, "position": m.position}
+            if m.kind == "image" and (images or {}).get(m.image_id):
+                img = images[m.image_id]
+                item.update({
+                    "id": str(img.id),
+                    "filename": img.filename,
+                    "title": img.title,
+                    "url": f"/api/image/{img.filename}",
+                    "thumb_url": f"/api/image/{img.filename}/thumb",
+                })
+            elif m.kind == "video" and (videos or {}).get(m.video_id):
+                vid = videos[m.video_id]
+                item.update({
+                    "id": str(vid.id),
+                    "filename": vid.filename,
+                    "title": vid.title,
+                    "url": f"/api/video/file/{vid.filename}" if vid.filename else None,
+                    "thumb_url": f"/api/video/thumb/{vid.id}" if vid.status == "done" else None,
+                })
+            d["media"].append(item)
+
     if images is not None:
         # Primary image info (for timeline preview)
         if primary:
@@ -115,16 +209,36 @@ def _serialize(post: InstagramPost, images: dict[uuid.UUID, "Image"] | None = No
                 "url": f"/api/image/{primary.filename}",
                 "thumb_url": f"/api/image/{primary.filename}/thumb",
             }
-        # All carousel images
-        all_ids = _all_image_ids(post)
+        # All carousel images (in position order; skips video children)
         d["carousel_images"] = [
             {
                 "filename": images[i].filename,
                 "thumb_url": f"/api/image/{images[i].filename}/thumb",
                 "url": f"/api/image/{images[i].filename}",
             }
-            for i in all_ids if i in images
+            for i in image_ids if i in images
         ]
+    if videos is not None:
+        # Reel source clips (kind='reel'): first-frame thumbnails so the
+        # timeline preview can show the actual video instead of a placeholder.
+        reel_ids = post.reel_video_ids or []
+        d["reel_videos"] = [
+            {
+                "id": str(videos[i].id),
+                "filename": videos[i].filename,
+                "thumb_url": f"/api/video/thumb/{videos[i].id}" if videos[i].status == "done" else None,
+            }
+            for i in reel_ids if i in videos and videos[i].status == "done"
+        ]
+        # Companion reel video (kind='feed' with reel_video_id) — separate
+        # field so the frontend can decide whether to badge the feed post.
+        if post.reel_video_id and post.reel_video_id in videos:
+            cv = videos[post.reel_video_id]
+            d["reel_video"] = {
+                "id": str(cv.id),
+                "filename": cv.filename,
+                "thumb_url": f"/api/video/thumb/{cv.id}" if cv.status == "done" else None,
+            }
     return d
 
 
@@ -142,13 +256,19 @@ async def list_posts(
     result = await db.execute(stmt)
     posts = result.scalars().all()
 
-    # Batch-load all referenced images (kind='reel' rows skip — they have none)
+    # Batch-load all referenced images/videos (kind='reel' rows have no media children)
     image_ids: set[uuid.UUID] = set()
+    video_ids: set[uuid.UUID] = set()
     for p in posts:
-        if p.image_id:
-            image_ids.add(p.image_id)
-        if p.carousel_image_ids:
-            image_ids.update(p.carousel_image_ids)
+        for m in p.media:
+            if m.kind == "image" and m.image_id:
+                image_ids.add(m.image_id)
+            elif m.kind == "video" and m.video_id:
+                video_ids.add(m.video_id)
+        if p.reel_video_ids:
+            video_ids.update(p.reel_video_ids)
+        if p.reel_video_id:
+            video_ids.add(p.reel_video_id)
 
     images: dict[uuid.UUID, Image] = {}
     if image_ids:
@@ -156,7 +276,13 @@ async def list_posts(
         for img in img_result.scalars().all():
             images[img.id] = img
 
-    return [_serialize(p, images) for p in posts]
+    videos: dict[uuid.UUID, Video] = {}
+    if video_ids:
+        vid_result = await db.execute(select(Video).where(Video.id.in_(video_ids)))
+        for vid in vid_result.scalars().all():
+            videos[vid.id] = vid
+
+    return [_serialize(p, images, videos) for p in posts]
 
 
 @router.get("/last-post")
@@ -188,6 +314,8 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
     if dispatch_target not in {"local", "outpost"}:
         raise HTTPException(status_code=400, detail="dispatch_target must be 'local' or 'outpost'")
 
+    media_tuples: list[tuple[str, uuid.UUID]] = []
+
     if kind == "reel":
         # Standalone reel: validate the source-video list; outpost is the only path.
         if dispatch_target != "outpost":
@@ -209,25 +337,19 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
                 status_code=400,
                 detail="reel_delay_minutes is for feed-companion reels; on kind='reel' the post itself is the reel.",
             )
-        if body.image_id or body.carousel_image_ids:
+        if body.image_id or body.carousel_image_ids or body.media:
             raise HTTPException(
                 status_code=400,
-                detail="kind='reel' must not include image_id / carousel_image_ids.",
+                detail="kind='reel' must not include image_id / carousel_image_ids / media.",
             )
     else:
-        # Feed: keep the original image-based validation.
-        if not body.image_id:
-            raise HTTPException(status_code=400, detail="kind='feed' requires image_id")
-        if not await db.get(Image, body.image_id):
-            raise HTTPException(status_code=404, detail="Image not found")
-        if body.carousel_image_ids:
-            if len(body.carousel_image_ids) > 9:
-                raise HTTPException(status_code=400, detail="Carousel supports at most 10 images (1 primary + 9 additional)")
-            for cid in body.carousel_image_ids:
-                if not await db.get(Image, cid):
-                    raise HTTPException(status_code=404, detail=f"Carousel image {cid} not found")
+        # Feed: prefer the new `media` field; fall back to legacy image_id+carousel_image_ids.
         if body.reel_video_ids:
             raise HTTPException(status_code=400, detail="reel_video_ids is only valid for kind='reel'")
+        items = body.media or _legacy_to_media(body.image_id, body.carousel_image_ids)
+        if not items:
+            raise HTTPException(status_code=400, detail="kind='feed' requires media (or legacy image_id)")
+        media_tuples = await _resolve_media_items(items, db)
 
     if dispatch_target == "outpost":
         miss = outpost_svc.missing_config()
@@ -239,8 +361,6 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
 
     post = InstagramPost(
         kind=kind,
-        image_id=body.image_id if kind == "feed" else None,
-        carousel_image_ids=(body.carousel_image_ids or None) if kind == "feed" else None,
         reel_video_ids=(body.reel_video_ids or None) if kind == "reel" else None,
         caption=body.caption,
         scheduled_at=scheduled_at,
@@ -253,6 +373,8 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
+    if kind == "feed":
+        await replace_media_items(post, media_tuples, db)
     db.add(post)
     await db.commit()
     await db.refresh(post)
@@ -268,17 +390,44 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
     else:
         asyncio.create_task(_remote_schedule(post.id))
 
-    images = await _load_images_for_post(post, db)
-    return _serialize(post, images)
+    images, videos = await _load_media_for_post(post, db)
+    return _serialize(post, images, videos)
 
 
 async def _load_images_for_post(post: InstagramPost, db: AsyncSession) -> dict[uuid.UUID, Image]:
     """Batch-fetch all referenced images for serialization. Empty for reels."""
-    if post.kind == "reel" or not post.image_id:
+    if post.kind == "reel":
         return {}
-    all_ids = _all_image_ids(post)
-    img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
+    image_ids = _image_ids_in_order(post)
+    if not image_ids:
+        return {}
+    img_result = await db.execute(select(Image).where(Image.id.in_(image_ids)))
     return {i.id: i for i in img_result.scalars().all()}
+
+
+async def _load_media_for_post(
+    post: InstagramPost, db: AsyncSession,
+) -> tuple[dict[uuid.UUID, Image], dict[uuid.UUID, Video]]:
+    """Batch-fetch every Image and Video referenced by this post (carousel
+    children, reel source clips, and the companion-reel pointer)."""
+    image_ids = _image_ids_in_order(post)
+    video_ids: set[uuid.UUID] = set(_video_ids_in_carousel(post))
+    if post.reel_video_ids:
+        video_ids.update(post.reel_video_ids)
+    if post.reel_video_id:
+        video_ids.add(post.reel_video_id)
+
+    images: dict[uuid.UUID, Image] = {}
+    if image_ids:
+        rs = await db.execute(select(Image).where(Image.id.in_(image_ids)))
+        images = {i.id: i for i in rs.scalars().all()}
+
+    videos: dict[uuid.UUID, Video] = {}
+    if video_ids:
+        rs = await db.execute(select(Video).where(Video.id.in_(video_ids)))
+        videos = {v.id: v for v in rs.scalars().all()}
+
+    return images, videos
 
 
 async def _remote_schedule(post_id: uuid.UUID) -> None:
@@ -328,9 +477,22 @@ async def update_post(
         if body.status not in allowed:
             raise HTTPException(status_code=400, detail=f"status must be one of {allowed}")
         post.status = body.status
-    if body.carousel_image_ids is not None:
-        post.carousel_image_ids = body.carousel_image_ids or None
-        invalidates_remote = True
+    if body.media is not None:
+        # Full mixed-media replacement (preferred Stage-2+ input).
+        if post.kind != "feed":
+            raise HTTPException(status_code=400, detail="media can only be edited on kind='feed'")
+        new_tuples = await _resolve_media_items(body.media, db)
+        if new_tuples != _media_tuples_from_post(post):
+            await replace_media_items(post, new_tuples, db)
+            invalidates_remote = True
+    elif body.carousel_image_ids is not None:
+        # Legacy image-only replacement — kept for frontend back-compat.
+        primary = _image_ids_in_order(post)[:1]
+        items: list[tuple[str, uuid.UUID]] = [("image", i) for i in primary]
+        items.extend(("image", cid) for cid in body.carousel_image_ids)
+        if items != _media_tuples_from_post(post):
+            await replace_media_items(post, items, db)
+            invalidates_remote = True
     if "story_delay_minutes" in body.model_fields_set:
         post.story_delay_minutes = body.story_delay_minutes
     if "reel_delay_minutes" in body.model_fields_set:
@@ -364,8 +526,8 @@ async def update_post(
     if invalidates_remote and post.status == "scheduled":
         asyncio.create_task(_remote_schedule(post.id))
 
-    images = await _load_images_for_post(post, db)
-    return _serialize(post, images)
+    images, videos = await _load_media_for_post(post, db)
+    return _serialize(post, images, videos)
 
 
 @router.delete("/posts/{post_id}", status_code=204)
@@ -405,9 +567,15 @@ async def _update_outpost_post(
 
     # Forbidden fields are only flagged when the *value* actually changes —
     # the frontend always serialises every field, so presence alone is noise.
-    new_carousel = body.carousel_image_ids or None
-    old_carousel = list(post.carousel_image_ids) if post.carousel_image_ids else None
+    current_media = _media_tuples_from_post(post)
+    current_extras = _image_ids_in_order(post)[1:]
+    new_carousel = list(body.carousel_image_ids or [])
+    old_carousel = list(current_extras)
     bad: set[str] = set()
+    if "media" in requested:
+        new_media = [(i.kind, i.id) for i in (body.media or [])]
+        if new_media != current_media:
+            bad.add("media")
     if "carousel_image_ids" in requested and new_carousel != old_carousel:
         bad.add("carousel_image_ids")
     if "reel_video_id" in requested and body.reel_video_id != post.reel_video_id:
@@ -484,7 +652,8 @@ async def _update_outpost_post(
 
     if all(v is None for v in (pi_caption, pi_scheduled_at, pi_reel_publish_at, pi_story_publish_at)):
         # Nothing to send to the Pi — return current state.
-        return _serialize(post, await _load_images_for_post(post, db))
+        images, videos = await _load_media_for_post(post, db)
+        return _serialize(post, images, videos)
 
     try:
         await outpost_svc.update_on_outpost(
@@ -502,7 +671,8 @@ async def _update_outpost_post(
     post.updated_at = datetime.now(timezone.utc)
     await db.commit()
 
-    return _serialize(post, await _load_images_for_post(post, db))
+    images, videos = await _load_media_for_post(post, db)
+    return _serialize(post, images, videos)
 
 
 async def _drop_remote_containers(creation_ids: list[str]) -> None:

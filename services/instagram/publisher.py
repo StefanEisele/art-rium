@@ -30,19 +30,21 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import httpx
-from sqlalchemy import select
 
 from core.config import settings
 from core.db import AsyncSessionLocal
-from core.models import Image, InstagramPost
+from core.models import InstagramPost
 from core.scheduling import companion_at
 from services.instagram.graph import (
+    REEL_POLL_INTERVAL,
+    REEL_POLL_TIMEOUT,
     create_media_container,
     missing_config,
     publish_container,
     share_url,
     wait_container_ready,
 )
+from services.instagram.media import MediaRef, load_media_refs
 
 logger = logging.getLogger(__name__)
 
@@ -140,17 +142,18 @@ async def publish_feed(post_id: uuid.UUID) -> tuple[PublishStatus, str | None]:
 
 @dataclass(slots=True)
 class _Snapshot:
-    """Plain-Python snapshot of post + image filenames, decoupled from any DB session."""
-    is_carousel:      bool
+    """Plain-Python snapshot of post + ordered media children, decoupled from any DB session."""
+    media:            list[MediaRef]
     caption:          str
-    primary_id:       uuid.UUID | None
-    all_ids:          list[uuid.UUID]
-    filenames_by_id:  dict[uuid.UUID, str]
     story_delay:      int | None
     reel_delay:       int | None
     companion_time:   str | None
     scheduled_at:     datetime
     feed_creation_id: str | None
+
+    @property
+    def is_carousel(self) -> bool:
+        return len(self.media) > 1
 
 
 async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
@@ -158,15 +161,13 @@ async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
         post = await db.get(InstagramPost, post_id)
         if not post or post.status != "scheduled":
             return None
-        all_ids = [post.image_id] + list(post.carousel_image_ids or [])
-        img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-        filenames = {img.id: img.filename for img in img_result.scalars().all()}
+        media = await load_media_refs(post, db)
+        if not media:
+            logger.warning("publish_feed %s has no media items", post_id)
+            return None
         return _Snapshot(
-            is_carousel=bool(post.carousel_image_ids),
+            media=media,
             caption=post.caption or "",
-            primary_id=post.image_id,
-            all_ids=all_ids,
-            filenames_by_id=filenames,
             story_delay=post.story_delay_minutes,
             reel_delay=post.reel_delay_minutes,
             companion_time=post.companion_time,
@@ -202,17 +203,40 @@ async def _call_graph_api(
         return None, api_error
 
 
+def _child_payload(ref: MediaRef, *, is_carousel_item: bool) -> dict[str, str]:
+    """Build the per-child media-container payload for Graph API.
+
+    For carousel children, `is_carousel_item=true` is required and the
+    `caption` must NOT be set (it's set on the parent container).
+    """
+    url = share_url(ref.filename, kind=ref.share_kind)
+    payload: dict[str, str] = (
+        {"video_url": url, "media_type": "VIDEO"} if ref.kind == "video"
+        else {"image_url": url}
+    )
+    if is_carousel_item:
+        payload["is_carousel_item"] = "true"
+    return payload
+
+
 async def _create_single_container(
     client: httpx.AsyncClient, post_id: uuid.UUID, snap: _Snapshot,
     *, scheduled_publish_time: int | None = None,
 ) -> str:
-    fname = snap.filenames_by_id.get(snap.primary_id)
-    if not fname:
-        raise ValueError(f"Primary image {snap.primary_id} not found in DB")
-    data: dict[str, str] = {"image_url": share_url(fname), "caption": snap.caption}
+    ref = snap.media[0]
+    data = _child_payload(ref, is_carousel_item=False)
+    data["caption"] = snap.caption
     if scheduled_publish_time is not None:
         data["scheduled_publish_time"] = str(scheduled_publish_time)
-    return await create_media_container(client, data, "create single container")
+    container_id = await create_media_container(client, data, f"create single {ref.kind} container")
+    # Videos need transcode time before /media_publish; images are ready instantly.
+    if ref.kind == "video":
+        logger.info("publish_feed %s — waiting for single video container %s…", post_id, container_id)
+        await wait_container_ready(
+            client, container_id,
+            max_wait=REEL_POLL_TIMEOUT, poll_interval=REEL_POLL_INTERVAL,
+        )
+    return container_id
 
 
 async def _create_carousel_container(
@@ -220,18 +244,23 @@ async def _create_carousel_container(
     *, scheduled_publish_time: int | None = None,
 ) -> str:
     child_ids: list[str] = []
-    for img_id in snap.all_ids:
-        fname = snap.filenames_by_id.get(img_id)
-        if not fname:
-            raise ValueError(f"Carousel image {img_id} not found in DB")
+    for ref in snap.media:
         item_id = await create_media_container(
             client,
-            {"image_url": share_url(fname), "is_carousel_item": "true"},
-            f"create carousel item {fname}",
+            _child_payload(ref, is_carousel_item=True),
+            f"create carousel item {ref.filename}",
         )
         child_ids.append(item_id)
-        logger.info("publish_feed %s — waiting for item %s (%s)…", post_id, item_id, fname)
-        await wait_container_ready(client, item_id)
+        logger.info("publish_feed %s — waiting for %s item %s (%s)…",
+                    post_id, ref.kind, item_id, ref.filename)
+        # Video carousel children take longer to transcode than image children.
+        if ref.kind == "video":
+            await wait_container_ready(
+                client, item_id,
+                max_wait=REEL_POLL_TIMEOUT, poll_interval=REEL_POLL_INTERVAL,
+            )
+        else:
+            await wait_container_ready(client, item_id)
 
     data: dict[str, str] = {
         "media_type": "CAROUSEL",

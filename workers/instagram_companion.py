@@ -16,11 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from sqlalchemy import select
 
 from core.config import settings
 from core.db import AsyncSessionLocal
-from core.models import Image, InstagramPost, Video
+from core.models import InstagramPost, Video
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
     REEL_POLL_TIMEOUT,
@@ -30,6 +29,7 @@ from services.instagram.graph import (
     share_url,
     wait_container_ready,
 )
+from services.instagram.media import load_media_refs
 from workers.video_generator import generate_slideshow
 
 logger = logging.getLogger(__name__)
@@ -47,29 +47,23 @@ async def publish_stories(post_id: uuid.UUID) -> None:
         post = await db.get(InstagramPost, post_id)
         if not post:
             return
-
-        all_ids = [post.image_id] + (post.carousel_image_ids or [])
-        img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-        images = {img.id: img for img in img_result.scalars().all()}
+        # Stories only support images — skip any video children on a mixed post.
+        image_refs = [r for r in await load_media_refs(post, db) if r.kind == "image"]
 
     media_ids: list[str] = []
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            for img_id in all_ids:
-                img = images.get(img_id)
-                if not img:
-                    logger.warning("Story: image %s not found, skipping", img_id)
-                    continue
+            for ref in image_refs:
                 container_id = await create_media_container(
                     client,
-                    {"image_url": share_url(img.filename), "media_type": "STORIES"},
-                    f"story container for {img.filename}",
+                    {"image_url": share_url(ref.filename), "media_type": "STORIES"},
+                    f"story container for {ref.filename}",
                 )
                 story_media_id = await publish_container(
-                    client, container_id, f"story publish for {img.filename}",
+                    client, container_id, f"story publish for {ref.filename}",
                 )
                 media_ids.append(story_media_id)
-                logger.info("Story published: %s (%s)", story_media_id, img.filename)
+                logger.info("Story published: %s (%s)", story_media_id, ref.filename)
                 await asyncio.sleep(3)  # avoid "Media ID not available" on rapid successive stories
 
         status = "posted"
@@ -98,9 +92,9 @@ async def publish_reel(post_id: uuid.UUID) -> None:
         post = await db.get(InstagramPost, post_id)
         if not post:
             return
-        all_ids = [post.image_id] + (post.carousel_image_ids or [])
-        img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-        images = {img.id: img for img in img_result.scalars().all()}
+        # Companion-reel slideshow currently only ingests images. Videos in a
+        # mixed feed post are skipped here — they're already in the carousel.
+        image_refs = [r for r in await load_media_refs(post, db) if r.kind == "image"]
         caption = post.caption or ""
 
     video_path: Path | None = None
@@ -120,12 +114,11 @@ async def publish_reel(post_id: uuid.UUID) -> None:
             logger.info("Reel: using existing video %s for post %s", vid.filename, post_id)
         else:
             # ── 1. Build ordered image file paths ─────────────────────────────
-            image_paths: list[Path] = []
-            for img_id in all_ids:
-                img = images.get(img_id)
-                if not img:
-                    raise ValueError(f"Reel: image {img_id} not found in DB")
-                image_paths.append(settings.storage_dir / img.filepath)
+            if not image_refs:
+                raise ValueError("Reel companion needs images on the feed post (or an explicit reel_video_id)")
+            image_paths: list[Path] = [
+                settings.storage_dir / r.filepath for r in image_refs
+            ]
 
             # ── 2. Generate slideshow video ────────────────────────────────────
             settings.reels_dir.mkdir(parents=True, exist_ok=True)

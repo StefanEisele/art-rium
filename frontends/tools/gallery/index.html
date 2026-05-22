@@ -221,6 +221,7 @@
       overflow-wrap: anywhere;
       word-break: break-word;
     }
+    .grid-title.placeholder { font-style: italic; opacity: 0.55; }
 
     /* ── Load more / empty / loading ── */
     .grid-footer {
@@ -514,15 +515,11 @@
       position: absolute;
       inset: 0;
       display: flex; align-items: center; justify-content: center;
-      background: rgba(0,0,0,0.28);
+      background: rgba(0,0,0,0.25);
       border-radius: 10px;
-    }
-    .play-circle {
-      width: 38px; height: 38px;
-      background: rgba(255,255,255,0.88);
-      border-radius: 50%;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 16px; padding-left: 3px;
+      color: #fff;
+      font-size: 18px;
+      pointer-events: none;
     }
     .video-grid-item .grid-title { font-size: 12px; color: var(--text-dim); padding: 0 2px 4px; }
     /* Placeholder when no thumb */
@@ -682,15 +679,18 @@
 <div id="video-detail-modal" onclick="closeVideoDetail(event)">
   <div class="video-detail-sheet" onclick="event.stopPropagation()">
     <div class="vd-header">
-      <h2>Video</h2>
+      <h2 id="vd-title">Video</h2>
       <button class="vd-close" onclick="closeVideoDetail()">✕</button>
     </div>
     <video class="vd-player" id="vd-player" controls playsinline preload="metadata"></video>
     <div class="vd-chips" id="vd-chips"></div>
+    <input class="title-input" id="vd-title-input" placeholder="No title yet…" maxlength="255">
+    <textarea class="notes-textarea" id="vd-notes-input" placeholder="Notes…" rows="3"></textarea>
     <div class="vd-prompt" id="vd-prompt" style="display:none"></div>
     <div style="font-size:12px;color:var(--text-dim)" id="vd-date"></div>
     <div class="vd-actions">
       <a class="vd-btn download" id="vd-download" href="#">Download</a>
+      <button class="vd-btn" id="vd-save" onclick="saveActiveVideo()" style="background:var(--accent);color:#000">Save</button>
       <button class="vd-btn delete" id="vd-delete" onclick="deleteActiveVideo()">Delete</button>
     </div>
   </div>
@@ -865,8 +865,8 @@ const makeGridItem = (img, idx) => {
   div.appendChild(wrap);
 
   const titleEl = document.createElement('div');
-  titleEl.className = 'grid-title';
-  titleEl.textContent = img.title || '';
+  titleEl.className = 'grid-title' + (img.title ? '' : ' placeholder');
+  titleEl.textContent = img.title || 'No title';
   div.appendChild(titleEl);
 
   return div;
@@ -1229,7 +1229,10 @@ const refreshGridItem = (idx, img) => {
     badge.textContent = img.rating ? '★'.repeat(img.rating) : '';
   }
   const titleEl = el.querySelector('.grid-title');
-  if (titleEl) titleEl.textContent = img.title || '';
+  if (titleEl) {
+    titleEl.className = 'grid-title' + (img.title ? '' : ' placeholder');
+    titleEl.textContent = img.title || 'No title';
+  }
 };
 
 // ══════════════════════════════════════════════════════════
@@ -1297,26 +1300,38 @@ function makeVideoGridItem(v) {
   if (v.thumb_url) {
     wrap.innerHTML = `
       <img src="${withAuth(v.thumb_url)}" alt="" loading="lazy">
-      <div class="play-badge"><div class="play-circle">▶</div></div>`;
+      <div class="play-badge">▶</div>`;
   } else {
-    wrap.innerHTML = `<div class="video-thumb-no-thumb">🎬</div><div class="play-badge"><div class="play-circle">▶</div></div>`;
+    wrap.innerHTML = `<div class="video-thumb-no-thumb">🎬</div><div class="play-badge">▶</div>`;
   }
 
-  const fmtRes = v.width && v.height ? `${v.width}×${v.height}` : '';
   const titleEl = document.createElement('div');
-  titleEl.className = 'grid-title';
-  titleEl.textContent = v.prompt || fmtRes;
+  titleEl.className = 'grid-title' + (v.title ? '' : ' placeholder');
+  titleEl.textContent = v.title || 'No title';
 
   div.appendChild(wrap);
   div.appendChild(titleEl);
   return div;
 }
 
+let vdDirty = false;
+
 function openVideoDetail(v) {
   activeVideo = v;
+  vdDirty = false;
   const player = $('vd-player');
   player.src = withAuth(v.url);
   player.load();
+
+  $('vd-title').textContent = v.title || 'Video';
+
+  // Title + notes editor (PATCH /api/video/jobs/{id})
+  const titleEl = $('vd-title-input');
+  const notesEl = $('vd-notes-input');
+  titleEl.value = v.title || '';
+  notesEl.value = v.notes || '';
+  titleEl.oninput = () => { vdDirty = true; };
+  notesEl.oninput = () => { vdDirty = true; };
 
   // Chips: resolution, n_images, frames, fps
   const chips = [
@@ -1342,14 +1357,53 @@ function openVideoDetail(v) {
   document.body.style.overflow = 'hidden';
 }
 
+async function saveActiveVideo(silent = false) {
+  if (!activeVideo) return;
+  const btn = $('vd-save');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await apiFetch(`/api/video/jobs/${activeVideo.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: $('vd-title-input').value,
+        notes: $('vd-notes-input').value,
+      }),
+    });
+    const updated = await r.json();
+    activeVideo.title = updated.title;
+    activeVideo.notes = updated.notes;
+    vdDirty = false;
+
+    // Sync local videos cache + refresh the grid card so the title updates
+    // in-place without a full reload.
+    const idx = videos.findIndex(x => x.id === activeVideo.id);
+    if (idx >= 0) {
+      videos[idx] = { ...videos[idx], title: updated.title, notes: updated.notes };
+      const grid = $('grid');
+      const cards = grid.querySelectorAll('.video-grid-item');
+      if (cards[idx]) cards[idx].replaceWith(makeVideoGridItem(videos[idx]));
+    }
+    $('vd-title').textContent = updated.title || 'Video';
+
+    if (!silent) ArtRium.toast('Saved');
+  } catch (e) {
+    if (!silent) ArtRium.toast('Save failed: ' + e.message, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function closeVideoDetail(e) {
   if (e && e.target !== $('video-detail-modal')) return;
+  if (vdDirty) saveActiveVideo(true);
   $('video-detail-modal').classList.remove('show');
   document.body.style.overflow = '';
   const player = $('vd-player');
   player.pause();
   player.src = '';
   activeVideo = null;
+  vdDirty = false;
 }
 
 async function deleteActiveVideo() {

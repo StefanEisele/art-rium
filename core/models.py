@@ -63,9 +63,6 @@ class Image(Base):
     shop_listings: Mapped[list["ShopListing"]] = relationship(
         back_populates="image", cascade="all, delete-orphan", lazy="selectin"
     )
-    instagram_posts: Mapped[list["InstagramPost"]] = relationship(
-        back_populates="image", cascade="all, delete-orphan", lazy="selectin"
-    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -139,13 +136,9 @@ class InstagramPost(Base):
     )
     kind: Mapped[str] = mapped_column(
         String(16), nullable=False, default="feed", server_default="feed"
-    )                                                               # feed (default, image-based) | reel (standalone, 1–4 videos)
-    image_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("images.id"), nullable=True
-    )                                                               # primary image for kind='feed'; NULL for kind='reel'
-    carousel_image_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
-        ARRAY(UUID(as_uuid=True))
-    )                                                               # additional carousel images (kind='feed' only)
+    )                                                               # feed (default, mixed image+video carousel) | reel (standalone, 1–4 videos concatenated)
+    # Feed media items live in instagram_post_media (mixed image+video carousel,
+    # ordered by position 0..9). See InstagramPostMedia below.
     reel_video_ids: Mapped[list[uuid.UUID] | None] = mapped_column(
         ARRAY(UUID(as_uuid=True))
     )                                                               # ordered list of 1–4 source videos for kind='reel' concat
@@ -186,7 +179,38 @@ class InstagramPost(Base):
         DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
     )
 
-    image: Mapped["Image"] = relationship(back_populates="instagram_posts")
+    media: Mapped[list["InstagramPostMedia"]] = relationship(
+        back_populates="post",
+        cascade="all, delete-orphan",
+        order_by="InstagramPostMedia.position",
+        lazy="selectin",
+    )
+
+
+class InstagramPostMedia(Base):
+    """One ordered child of a feed post's carousel. kind='image' references
+    an Image row; kind='video' references a Video row. Up to 10 per post."""
+    __tablename__ = "instagram_post_media"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    post_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("instagram_posts.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)        # 0..9
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)          # 'image' | 'video'
+    image_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("images.id", ondelete="CASCADE"), nullable=True
+    )
+    video_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="CASCADE"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+
+    post: Mapped["InstagramPost"] = relationship(back_populates="media")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,6 +227,8 @@ class Video(Base):
     filepath: Mapped[str | None] = mapped_column(Text)                       # relative to storage_dir
     image_ids: Mapped[list[uuid.UUID] | None] = mapped_column(ARRAY(UUID(as_uuid=True)))  # source key frames
     prompt: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(String(255))   # user-editable display title
+    notes: Mapped[str | None] = mapped_column(Text)          # user-editable free-form notes
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     frame_count: Mapped[int | None] = mapped_column(Integer)  # frames per transition (length param)

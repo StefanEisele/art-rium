@@ -21,11 +21,10 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-from sqlalchemy import select
 
 from core.config import settings
 from core.db import AsyncSessionLocal
-from core.models import Image, InstagramPost, Video
+from core.models import InstagramPost, Video
 from core.scheduling import companion_at
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
@@ -35,6 +34,7 @@ from services.instagram.graph import (
     share_url,
     wait_container_ready,
 )
+from services.instagram.media import load_media_refs
 from services.instagram.publisher import MIN_REMOTE_LEAD_SECONDS
 from workers.video_generator import generate_slideshow
 
@@ -76,15 +76,17 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
                         post_id, lead, MIN_REMOTE_LEAD_SECONDS)
             return "skipped", None
 
-        all_ids = [post.image_id] + list(post.carousel_image_ids or [])
-        img_result = await db.execute(select(Image).where(Image.id.in_(all_ids)))
-        images = {img.id: img for img in img_result.scalars().all()}
+        media_refs = await load_media_refs(post, db)
+        image_paths = [
+            settings.storage_dir / ref.filepath
+            for ref in media_refs if ref.kind == "image"
+        ]
         caption = post.caption or ""
         reel_video_id = post.reel_video_id
         existing_filename = post.reel_video_filename
 
     video_path, video_filename, kind = await _resolve_video(
-        post_id, all_ids, images, reel_video_id, existing_filename,
+        post_id, image_paths, reel_video_id, existing_filename,
     )
 
     creation_id, api_error = None, None
@@ -138,8 +140,7 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
 
 async def _resolve_video(
     post_id: uuid.UUID,
-    all_ids: list[uuid.UUID],
-    images: dict[uuid.UUID, Image],
+    image_paths: list[Path],
     reel_video_id: uuid.UUID | None,
     existing_filename: str | None,
 ) -> tuple[Path, str, str]:
@@ -162,12 +163,8 @@ async def _resolve_video(
             logger.info("schedule_reel %s — reusing existing slideshow %s", post_id, existing_filename)
             return path, existing_filename, "reel"
 
-    image_paths: list[Path] = []
-    for img_id in all_ids:
-        img = images.get(img_id)
-        if not img:
-            raise ValueError(f"Reel: image {img_id} not found in DB")
-        image_paths.append(settings.storage_dir / img.filepath)
+    if not image_paths:
+        raise ValueError("Reel companion needs images on the feed post (or an explicit reel_video_id)")
 
     settings.reels_dir.mkdir(parents=True, exist_ok=True)
     path = await generate_slideshow(

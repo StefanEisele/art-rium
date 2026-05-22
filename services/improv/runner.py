@@ -27,15 +27,25 @@ from services.improv.mux import mux_session
 logger = logging.getLogger(__name__)
 
 
-async def run_improv_session(session_id: uuid.UUID) -> None:
+async def run_improv_session(
+    session_id: uuid.UUID,
+    *,
+    pip_corner: str = "tr",
+    pip_width_pct: float = 0.24,
+) -> None:
     try:
-        await _run(session_id)
+        await _run(session_id, pip_corner=pip_corner, pip_width_pct=pip_width_pct)
     except Exception as exc:
         logger.exception("Improv session %s crashed", session_id)
         await _mark_failed(session_id, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}")
 
 
-async def _run(session_id: uuid.UUID) -> None:
+async def _run(
+    session_id: uuid.UUID,
+    *,
+    pip_corner: str = "tr",
+    pip_width_pct: float = 0.24,
+) -> None:
     async with AsyncSessionLocal() as db:
         session = await db.get(ImprovSession, session_id)
         if not session:
@@ -65,6 +75,8 @@ async def _run(session_id: uuid.UUID) -> None:
         recording_path,
         settings.videos_dir,
         ffmpeg_path=settings.ffmpeg_path,
+        pip_corner=pip_corner,
+        pip_width_pct=pip_width_pct,
     )
 
     # Probe dimensions once per mix so the WP embed renders in the right

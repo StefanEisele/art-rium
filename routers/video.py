@@ -828,6 +828,30 @@ async def get_job(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     return _serialize(video)
 
 
+class VideoUpdate(BaseModel):
+    title: str | None = None
+    notes: str | None = None
+
+
+@router.patch("/jobs/{video_id}")
+async def update_video(
+    video_id: uuid.UUID,
+    body: VideoUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update user-editable fields. Empty string clears the field; null is ignored."""
+    video = await db.get(Video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if "title" in body.model_fields_set:
+        video.title = (body.title or "").strip()[:255] or None
+    if "notes" in body.model_fields_set:
+        video.notes = (body.notes or "").strip() or None
+    await db.commit()
+    await db.refresh(video)
+    return _serialize(video)
+
+
 @router.get("/thumb/{video_id}")
 async def video_thumbnail(video_id: uuid.UUID):
     p = settings.videos_dir / f"{video_id}_thumb.jpg"
@@ -881,6 +905,8 @@ def _serialize(v: Video) -> dict:
         "thumb_url":         f"/api/video/thumb/{v.id}" if v.status == "done" else None,
         "image_ids":         [str(i) for i in v.image_ids] if v.image_ids else [],
         "prompt":            v.prompt,
+        "title":             v.title,
+        "notes":             v.notes,
         "width":             v.width,
         "height":            v.height,
         "frame_count":       v.frame_count,

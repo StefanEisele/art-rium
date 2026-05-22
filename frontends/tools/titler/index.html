@@ -261,6 +261,22 @@
       -webkit-tap-highlight-color: transparent;
     }
     .load-more-btn:disabled { opacity: 0.4; cursor: default; }
+
+    /* Mode chips in header */
+    .mode-chips { display: flex; gap: 6px; }
+    .mode-chip { font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 6px;
+                 border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim);
+                 cursor: pointer; font-family: inherit; transition: all 0.13s; }
+    .mode-chip.active { background: var(--accent); border-color: var(--accent); color: #000; }
+
+    /* Video tile — slight differentiator vs image tile (transparent play badge) */
+    .picker-img-wrap .video-tile-badge {
+      position: absolute; top: 5px; left: 5px;
+      width: 22px; height: 22px; border-radius: 5px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(0,0,0,0.45); color: rgba(255,255,255,0.92);
+      font-size: 11px; pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -268,13 +284,17 @@
 
   <header>
     <a class="back-btn" href="/" title="Dashboard">‹</a>
-    <h1>Image Titler</h1>
+    <h1 id="header-title">Image Titler</h1>
+    <div class="mode-chips" id="mode-chips" style="display:flex;gap:6px;">
+      <button class="mode-chip active" data-mode="image" onclick="setMode('image')">Images</button>
+      <button class="mode-chip" data-mode="video" onclick="setMode('video')">Videos</button>
+    </div>
   </header>
 
   <!-- ══ VIEW: PICKER ══ -->
   <div class="view active" id="view-picker">
 
-    <p class="picker-hint">Select an image to generate titles for.</p>
+    <p class="picker-hint" id="picker-hint">Select an image to generate titles for.</p>
 
     <div class="picker-grid-wrap">
       <div class="picker-grid" id="picker-grid"></div>
@@ -343,6 +363,7 @@ const PAGE_SIZE = 60;
 
 const state = {
   apiKey:   ArtRium.getApiKey(),
+  mode:     'image',     // 'image' | 'video'
   images:   [],
   offset:   0,
   hasMore:  false,
@@ -368,7 +389,29 @@ const switchView = (name) => {
 };
 
 // ══════════════════════════════════════════════════════════
-// IMAGE PICKER
+// MODE TOGGLE
+// ══════════════════════════════════════════════════════════
+const setMode = (mode) => {
+  if (mode === state.mode) return;
+  if (mode !== 'image' && mode !== 'video') return;
+  state.mode = mode;
+  document.querySelectorAll('.mode-chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.mode === mode);
+  });
+  $('header-title').textContent = mode === 'video' ? 'Video Titler' : 'Image Titler';
+  $('picker-hint').textContent = mode === 'video'
+    ? 'Select a video — 3 sample frames will be sent to the VLM.'
+    : 'Select an image to generate titles for.';
+  $('generate-btn').textContent = 'Select ' + (mode === 'video' ? 'a video' : 'an image') + ' first';
+  state.selected = null;
+  $('selected-thumb').classList.remove('show');
+  $('generate-btn').disabled = true;
+  switchView('picker');
+  loadImages(true);
+};
+
+// ══════════════════════════════════════════════════════════
+// PICKER (handles both modes — images via /api/images, videos via /api/video)
 // ══════════════════════════════════════════════════════════
 const loadImages = async (reset = false) => {
   if (reset) {
@@ -379,26 +422,37 @@ const loadImages = async (reset = false) => {
   }
 
   try {
-    const r = await apiFetch(`/api/images?limit=${PAGE_SIZE}&offset=${state.offset}`);
-    const data = await r.json();
+    let data;
+    if (state.mode === 'video') {
+      // Videos endpoint returns all videos in one shot — no pagination needed
+      // for typical art-rium volumes. Filter to status='done' so the picker
+      // only shows completed videos.
+      const r = await apiFetch('/api/video');
+      const all = await r.json();
+      data = all.filter(v => v.status === 'done' && v.thumb_url);
+      state.hasMore = false;
+    } else {
+      const r = await apiFetch(`/api/images?limit=${PAGE_SIZE}&offset=${state.offset}`);
+      data = await r.json();
+      state.offset += data.length;
+      state.hasMore = data.length === PAGE_SIZE;
+    }
 
     state.images.push(...data);
-    state.offset += data.length;
-    state.hasMore = data.length === PAGE_SIZE;
 
-    data.forEach((img, i) => {
+    data.forEach((item, i) => {
       const globalIdx = state.images.length - data.length + i;
-      $('picker-grid').appendChild(makePickerItem(img, globalIdx));
+      $('picker-grid').appendChild(makePickerItem(item, globalIdx));
     });
 
     $('picker-footer').style.display = state.hasMore ? 'flex' : 'none';
     $('picker-load-more').disabled = false;
   } catch (e) {
-    ArtRium.toast('Failed to load images: ' + e.message, true);
+    ArtRium.toast('Failed to load ' + (state.mode === 'video' ? 'videos' : 'images') + ': ' + e.message, true);
   }
 };
 
-const makePickerItem = (img, idx) => {
+const makePickerItem = (item, idx) => {
   const div = document.createElement('div');
   div.className = 'picker-item';
   div.dataset.idx = idx;
@@ -407,21 +461,27 @@ const makePickerItem = (img, idx) => {
   wrap.className = 'picker-img-wrap';
 
   const image = document.createElement('img');
-  image.src = withAuth(img.thumb_url);
+  image.src = withAuth(item.thumb_url);
   image.loading = 'lazy';
-  image.alt = img.filename;
+  image.alt = item.filename || '';
 
   const check = document.createElement('div');
   check.className = 'check';
   check.textContent = '✓';
 
   wrap.appendChild(image);
+  if (state.mode === 'video') {
+    const badge = document.createElement('div');
+    badge.className = 'video-tile-badge';
+    badge.textContent = '▶';
+    wrap.appendChild(badge);
+  }
   wrap.appendChild(check);
   div.appendChild(wrap);
 
   const titleEl = document.createElement('div');
-  titleEl.className = 'picker-title' + (img.title ? '' : ' placeholder');
-  titleEl.textContent = img.title || 'No title';
+  titleEl.className = 'picker-title' + (item.title ? '' : ' placeholder');
+  titleEl.textContent = item.title || 'No title';
   div.appendChild(titleEl);
 
   div.onclick = () => selectImage(idx);
@@ -431,13 +491,13 @@ const makePickerItem = (img, idx) => {
 const selectImage = (idx) => {
   document.querySelectorAll('.picker-item.selected').forEach(el => el.classList.remove('selected'));
 
-  const img = state.images[idx];
-  state.selected = img;
+  const item = state.images[idx];
+  state.selected = item;
 
   document.querySelector(`.picker-item[data-idx="${idx}"]`).classList.add('selected');
 
   const thumb = $('selected-thumb');
-  thumb.src = withAuth(img.thumb_url);
+  thumb.src = withAuth(item.thumb_url);
   thumb.classList.add('show');
 
   const btn = $('generate-btn');
@@ -475,13 +535,21 @@ const startTitling = async () => {
   $('save-btn').disabled = true;
   $('save-btn').textContent = 'Select a title to save';
 
-  showProgress('Generating titles…', 'Local VLM — usually 5–20 seconds');
+  const isVideo = state.mode === 'video';
+  showProgress(
+    'Generating titles…',
+    isVideo
+      ? 'Sampling 3 frames + VLM — usually 15–45 seconds'
+      : 'Local VLM — usually 5–20 seconds',
+  );
 
   try {
-    const r = await apiFetch('/api/titler/run', {
+    const r = await apiFetch(isVideo ? '/api/titler/run-video' : '/api/titler/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image_id: state.selected.id }),
+      body: JSON.stringify(
+        isVideo ? { video_id: state.selected.id } : { image_id: state.selected.id }
+      ),
     });
     const data = await r.json();
     onTitlesReceived(data.titles || []);
@@ -546,8 +614,13 @@ const saveTitle = async () => {
   btn.disabled = true;
   btn.textContent = 'Saving…';
 
+  const isVideo = state.mode === 'video';
+  const url = isVideo
+    ? `/api/video/jobs/${state.selected.id}`
+    : `/api/images/${state.selected.id}`;
+
   try {
-    const r = await apiFetch(`/api/images/${state.selected.id}`, {
+    const r = await apiFetch(url, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ title: state.chosenTitle }),

@@ -196,19 +196,217 @@ _LOOP_PLAYER_HTML = """<!doctype html>
 <meta name="theme-color" content="#000">
 <title>art-rium</title>
 <style>
-  html,body{margin:0;padding:0;height:100%;background:#000;overflow:hidden;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;height:100%;background:#000;overflow:hidden;-webkit-tap-highlight-color:transparent;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
   video{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+
+  #cd{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+      font-size:32vh;font-weight:700;color:#fff;background:rgba(0,0,0,0.55);
+      z-index:5;user-select:none;pointer-events:none;letter-spacing:-2px}
+  #cd.show{display:flex}
+
+  #tick{position:fixed;right:max(18px,env(safe-area-inset-right));bottom:max(22px,env(safe-area-inset-bottom));
+        width:20px;height:20px;border-radius:50%;background:rgba(255,255,255,0.9);
+        opacity:0;transition:opacity 220ms linear,transform 220ms ease-out;z-index:4;pointer-events:none}
+  #tick.on{opacity:1;transition:none;transform:scale(1)}
+  #tick.accent{width:34px;height:34px;background:#f5a623;box-shadow:0 0 28px rgba(245,166,35,0.55)}
+
+  #bar{position:fixed;left:0;right:0;bottom:0;height:3px;background:rgba(255,255,255,0.06);z-index:3;pointer-events:none}
+  #bar>i{display:block;height:100%;width:0%;background:rgba(255,255,255,0.55)}
+
+  #cog{position:fixed;top:max(12px,env(safe-area-inset-top));right:max(12px,env(safe-area-inset-right));
+       width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+       background:rgba(0,0,0,0.45);color:#fff;font-size:18px;cursor:pointer;z-index:6;
+       opacity:0;transition:opacity 240ms;border:1px solid rgba(255,255,255,0.15)}
+  #cog.show{opacity:0.85}
+
+  #panel{position:fixed;top:max(58px,calc(env(safe-area-inset-top) + 58px));left:50%;transform:translateX(-50%);
+         display:none;flex-direction:column;gap:10px;padding:16px 18px;min-width:300px;max-width:90vw;
+         background:rgba(20,20,22,0.92);color:#fff;border-radius:14px;border:1px solid rgba(255,255,255,0.12);
+         font-size:13px;z-index:7;backdrop-filter:blur(10px)}
+  #panel.show{display:flex}
+  #panel h3{margin:0 0 4px;font-size:13px;font-weight:700;letter-spacing:0.4px;text-transform:uppercase;color:#bbb}
+  #panel label{display:flex;justify-content:space-between;align-items:center;gap:14px}
+  #panel input[type=number]{width:78px;padding:7px 9px;border-radius:7px;border:1px solid rgba(255,255,255,0.18);
+                            background:rgba(255,255,255,0.06);color:#fff;font:inherit;text-align:right}
+  #panel .row{display:flex;gap:8px}
+  #panel button{flex:1;padding:9px 12px;border-radius:7px;border:1px solid rgba(255,255,255,0.18);
+                background:rgba(255,255,255,0.08);color:#fff;font:inherit;cursor:pointer}
+  #panel button.primary{background:#f5a623;border-color:#f5a623;color:#000;font-weight:700}
+  #panel .hint{font-size:11px;opacity:0.7;line-height:1.4}
+
+  #starttap{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+            background:rgba(0,0,0,0.7);color:#fff;font-size:18px;font-weight:600;z-index:8;cursor:pointer}
+  #starttap.show{display:flex}
 </style>
 </head><body>
-<video src="__SRC__" autoplay loop muted playsinline preload="auto" disablepictureinpicture></video>
+<video id="v" src="__SRC__" muted playsinline preload="auto" disablepictureinpicture></video>
+<div id="cd"></div>
+<div id="bar"><i id="bar-fill"></i></div>
+<div id="tick"></div>
+<div id="cog">⚙</div>
+<div id="panel">
+  <h3>Loop Settings</h3>
+  <label>Countdown (s) <input id="cfg-countdown" type="number" min="0" max="10" step="1"></label>
+  <label>Tick every (frames) <input id="cfg-tick" type="number" min="1" step="1"></label>
+  <label>Accent every (ticks, 0=off) <input id="cfg-accent" type="number" min="0" step="1"></label>
+  <label>Loop bars (0=auto) <input id="cfg-bars" type="number" min="0" step="1"></label>
+  <div class="hint" id="hint">—</div>
+  <div class="row">
+    <button id="btn-restart" class="primary">Restart</button>
+    <button id="btn-close">Close</button>
+  </div>
+</div>
+<div id="starttap">Tap to start</div>
 <script>
-  // Some mobile browsers gate autoplay until user interacts — a tap on the
-  // page kicks it off, and we re-loop on every 'ended' as a belt-and-braces.
-  const v = document.querySelector('video');
-  const kick = () => { v.play().catch(() => {}); };
-  document.addEventListener('touchstart', kick, { once: true });
-  document.addEventListener('click',      kick, { once: true });
-  v.addEventListener('ended', () => { v.currentTime = 0; v.play().catch(() => {}); });
+  const qs = new URLSearchParams(location.search);
+  const STORE_KEY = 'improv_loop_settings_v1';
+  function readStored(){ try { return JSON.parse(localStorage.getItem(STORE_KEY)||'{}'); } catch { return {}; } }
+  function writeStored(o){ try { localStorage.setItem(STORE_KEY, JSON.stringify(o)); } catch {} }
+
+  // URL params are server-side defaults; localStorage overrides them per device.
+  const stored = readStored();
+  const pick = (key, fallback) => {
+    if (stored[key] !== undefined) return Number(stored[key]);
+    const q = qs.get(key);
+    return q !== null ? Number(q) : fallback;
+  };
+  const cfg = {
+    fps:          Math.max(1, Number(qs.get('fps')) || 24),
+    countdown:    Math.max(0, Math.min(10, pick('countdown', 4))),
+    tick_every:   Math.max(1, pick('tick_every', 24)),
+    accent_every: Math.max(0, pick('accent_every', 4)),
+    loop_bars:    Math.max(0, pick('loop_bars', 0)),
+  };
+
+  const v = document.getElementById('v');
+  const cd = document.getElementById('cd');
+  const tickEl = document.getElementById('tick');
+  const barFill = document.getElementById('bar-fill');
+  const cog = document.getElementById('cog');
+  const panel = document.getElementById('panel');
+  const hint = document.getElementById('hint');
+  const startTap = document.getElementById('starttap');
+
+  let totalFrames = 0;
+  let loopEndFrame = 0;
+  let running = false;
+  let lastTick = -1;
+  let starting = false;
+
+  function recomputeLoop() {
+    const barFrames = cfg.tick_every * Math.max(1, cfg.accent_every || 1);
+    let bars = cfg.loop_bars > 0 ? cfg.loop_bars : Math.floor(totalFrames / barFrames);
+    if (bars < 1) bars = 1;
+    loopEndFrame = Math.min(totalFrames || barFrames, bars * barFrames);
+    const secs = (loopEndFrame / cfg.fps).toFixed(2);
+    const dur = v.duration ? v.duration.toFixed(2) : '?';
+    hint.textContent = `${bars} bar${bars===1?'':'s'} · loop @ ${secs}s · video ${dur}s @ ${cfg.fps}fps`;
+  }
+
+  v.addEventListener('loadedmetadata', () => {
+    totalFrames = Math.floor((v.duration || 0) * cfg.fps);
+    recomputeLoop();
+    beginSession();
+  });
+
+  function runCountdown(n) {
+    return new Promise(resolve => {
+      cd.classList.add('show');
+      let i = n;
+      cd.textContent = String(i);
+      const tickDown = () => {
+        i -= 1;
+        if (i <= 0) { cd.classList.remove('show'); resolve(); return; }
+        cd.textContent = String(i);
+        setTimeout(tickDown, 1000);
+      };
+      setTimeout(tickDown, 1000);
+    });
+  }
+
+  async function beginSession() {
+    if (starting) return;
+    starting = true;
+    running = false;
+    lastTick = -1;
+    barFill.style.width = '0%';
+    v.pause();
+    try { v.currentTime = 0; } catch {}
+    if (cfg.countdown > 0) await runCountdown(cfg.countdown);
+    try {
+      await v.play();
+      startTap.classList.remove('show');
+      running = true;
+      requestAnimationFrame(loop);
+    } catch {
+      // Autoplay blocked — show tap-to-start overlay, retry on tap.
+      startTap.classList.add('show');
+    } finally {
+      starting = false;
+    }
+  }
+
+  function loop() {
+    if (!running) return;
+    const frame = Math.floor(v.currentTime * cfg.fps);
+    barFill.style.width = (Math.min(1, frame / loopEndFrame) * 100).toFixed(2) + '%';
+    if (frame >= loopEndFrame) {
+      try { v.currentTime = 0; } catch {}
+      lastTick = -1;
+      barFill.style.width = '0%';
+    }
+    const tickIndex = Math.floor(frame / cfg.tick_every);
+    if (tickIndex !== lastTick && frame >= 0) {
+      lastTick = tickIndex;
+      const isAccent = cfg.accent_every > 0 && (tickIndex % cfg.accent_every === 0);
+      tickEl.classList.remove('on', 'accent');
+      void tickEl.offsetWidth;
+      tickEl.classList.add('on');
+      if (isAccent) tickEl.classList.add('accent');
+      setTimeout(() => tickEl.classList.remove('on'), 110);
+    }
+    requestAnimationFrame(loop);
+  }
+
+  // Tap-to-start overlay (autoplay fallback)
+  startTap.addEventListener('click', () => beginSession());
+
+  // Reveal cog briefly on any tap that isn't on the panel or cog itself.
+  let cogTimer = null;
+  document.addEventListener('click', e => {
+    if (panel.contains(e.target) || cog.contains(e.target) || startTap.contains(e.target)) return;
+    cog.classList.add('show');
+    clearTimeout(cogTimer);
+    cogTimer = setTimeout(() => cog.classList.remove('show'), 2500);
+  }, true);
+
+  function syncInputs() {
+    document.getElementById('cfg-countdown').value  = cfg.countdown;
+    document.getElementById('cfg-tick').value       = cfg.tick_every;
+    document.getElementById('cfg-accent').value     = cfg.accent_every;
+    document.getElementById('cfg-bars').value       = cfg.loop_bars;
+  }
+  cog.addEventListener('click', () => { syncInputs(); recomputeLoop(); panel.classList.add('show'); });
+
+  function applyPanel() {
+    cfg.countdown    = Math.max(0, Math.min(10, parseInt(document.getElementById('cfg-countdown').value || '0', 10)));
+    cfg.tick_every   = Math.max(1, parseInt(document.getElementById('cfg-tick').value || '24', 10));
+    cfg.accent_every = Math.max(0, parseInt(document.getElementById('cfg-accent').value || '0', 10));
+    cfg.loop_bars    = Math.max(0, parseInt(document.getElementById('cfg-bars').value || '0', 10));
+    writeStored({
+      countdown: cfg.countdown, tick_every: cfg.tick_every,
+      accent_every: cfg.accent_every, loop_bars: cfg.loop_bars,
+    });
+    recomputeLoop();
+  }
+  ['cfg-countdown','cfg-tick','cfg-accent','cfg-bars'].forEach(id => {
+    document.getElementById(id).addEventListener('input', applyPanel);
+  });
+  document.getElementById('btn-restart').addEventListener('click', () => {
+    panel.classList.remove('show');
+    beginSession();
+  });
+  document.getElementById('btn-close').addEventListener('click', () => panel.classList.remove('show'));
 </script>
 </body></html>"""
 
@@ -217,7 +415,18 @@ _LOOP_PLAYER_HTML = """<!doctype html>
 async def get_shared_video_loop(filename: str):
     """Public HTML player that loops a generated video — used by the Improv
     tool's share-URL/QR-code so a second device (iPad next to the piano) can
-    play the source over and over without manual restarts."""
+    play the source over and over without manual restarts.
+
+    Query params (all optional, with safe defaults baked into the JS):
+      fps           — source frame rate, drives the metronome timebase
+      countdown     — pre-roll seconds (0 = off)
+      tick_every    — tick once every N source frames
+      accent_every  — every N-th tick is a downbeat accent (0 = off)
+      loop_bars     — number of bars per loop iteration (0 = auto-fit)
+
+    The loop player reads these from `location.search` directly, so this
+    endpoint doesn't need to parse them — it just serves the static HTML.
+    """
     safe_name = Path(filename).name
     if not (settings.videos_dir / safe_name).exists():
         raise HTTPException(status_code=404, detail="Video not found")

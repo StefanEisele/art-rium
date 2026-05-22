@@ -1126,7 +1126,49 @@ async def generate_titles(
         timeout=timeout,
         label="generate_titles",
     )
+    return _clean_titles(parsed, n=n)
 
+
+async def generate_video_titles(
+    jpgs: list[bytes],
+    *,
+    n: int = 5,
+    timeout: float = 180.0,
+) -> list[str]:
+    """
+    Generate *n* short title suggestions for a short video, given a handful of
+    evenly-spaced sample frames in playback order.
+
+    Reuses OLLAMA_TITLER_MODEL with a video-aware user prompt that tells the
+    model the frames belong to one work (so titles describe the piece as a
+    whole, not each frame separately). Returns a deduplicated, cleaned list
+    capped at *n*.
+    """
+    if not jpgs:
+        raise RuntimeError("generate_video_titles requires at least one frame")
+
+    user_text = (
+        f"The {len(jpgs)} images below are evenly-spaced frames from one short "
+        f"video artwork, in playback order. Suggest {n} short, evocative titles "
+        f"for the video as a whole — not the individual frames. "
+        f"Each title: 2 to 6 words, Title Case, no trailing punctuation, "
+        f"no surrounding quotes, no numbering, no commentary.\n\n"
+        f'Return STRICT JSON: {{"titles": ["title one", "title two", ...]}}'
+    )
+    parsed = await _chat_json(
+        model=settings.ollama_titler_model,
+        system=_TITLER_SYSTEM,
+        user_text=user_text,
+        jpgs=jpgs,
+        options={"temperature": 0.8},
+        keep_alive=_TITLER_KEEP_ALIVE,
+        timeout=timeout,
+        label="generate_video_titles",
+    )
+    return _clean_titles(parsed, n=n)
+
+
+def _clean_titles(parsed: dict, *, n: int) -> list[str]:
     raw = parsed.get("titles") or []
     if not isinstance(raw, list):
         raise RuntimeError(f"Titler VLM 'titles' field is not a list: {type(raw).__name__}")

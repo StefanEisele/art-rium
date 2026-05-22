@@ -42,10 +42,17 @@ _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 
+_VALID_PIP_CORNERS = {"tr", "br", "tl", "bl"}
+_PIP_WIDTH_MIN = 0.10
+_PIP_WIDTH_MAX = 0.50
+
+
 @router.post("/sessions", status_code=202)
 async def create_session(
     source_video_id: uuid.UUID = Form(...),
     recording: UploadFile = File(...),
+    pip_corner: str = Form("tr"),
+    pip_width_pct: float = Form(0.24),
     db: AsyncSession = Depends(get_db),
 ):
     source = await db.get(Video, source_video_id)
@@ -54,6 +61,9 @@ async def create_session(
 
     if not (recording.content_type or "").startswith("video/"):
         raise HTTPException(400, f"Expected video/* upload, got {recording.content_type!r}")
+
+    corner = pip_corner if pip_corner in _VALID_PIP_CORNERS else "tr"
+    width_pct = max(_PIP_WIDTH_MIN, min(_PIP_WIDTH_MAX, pip_width_pct))
 
     settings.improv_dir.mkdir(parents=True, exist_ok=True)
     session_id = uuid.uuid4()
@@ -88,22 +98,47 @@ async def create_session(
     db.add(session)
     await db.commit()
 
-    asyncio.create_task(run_improv_session(session_id))
+    asyncio.create_task(run_improv_session(session_id, pip_corner=corner, pip_width_pct=width_pct))
     logger.info(
-        "Improv session %s queued — source=%s, recording=%s (%.1f MB)",
-        session_id, source_video_id, rec_name, written / 1_048_576,
+        "Improv session %s queued — source=%s, recording=%s (%.1f MB), pip_corner=%s, pip_width=%.2f",
+        session_id, source_video_id, rec_name, written / 1_048_576, corner, width_pct,
     )
     return {"id": str(session_id), "status": "queued"}
 
 
 @router.get("/share-url/{video_id}")
-async def get_share_url(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def get_share_url(
+    video_id: uuid.UUID,
+    countdown: int = 4,
+    tick_every: int = 24,
+    accent_every: int = 4,
+    loop_bars: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
     """Public URL for the source video — points at the loop player so the
-    second device (iPad next to the piano) replays it indefinitely."""
+    second device (iPad next to the piano) replays it indefinitely.
+
+    Loop-player parameters are appended as query params so the QR scan
+    boots the iPad straight into the desired countdown/metronome/bar config.
+    The iPad can still tap the cog to live-edit; those edits persist in
+    its localStorage and override the URL on subsequent scans.
+    """
     video = await db.get(Video, video_id)
     if not video or not video.filename:
         raise HTTPException(404, "Video not found")
-    return {"url": share_url(video.filename, kind="video-loop")}
+
+    fps = video.fps or 24
+    base = share_url(video.filename, kind="video-loop")
+    extra = {
+        "fps": fps,
+        "countdown": max(0, min(10, countdown)),
+        "tick_every": max(1, tick_every),
+        "accent_every": max(0, accent_every),
+        "loop_bars": max(0, loop_bars),
+    }
+    sep = "&" if "?" in base else "?"
+    qs = "&".join(f"{k}={v}" for k, v in extra.items())
+    return {"url": f"{base}{sep}{qs}", "fps": fps, "duration": video.frame_count}
 
 
 @router.get("/sessions/{session_id}")
@@ -174,6 +209,7 @@ def _video_summary(video: Video | None) -> dict | None:
     return {
         "id":        str(video.id),
         "filename":  video.filename,
+        "title":     video.title,
         "prompt":    video.prompt,
         "status":    video.status,
         "thumb_url": f"/api/video/thumb/{video.id}" if video.status == "done" else None,

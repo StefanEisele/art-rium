@@ -39,6 +39,44 @@
     .qr-wrap.show { display: block; }
     .qr-wrap img { width: 180px; height: 180px; display: block; }
 
+    /* Loop config — countdown + visual metronome + bar-aware loop */
+    .loop-cfg { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+    .loop-cfg .lc-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
+    .loop-cfg .lc-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    .loop-cfg .lc-field label { font-size: 10px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; white-space: normal; word-break: break-word; }
+    .loop-cfg .lc-field input { width: 100%; box-sizing: border-box; min-width: 0; padding: 6px 8px; border: 1.5px solid var(--border); background: var(--bg); color: var(--text); border-radius: 6px; font-size: 13px; font-family: ui-monospace, monospace; }
+    .loop-cfg .lc-summary { font-size: 11px; color: var(--text-dim); line-height: 1.4; word-break: break-word; }
+    @media (max-width: 380px) {
+      .loop-cfg .lc-row { grid-template-columns: 1fr; }
+    }
+
+    /* PiP corner picker — 2x2 grid of corners mimicking the output frame */
+    .pip-corner-grid {
+      display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+      gap: 6px; aspect-ratio: 16/9; max-width: 220px; padding: 6px;
+      background: var(--surface2); border: 1.5px solid var(--border); border-radius: 8px;
+    }
+    .pip-corner-cell {
+      display: flex; align-items: center; justify-content: center;
+      border: 1.5px solid var(--border); border-radius: 6px;
+      background: var(--bg); color: var(--text-dim); font-size: 11px; font-weight: 600;
+      cursor: pointer; user-select: none; transition: all 0.13s;
+    }
+    .pip-corner-cell:hover { border-color: var(--accent); color: var(--text); }
+    .pip-corner-cell.selected { border-color: var(--accent); background: var(--accent); color: #000; }
+
+    /* PiP size chips */
+    .pip-size-row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .pip-size-chip {
+      font-size: 12px; font-weight: 600;
+      padding: 6px 12px; border-radius: 6px;
+      border: 1.5px solid var(--border);
+      background: var(--surface2); color: var(--text-dim);
+      cursor: pointer; font-family: inherit; transition: all 0.13s;
+    }
+    .pip-size-chip:hover { border-color: var(--accent); color: var(--text); }
+    .pip-size-chip.selected { background: var(--accent); border-color: var(--accent); color: #000; }
+
     /* Upload dropzone */
     .drop {
       border: 2px dashed var(--border); border-radius: 12px; padding: 28px 16px;
@@ -123,6 +161,30 @@
 
         <div id="selected-preview" class="selected-preview" style="display:none;">
           <video id="source-video" controls playsinline preload="metadata"></video>
+
+          <div class="loop-cfg">
+            <span class="label">Loop player — countdown + visual metronome</span>
+            <div class="lc-row">
+              <div class="lc-field">
+                <label>Countdown (s)</label>
+                <input id="lc-countdown" type="number" min="0" max="10" step="1" value="4">
+              </div>
+              <div class="lc-field">
+                <label>Tick every (frames)</label>
+                <input id="lc-tick" type="number" min="1" step="1" value="24">
+              </div>
+              <div class="lc-field">
+                <label>Accent every (ticks, 0=off)</label>
+                <input id="lc-accent" type="number" min="0" step="1" value="4">
+              </div>
+              <div class="lc-field">
+                <label>Loop bars (0=auto)</label>
+                <input id="lc-bars" type="number" min="0" step="1" value="0">
+              </div>
+            </div>
+            <div class="lc-summary" id="lc-summary">—</div>
+          </div>
+
           <div class="share-box">
             <span class="label">Share URL — open on iPad</span>
             <div class="share-url" id="share-url">—</div>
@@ -145,6 +207,24 @@
           <div class="sub">MP4 / MOV, up to 1 GB</div>
           <input type="file" id="file-input" accept="video/mp4,video/quicktime,video/*">
         </label>
+      </div>
+
+      <div class="card">
+        <h2>3. PiP corner &amp; size</h2>
+        <p class="hint">Where the hands video sits on the synth video in the PiP output, and how big it is (% of background width).</p>
+        <div class="pip-corner-grid" id="pip-corner-grid">
+          <div class="pip-corner-cell" data-corner="tl">TL</div>
+          <div class="pip-corner-cell selected" data-corner="tr">TR</div>
+          <div class="pip-corner-cell" data-corner="bl">BL</div>
+          <div class="pip-corner-cell" data-corner="br">BR</div>
+        </div>
+        <span class="label">Size</span>
+        <div class="pip-size-row" id="pip-size-row">
+          <button type="button" class="pip-size-chip" data-size="0.18">S · 18%</button>
+          <button type="button" class="pip-size-chip selected" data-size="0.24">M · 24%</button>
+          <button type="button" class="pip-size-chip" data-size="0.32">L · 32%</button>
+          <button type="button" class="pip-size-chip" data-size="0.40">XL · 40%</button>
+        </div>
       </div>
 
       <button class="gen-btn" id="submit-btn" onclick="submitSession()" disabled>Generate mixes</button>
@@ -182,10 +262,39 @@ const { getApiKey, saveApiKey, apiFetch, withAuth, toast } = ArtRium;
 const state = {
   apiKey: getApiKey(),
   sourceVideo: null,
+  sourceFps: 24,
   recordingFile: null,
+  pipCorner: 'tr',
+  pipWidth: 0.24,
   activeJobId: null,
   pollTimer: null,
+  refreshTimer: null,
 };
+
+const PIP_CORNER_KEY = 'improv_pip_corner_v1';
+const PIP_WIDTH_KEY  = 'improv_pip_width_v1';
+const PIP_WIDTH_PRESETS = [0.18, 0.24, 0.32, 0.40];
+
+const LOOP_CFG_KEY = 'improv_loop_settings_v1';
+const LOOP_CFG_DEFAULTS = { countdown: 4, tick_every: 24, accent_every: 4, loop_bars: 0 };
+
+function readLoopCfg() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(LOOP_CFG_KEY) || '{}');
+    return { ...LOOP_CFG_DEFAULTS, ...stored };
+  } catch { return { ...LOOP_CFG_DEFAULTS }; }
+}
+function writeLoopCfg(cfg) {
+  try { localStorage.setItem(LOOP_CFG_KEY, JSON.stringify(cfg)); } catch {}
+}
+function readLoopCfgFromInputs() {
+  return {
+    countdown:    Math.max(0, Math.min(10, parseInt(document.getElementById('lc-countdown').value || '0', 10))),
+    tick_every:   Math.max(1, parseInt(document.getElementById('lc-tick').value || '24', 10)),
+    accent_every: Math.max(0, parseInt(document.getElementById('lc-accent').value || '0', 10)),
+    loop_bars:    Math.max(0, parseInt(document.getElementById('lc-bars').value || '0', 10)),
+  };
+}
 
 // ── Auth bootstrap ─────────────────────────────────────────────────────────
 function checkAuth() {
@@ -229,7 +338,7 @@ async function loadSourceVideos() {
       const thumb = v.thumb_url ? withAuth(v.thumb_url, state.apiKey) : '';
       tile.innerHTML = `
         ${thumb ? `<img src="${thumb}" alt="" loading="lazy">` : ''}
-        <div class="meta">${escapeHtml((v.prompt || v.filename || '').slice(0, 40))}</div>
+        <div class="meta">${escapeHtml((v.title || v.prompt || v.filename || '').slice(0, 40))}</div>
       `;
       tile.onclick = () => selectVideo(v);
       grid.appendChild(tile);
@@ -251,23 +360,84 @@ async function selectVideo(video) {
   document.getElementById('source-video').src =
     withAuth('/api/video/file/' + video.filename, state.apiKey);
 
-  // Public share URL with image_share_token — fetched from server so we don't
-  // hard-code the token in the frontend.
+  // Populate loop-config inputs from persisted values, then fetch the share URL.
+  const saved = readLoopCfg();
+  document.getElementById('lc-countdown').value = saved.countdown;
+  document.getElementById('lc-tick').value      = saved.tick_every;
+  document.getElementById('lc-accent').value    = saved.accent_every;
+  document.getElementById('lc-bars').value      = saved.loop_bars;
+  await refreshShareLink();
+
+  document.getElementById('qr-wrap').classList.remove('show');
+  document.getElementById('qr-btn').textContent = 'Show QR';
+
+  updateSubmitButton();
+}
+
+async function refreshShareLink() {
+  if (!state.sourceVideo) return;
+  const cfg = readLoopCfgFromInputs();
+  writeLoopCfg(cfg);
+
+  const params = new URLSearchParams({
+    countdown:    cfg.countdown,
+    tick_every:   cfg.tick_every,
+    accent_every: cfg.accent_every,
+    loop_bars:    cfg.loop_bars,
+  });
   try {
-    const r = await apiFetch('/api/improv/share-url/' + video.id, {}, state.apiKey, null);
-    const { url } = await r.json();
-    document.getElementById('share-url').textContent = url;
+    const r = await apiFetch(
+      '/api/improv/share-url/' + state.sourceVideo.id + '?' + params.toString(),
+      {}, state.apiKey, null
+    );
+    const data = await r.json();
+    state.sourceFps = data.fps || 24;
+    document.getElementById('share-url').textContent = data.url;
     const qr = qrcode(0, 'M');
-    qr.addData(url);
+    qr.addData(data.url);
     qr.make();
     document.getElementById('qr-img').src = qr.createDataURL(5, 4);
   } catch (e) {
     document.getElementById('share-url').textContent = 'Share URL unavailable: ' + e.message;
   }
-  document.getElementById('qr-wrap').classList.remove('show');
-  document.getElementById('qr-btn').textContent = 'Show QR';
+  updateLoopSummary();
+}
 
-  updateSubmitButton();
+function updateLoopSummary() {
+  const cfg = readLoopCfgFromInputs();
+  const fps = state.sourceFps || 24;
+  const videoEl = document.getElementById('source-video');
+  const duration = videoEl.duration && isFinite(videoEl.duration) ? videoEl.duration : null;
+  const totalFrames = duration ? Math.floor(duration * fps) : null;
+
+  const barFrames = cfg.tick_every * Math.max(1, cfg.accent_every || 1);
+  const tickSecs = (cfg.tick_every / fps);
+  const barSecs = (barFrames / fps);
+
+  let bars;
+  if (cfg.loop_bars > 0) {
+    bars = cfg.loop_bars;
+  } else if (totalFrames) {
+    bars = Math.max(1, Math.floor(totalFrames / barFrames));
+  } else {
+    bars = null;
+  }
+
+  const tickStr = `tick every ${cfg.tick_every}f (${tickSecs.toFixed(2)}s)`;
+  const accentStr = cfg.accent_every > 0
+    ? ` · accent every ${cfg.accent_every} ticks → ${barSecs.toFixed(2)}s bar`
+    : ' · no accent';
+  const loopStr = bars
+    ? ` · loop ${bars} bar${bars===1?'':'s'} (${(bars*barSecs).toFixed(2)}s)`
+    : '';
+  const videoStr = duration ? ` · video ${duration.toFixed(2)}s @ ${fps}fps` : ` · @ ${fps}fps`;
+  document.getElementById('lc-summary').textContent = tickStr + accentStr + loopStr + videoStr;
+}
+
+function scheduleRefresh() {
+  updateLoopSummary();
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = setTimeout(refreshShareLink, 250);
 }
 
 function copyShare() {
@@ -356,6 +526,8 @@ async function submitSession() {
     const fd = new FormData();
     fd.append('source_video_id', state.sourceVideo.id);
     fd.append('recording', state.recordingFile);
+    fd.append('pip_corner', state.pipCorner || 'tr');
+    fd.append('pip_width_pct', String(state.pipWidth || 0.24));
     const r = await fetch('/api/improv/sessions', {
       method: 'POST',
       headers: { 'X-API-Key': state.apiKey },
@@ -459,7 +631,7 @@ async function loadRecent() {
       const row = document.createElement('div');
       row.className = 'session-row';
       const when = s.created_at ? new Date(s.created_at).toLocaleString() : '—';
-      const src = s.source_video?.filename || '—';
+      const src = s.source_video?.title || s.source_video?.filename || '—';
       row.innerHTML = `
         <span class="sr-status ${s.status}">${s.status}</span>
         <span class="sr-when">${escapeHtml(src)} · ${escapeHtml(when)}</span>
@@ -480,9 +652,63 @@ function escapeHtml(s) {
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
+function setupLoopCfgInputs() {
+  ['lc-countdown', 'lc-tick', 'lc-accent', 'lc-bars'].forEach(id => {
+    document.getElementById(id).addEventListener('input', scheduleRefresh);
+  });
+  document.getElementById('source-video').addEventListener('loadedmetadata', updateLoopSummary);
+}
+
+function setupPipCornerPicker() {
+  let saved = 'tr';
+  try { saved = localStorage.getItem(PIP_CORNER_KEY) || 'tr'; } catch {}
+  if (!['tr','br','tl','bl'].includes(saved)) saved = 'tr';
+  state.pipCorner = saved;
+
+  document.querySelectorAll('.pip-corner-cell').forEach(cell => {
+    cell.classList.toggle('selected', cell.dataset.corner === saved);
+    cell.addEventListener('click', () => {
+      const c = cell.dataset.corner;
+      if (!['tr','br','tl','bl'].includes(c)) return;
+      state.pipCorner = c;
+      try { localStorage.setItem(PIP_CORNER_KEY, c); } catch {}
+      document.querySelectorAll('.pip-corner-cell').forEach(cc => {
+        cc.classList.toggle('selected', cc.dataset.corner === c);
+      });
+    });
+  });
+}
+
+function setupPipSizePicker() {
+  let saved = 0.24;
+  try {
+    const raw = localStorage.getItem(PIP_WIDTH_KEY);
+    if (raw !== null) saved = parseFloat(raw);
+  } catch {}
+  if (!PIP_WIDTH_PRESETS.includes(saved)) saved = 0.24;
+  state.pipWidth = saved;
+
+  document.querySelectorAll('.pip-size-chip').forEach(chip => {
+    const v = parseFloat(chip.dataset.size);
+    chip.classList.toggle('selected', v === saved);
+    chip.addEventListener('click', () => {
+      const v2 = parseFloat(chip.dataset.size);
+      if (!PIP_WIDTH_PRESETS.includes(v2)) return;
+      state.pipWidth = v2;
+      try { localStorage.setItem(PIP_WIDTH_KEY, String(v2)); } catch {}
+      document.querySelectorAll('.pip-size-chip').forEach(cc => {
+        cc.classList.toggle('selected', parseFloat(cc.dataset.size) === v2);
+      });
+    });
+  });
+}
+
 async function init() {
   if (!checkAuth()) return;
   setupDropzone();
+  setupLoopCfgInputs();
+  setupPipCornerPicker();
+  setupPipSizePicker();
   await Promise.all([loadSourceVideos(), loadRecent()]);
 }
 

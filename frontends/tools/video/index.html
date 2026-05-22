@@ -174,6 +174,36 @@
     }
 
     .video-actions { display: flex; gap: 8px; }
+
+    /* Inline title + notes editor on each video card */
+    .video-meta-edit { display: flex; flex-direction: column; gap: 6px; }
+    .video-title-input {
+      width: 100%; box-sizing: border-box;
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 8px; color: var(--text);
+      font-size: 15px; font-weight: 700; letter-spacing: -0.2px;
+      padding: 8px 10px; outline: none; font-family: inherit;
+      transition: border-color 0.2s;
+    }
+    .video-title-input:focus { border-color: var(--accent); }
+    .video-title-input.dirty { border-color: var(--accent); }
+    .video-title-input::placeholder { color: var(--text-dim); font-weight: 600; font-style: italic; }
+
+    .video-notes-input {
+      width: 100%; box-sizing: border-box; resize: vertical;
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 8px; color: var(--text);
+      font-size: 13px; line-height: 1.45;
+      padding: 8px 10px; outline: none; font-family: inherit;
+      transition: border-color 0.2s; min-height: 40px;
+    }
+    .video-notes-input:focus { border-color: var(--accent); }
+    .video-notes-input.dirty { border-color: var(--accent); }
+    .video-notes-input::placeholder { color: var(--text-dim); font-style: italic; }
+
+    .save-indicator { font-size: 10px; color: var(--text-dim); padding: 0 2px; min-height: 12px; }
+    .save-indicator.saved { color: #6abe6a; }
+    .save-indicator.error { color: var(--red); }
     .action-btn { flex: 1; padding: 9px; border-radius: 8px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; text-align: center; text-decoration: none; }
     .action-btn.delete { background: rgba(255,69,58,0.08); color: var(--red); border-color: rgba(255,69,58,0.2); }
 
@@ -851,16 +881,71 @@ function makeVideoCard(v) {
        <button class="action-btn delete" onclick="deleteVideo('${v.id}')">Delete</button>`
     : `<button class="action-btn delete" onclick="deleteVideo('${v.id}')">Delete</button>`;
 
+  const titleVal = (v.title || '').replace(/"/g, '&quot;');
+  const notesVal = (v.notes || '').replace(/</g, '&lt;');
+  const editor = v.status === 'done' ? `
+    <div class="video-meta-edit">
+      <input type="text" class="video-title-input"
+             id="title-${v.id}" placeholder="Untitled — click to add a title"
+             maxlength="255" value="${titleVal}"
+             oninput="markDirty('title','${v.id}')"
+             onblur="saveVideoField('title','${v.id}')">
+      <textarea class="video-notes-input"
+                id="notes-${v.id}" placeholder="Notes…"
+                rows="2"
+                oninput="markDirty('notes','${v.id}')"
+                onblur="saveVideoField('notes','${v.id}')">${notesVal}</textarea>
+      <div class="save-indicator" id="save-ind-${v.id}"></div>
+    </div>` : '';
+
   card.innerHTML = `
     <div class="video-header">
       <span style="font-size:13px;color:var(--text-dim)">${date}</span>
       <span class="status-badge ${statusClass}">${statusLabel}</span>
     </div>
+    ${editor}
     <div class="video-meta"><strong>${meta}</strong>${v.prompt ? ' · ' + v.prompt : ''}</div>
     ${body}
     <div class="video-actions">${actions}</div>
   `;
   return card;
+}
+
+function markDirty(field, id) {
+  const el = document.getElementById(`${field}-${id}`);
+  if (el) el.classList.add('dirty');
+  const ind = document.getElementById(`save-ind-${id}`);
+  if (ind) { ind.textContent = ''; ind.classList.remove('saved','error'); }
+}
+
+async function saveVideoField(field, id) {
+  const el = document.getElementById(`${field}-${id}`);
+  if (!el || !el.classList.contains('dirty')) return;
+  const ind = document.getElementById(`save-ind-${id}`);
+  const value = el.value;
+  try {
+    await api(`/api/video/jobs/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [field]: value }),
+    });
+    el.classList.remove('dirty');
+    if (ind) {
+      ind.textContent = field === 'title' ? 'Title saved' : 'Notes saved';
+      ind.classList.add('saved');
+      ind.classList.remove('error');
+      setTimeout(() => { if (ind.classList.contains('saved')) ind.textContent = ''; }, 1800);
+    }
+    // Update local cache so re-renders don't wipe the value
+    const cached = state.videos.find(v => v.id === id);
+    if (cached) cached[field] = value;
+  } catch (e) {
+    if (ind) {
+      ind.textContent = 'Save failed: ' + e.message;
+      ind.classList.add('error');
+      ind.classList.remove('saved');
+    }
+  }
 }
 
 function revealVideo(videoId, videoUrl) {

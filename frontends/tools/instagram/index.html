@@ -393,13 +393,16 @@
       border: 1.5px dashed var(--border);
       background: var(--surface2);
       color: var(--text-dim);
-      font-size: 26px;
+      font-size: 13px;
+      font-weight: 600;
       cursor: pointer;
       display: flex; align-items: center; justify-content: center;
       -webkit-tap-highlight-color: transparent;
       transition: border-color 0.15s;
     }
     .add-image-btn:active { border-color: var(--accent); }
+    /* Reel-mode "+" stays a single big plus glyph */
+    #add-reel-video-btn { font-size: 26px; }
 
     .images-hint {
       font-size: 12px; color: var(--text-dim);
@@ -459,7 +462,9 @@
     ───────────────────────────────────────────── */
     #picker-modal {
       display: none;
-      position: fixed; inset: 0; z-index: 100;
+      /* Above the detail-modal (z=200) so it remains visible when opened
+         from the detail-modal edit flow. */
+      position: fixed; inset: 0; z-index: 300;
       background: var(--bg);
       flex-direction: column;
       padding-top: env(safe-area-inset-top);
@@ -557,9 +562,11 @@
     /* ─────────────────────────────────────────────
        VIDEO PICKER MODAL
     ───────────────────────────────────────────── */
+    /* Same: above the detail-modal so it stays visible when opened from
+       the detail-modal "+ Video" button. */
     #video-picker-modal {
       display: none;
-      position: fixed; inset: 0; z-index: 150;
+      position: fixed; inset: 0; z-index: 310;
       background: var(--bg);
       flex-direction: column;
       padding-top: env(safe-area-inset-top);
@@ -621,6 +628,20 @@
       width: 72px; height: 72px;
       border-radius: 10px; object-fit: cover;
       flex-shrink: 0; background: var(--surface2);
+    }
+    .detail-thumb-item {
+      position: relative;
+      flex-shrink: 0;
+      width: 72px; height: 72px;
+    }
+    .detail-thumb-item .video-badge {
+      top: 4px; left: 4px;
+    }
+    .detail-thumb-placeholder {
+      width: 72px; height: 72px;
+      border-radius: 10px; background: var(--surface2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; color: var(--text-dim);
     }
 
     .detail-meta { display: flex; flex-direction: column; gap: 4px; }
@@ -726,12 +747,13 @@
         <button id="mode-reel"           onclick="setMode('reel')">Reel</button>
       </div>
 
-      <!-- Selected images strip (feed mode) -->
+      <!-- Selected media strip (feed mode) — mixed images + videos -->
       <div id="feed-images-wrap">
         <div class="selected-images-strip" id="selected-images-strip">
-          <button class="add-image-btn" id="add-image-btn" onclick="openPicker()">+</button>
+          <button class="add-image-btn" id="add-image-btn" onclick="openPicker()" title="Add image">+ Bild</button>
+          <button class="add-image-btn" id="add-video-btn" onclick="openVideoPicker('feed-media')" title="Add video">+ Video</button>
         </div>
-        <div class="images-hint" id="images-hint">Tap + to add images. Add multiple for a carousel (up to 10).</div>
+        <div class="images-hint" id="images-hint">Tap + to add images or videos. Up to 10 items total per carousel.</div>
       </div>
 
       <!-- Reel source videos strip (reel mode) -->
@@ -950,7 +972,7 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 const state = {
   apiKey:     ArtRium.getApiKey(),
-  selectedImages: [],
+  selectedMedia: [],            // [{kind, id, filename, title?, thumb_url, url?}] — mixed image+video carousel children for kind='feed'
   lastPostDate: null,
   posts: [],
   activePost: null,
@@ -974,7 +996,12 @@ const state = {
   detailReelVideoId: null,       // for detail modal
   detailReelVideo: null,         // full video object for detail modal
   allVideos: [],                 // cache of done videos for picker
-  videoPickerTarget: 'new',      // 'new' | 'detail' | 'reel-source'
+  videoPickerTarget: 'new',      // 'new' | 'detail' | 'reel-source' | 'feed-media' | 'detail-feed-media'
+  // Image picker target — which media list closePicker() writes to.
+  pickerTarget: 'new',           // 'new' | 'detail'
+  // Editable copy of the active post's media (kind='feed' only). Mutated by
+  // the detail-modal +/× controls; saveDetail() PATCHes it back as `media`.
+  detailMedia: [],
   // Standalone-reel mode
   mode: 'feed',                  // 'feed' | 'reel'
   selectedReelVideos: [],        // ordered array of Video objects (1–4) for kind='reel'
@@ -1071,10 +1098,13 @@ function renderTimeline() {
       row.className = 'post-row';
       row.onclick = () => openDetail(p);
 
-      // Build thumbnail stack — images for kind='feed', a 🎬 placeholder + count for kind='reel'.
-      const imgs = p.carousel_images || [];
-      const isCarousel = p.is_carousel && imgs.length > 1;
+      // Build thumbnail stack. For kind='feed' the post may carry a mix of
+      // images and videos, so prefer the unified `media` array (in position
+      // order). Falls back to legacy `carousel_images` / `image` for posts
+      // serialized by an older server.
       const isReel = p.kind === 'reel';
+      const media  = Array.isArray(p.media) ? p.media : [];
+      const imgs   = p.carousel_images || [];
       let thumbHTML;
       if (isReel) {
         const vids = p.reel_videos || [];
@@ -1094,7 +1124,33 @@ function renderTimeline() {
             <span class="video-badge" title="Video">▶</span>
             ${n > 1 ? `<span class="carousel-count-badge">${n}</span>` : ''}
           </div>`;
-      } else if (isCarousel) {
+      } else if (media.length > 0) {
+        const front = media[0];
+        const back  = media[1];
+        const thumbOf = (m) => m && m.thumb_url ? withAuth(m.thumb_url) : null;
+        const frontThumb = thumbOf(front);
+        const backThumb  = thumbOf(back);
+        const frontHTML = frontThumb
+          ? `<img class="thumb-front" src="${frontThumb}" alt="">`
+          : `<div class="thumb-front thumb-placeholder">${front.kind === 'video' ? '🎬' : '🖼'}</div>`;
+        const backHTML = backThumb
+          ? `<img class="thumb-back" src="${backThumb}" alt="">`
+          : '';
+        const leadVideo = front.kind === 'video'
+          ? `<span class="video-badge" title="Video">▶</span>`
+          : '';
+        const countBadge = media.length > 1
+          ? `<span class="carousel-count-badge">${media.length}</span>`
+          : '';
+        thumbHTML = `
+          <div class="thumb-stack">
+            ${backHTML}
+            ${frontHTML}
+            ${leadVideo}
+            ${countBadge}
+          </div>`;
+      } else if (imgs.length > 1) {
+        // Legacy fallback (no `media` array in response).
         const front = imgs[0];
         const back  = imgs[1];
         thumbHTML = `
@@ -1109,12 +1165,16 @@ function renderTimeline() {
         thumbHTML = `<div class="thumb-stack"><div class="thumb-front thumb-placeholder">🖼</div></div>`;
       }
 
-      const captionPreview = p.caption
-        ? escHtml(p.caption).replace(/\n/g, ' ')
-        : '<em>No caption</em>';
+      // Title text: leading-item title for the post, plus a carousel descriptor
+      // that calls out a mixed image+video makeup when applicable.
+      const nImg = media.filter(m => m.kind === 'image').length;
+      const nVid = media.filter(m => m.kind === 'video').length;
+      const isCarousel = isReel ? false : (media.length > 1 || (media.length === 0 && p.is_carousel));
+      const isMixed    = nImg > 0 && nVid > 0;
+      const leadTitle  = (media[0]?.title || media[0]?.filename) || p.image?.title || p.image?.filename || '';
       const titleText = isReel
         ? `🎬 Reel · ${(p.reel_video_ids || []).length} clip${(p.reel_video_ids || []).length === 1 ? '' : 's'}`
-        : (p.image?.title || p.image?.filename || '');
+        : leadTitle;
 
       // Companion badges — reel companion only renders for kind='feed';
       // for kind='reel' rows the post itself is the reel, so we skip it.
@@ -1143,7 +1203,7 @@ function renderTimeline() {
             ${fmtDate(p.scheduled_at)}${cloudMarker}
             <span class="${statusClass(p.status)}">${statusLabel(p.status)}</span>
           </div>
-          ${titleText ? `<div class="post-title">${(isCarousel && !isReel) ? '📸 ' : ''}${titleText}</div>` : ''}
+          ${titleText ? `<div class="post-title">${isCarousel ? (isMixed ? '🎞️ ' : (nVid > 0 ? '▶ ' : '📸 ')) : ''}${titleText}</div>` : ''}
           <div class="post-caption">${captionPreview}</div>
           ${companionHTML}
         </div>
@@ -1198,7 +1258,7 @@ function updateScheduleBtn() {
     const n = state.selectedReelVideos.length;
     $('schedule-btn').disabled = n < 1 || n > MAX_REEL_VIDEOS;
   } else {
-    $('schedule-btn').disabled = state.selectedImages.length === 0;
+    $('schedule-btn').disabled = state.selectedMedia.length === 0;
   }
 }
 
@@ -1296,64 +1356,104 @@ function addReelSourceVideo(v) {
 // ── Selected images strip (new post form) ─────────────────────────────────────
 function renderSelectedStrip() {
   const strip = $('selected-images-strip');
-  // Remove all sel-img-wrap elements
-  strip.querySelectorAll('.sel-img-wrap').forEach(el => el.remove());
+  // Remove every previously-rendered media wrapper (both image and video kinds).
+  strip.querySelectorAll('.sel-img-wrap, .sel-vid-wrap').forEach(el => el.remove());
 
-  const addBtn = $('add-image-btn');
+  const addImgBtn = $('add-image-btn');
+  const addVidBtn = $('add-video-btn');
 
-  state.selectedImages.forEach((img, idx) => {
+  state.selectedMedia.forEach((item, idx) => {
     const wrap = document.createElement('div');
-    wrap.className = 'sel-img-wrap';
-    wrap.innerHTML = `
-      <img src="${withAuth(img.thumb_url)}" alt="">
-      <span class="sel-img-order">${idx + 1}</span>
-      <button class="sel-img-remove" onclick="removeSelectedImage(${idx})">×</button>
-    `;
-    strip.insertBefore(wrap, addBtn);
+    if (item.kind === 'video') {
+      wrap.className = 'sel-vid-wrap';
+      wrap.innerHTML = `
+        <img src="${item.thumb_url ? withAuth(item.thumb_url) : ''}" alt="">
+        <div class="sel-vid-play">▶</div>
+        <span class="sel-vid-order">${idx + 1}</span>
+        <button class="sel-vid-remove" onclick="removeSelectedMedia(${idx})">×</button>
+      `;
+    } else {
+      wrap.className = 'sel-img-wrap';
+      wrap.innerHTML = `
+        <img src="${withAuth(item.thumb_url)}" alt="">
+        <span class="sel-img-order">${idx + 1}</span>
+        <button class="sel-img-remove" onclick="removeSelectedMedia(${idx})">×</button>
+      `;
+    }
+    strip.insertBefore(wrap, addImgBtn);
   });
 
-  // Hide add button if at max
-  addBtn.style.display = state.selectedImages.length >= MAX_CAROUSEL ? 'none' : '';
+  // Hide add buttons at the carousel cap (10 items total, mixed).
+  const atMax = state.selectedMedia.length >= MAX_CAROUSEL;
+  addImgBtn.style.display = atMax ? 'none' : '';
+  addVidBtn.style.display = atMax ? 'none' : '';
 
-  // Update hint
-  const n = state.selectedImages.length;
+  // Hint adapts to the kind mix so the user knows what they have.
+  const n     = state.selectedMedia.length;
+  const nImg  = state.selectedMedia.filter(m => m.kind === 'image').length;
+  const nVid  = n - nImg;
   $('images-hint').textContent = n === 0
-    ? 'Tap + to add images. Add multiple for a carousel (up to 10).'
+    ? 'Tap + to add images or videos. Up to 10 items total per carousel.'
     : n === 1
-      ? '1 image selected. Add more for a carousel.'
-      : `${n} images — carousel post.`;
+      ? (nVid ? '1 video selected. Add more for a carousel.' : '1 image selected. Add more for a carousel.')
+      : nVid === 0
+        ? `${n} images — carousel post.`
+        : nImg === 0
+          ? `${n} videos — carousel post.`
+          : `${n} items (${nImg} image${nImg > 1 ? 's' : ''} + ${nVid} video${nVid > 1 ? 's' : ''}) — mixed carousel.`;
 
   updateScheduleBtn();
 }
 
-function removeSelectedImage(idx) {
-  state.selectedImages.splice(idx, 1);
+function removeSelectedMedia(idx) {
+  state.selectedMedia.splice(idx, 1);
   renderSelectedStrip();
 }
 
 // ── Image picker ──────────────────────────────────────────────────────────────
-function openPicker() {
-  // Seed picker selection from current selectedImages
-  state.pickerSelection = new Map(state.selectedImages.map((img, i) => [img.id, i + 1]));
+function openPicker(target) {
+  // target: 'new' (default — new-post strip) | 'detail' (detail-modal strip)
+  state.pickerTarget = target === 'detail' ? 'detail' : 'new';
+  // Seed picker selection from current image-kind items only. Videos in
+  // the target list stay parked — they're added/removed via the video picker.
+  const targetList = _pickerTargetList();
+  const imageItems = targetList.filter(m => m.kind === 'image');
+  state.pickerSelection = new Map(imageItems.map((img, i) => [img.id, i + 1]));
   $('picker-modal').classList.add('show');
   if (!state.pickerImages.length) loadPickerImages(true);
   else refreshPickerCellSelections();
   updatePickerBadge();
 }
 
+function _pickerTargetList() {
+  return state.pickerTarget === 'detail' ? state.detailMedia : state.selectedMedia;
+}
+
 function closePicker() {
   $('picker-modal').classList.remove('show');
-  // Sync pickerSelection → selectedImages (preserving order)
-  // Build ordered array from pickerSelection
+  // Merge the picker result back into the active target list. The picker only
+  // deals with image-kind items, so videos are passed through unchanged in
+  // their original relative position. Images are placed in pickerSelection
+  // order at the start, then any pre-existing non-grid images, then videos.
   const ordered = [...state.pickerSelection.entries()]
     .sort((a, b) => a[1] - b[1])
     .map(([id]) => state.pickerImages.find(img => img.id === id))
-    .filter(Boolean);
-  // Preserve any previously-selected images not in current grid
+    .filter(Boolean)
+    .map(img => ({ kind: 'image', ...img }));
   const inGrid = new Set(state.pickerImages.map(i => i.id));
-  const preserved = state.selectedImages.filter(img => !inGrid.has(img.id));
-  state.selectedImages = [...ordered, ...preserved];
-  renderSelectedStrip();
+  const current = _pickerTargetList();
+  const preservedImages = current.filter(m => m.kind === 'image' && !inGrid.has(m.id));
+  const videos = current.filter(m => m.kind === 'video');
+  const merged = [...ordered, ...preservedImages, ...videos];
+  if (state.pickerTarget === 'detail') {
+    state.detailMedia = merged;
+    renderDetailMediaUI();
+  } else {
+    state.selectedMedia = merged;
+    renderSelectedStrip();
+  }
+  // Reset target so subsequent opens default to 'new' until explicitly set.
+  state.pickerTarget = 'new';
 }
 
 async function loadPickerImages(reset = false) {
@@ -1413,9 +1513,13 @@ function togglePickerCell(cell, img) {
     const sorted = [...state.pickerSelection.entries()].sort((a, b) => a[1] - b[1]);
     state.pickerSelection = new Map(sorted.map(([id], i) => [id, i + 1]));
   } else {
-    // Select (if under limit)
-    if (state.pickerSelection.size >= MAX_CAROUSEL) {
-      ArtRium.toast(`Maximum ${MAX_CAROUSEL} images per post`, true);
+    // Effective cap = total cap minus videos already in the active target list
+    // (selectedMedia for new-post mode, detailMedia for the detail-modal edit).
+    const targetList = _pickerTargetList();
+    const videoCount = targetList.filter(m => m.kind === 'video').length;
+    const cap = MAX_CAROUSEL - videoCount;
+    if (state.pickerSelection.size >= cap) {
+      ArtRium.toast(`Maximum ${MAX_CAROUSEL} items per post (${videoCount} video${videoCount === 1 ? '' : 's'} already selected)`, true);
       return;
     }
     state.pickerSelection.set(img.id, state.pickerSelection.size + 1);
@@ -1519,18 +1623,29 @@ function renderVideoPicker() {
     grid.innerHTML = '<div class="vp-empty">No completed videos yet.<br>Generate some in the Video tool.</div>';
     return;
   }
-  const isMulti = state.videoPickerTarget === 'reel-source';
-  const selectedSet = isMulti
-    ? new Set(state.selectedReelVideos.map(v => v.id))
-    : null;
-  const currentId = isMulti
-    ? null
-    : (state.videoPickerTarget === 'new' ? state.reelVideoId : state.detailReelVideoId);
-  if (isMulti) {
-    $('video-picker-modal').querySelector('.picker-header h2').textContent =
-      `Reel sources (${state.selectedReelVideos.length}/${MAX_REEL_VIDEOS})`;
+  const target = state.videoPickerTarget;
+  const isMulti = target === 'reel-source' || target === 'feed-media' || target === 'detail-feed-media';
+  let selectedSet = null;
+  let currentId  = null;
+  if (target === 'reel-source') {
+    selectedSet = new Set(state.selectedReelVideos.map(v => v.id));
+  } else if (target === 'feed-media') {
+    selectedSet = new Set(state.selectedMedia.filter(m => m.kind === 'video').map(m => m.id));
+  } else if (target === 'detail-feed-media') {
+    selectedSet = new Set(state.detailMedia.filter(m => m.kind === 'video').map(m => m.id));
   } else {
-    $('video-picker-modal').querySelector('.picker-header h2').textContent = 'Select Video for Reel';
+    currentId = target === 'new' ? state.reelVideoId : state.detailReelVideoId;
+  }
+  const header = $('video-picker-modal').querySelector('.picker-header h2');
+  if (target === 'reel-source') {
+    header.textContent = `Reel sources (${state.selectedReelVideos.length}/${MAX_REEL_VIDEOS})`;
+  } else if (target === 'feed-media' || target === 'detail-feed-media') {
+    const list = target === 'feed-media' ? state.selectedMedia : state.detailMedia;
+    const nVid = list.filter(m => m.kind === 'video').length;
+    const total = list.length;
+    header.textContent = `Add videos to carousel (${total}/${MAX_CAROUSEL} items, ${nVid} video${nVid === 1 ? '' : 's'})`;
+  } else {
+    header.textContent = 'Select Video for Reel';
   }
   for (const v of state.allVideos) {
     const item = document.createElement('div');
@@ -1570,6 +1685,33 @@ function selectReelVideo(v) {
     }
     renderSelectedReelStrip();
     renderVideoPicker();  // re-render to update the order badges + count
+    return;
+  }
+  if (state.videoPickerTarget === 'feed-media' || state.videoPickerTarget === 'detail-feed-media') {
+    // Multi-select toggle for kind='feed' carousel video children. Routes to
+    // selectedMedia (new-post strip) or detailMedia (detail-modal edit) based
+    // on which strip opened the picker.
+    const isDetail = state.videoPickerTarget === 'detail-feed-media';
+    const list = isDetail ? state.detailMedia : state.selectedMedia;
+    const idx = list.findIndex(m => m.kind === 'video' && m.id === v.id);
+    if (idx >= 0) {
+      list.splice(idx, 1);
+    } else {
+      if (list.length >= MAX_CAROUSEL) {
+        ArtRium.toast(`Maximum ${MAX_CAROUSEL} items per carousel`, true);
+        return;
+      }
+      list.push({
+        kind: 'video',
+        id: v.id,
+        filename: v.filename,
+        title: v.title,
+        thumb_url: v.thumb_url,
+      });
+    }
+    if (isDetail) renderDetailMediaUI();
+    else renderSelectedStrip();
+    renderVideoPicker();  // refresh the picker checkmarks/count
     return;
   }
   if (state.videoPickerTarget === 'new') {
@@ -1624,12 +1766,10 @@ async function schedulePost() {
         dispatch_target:      'outpost',     // reel-only is outpost-only
       };
     } else {
-      if (state.selectedImages.length === 0) return;
-      const [primary, ...rest] = state.selectedImages;
+      if (state.selectedMedia.length === 0) return;
       body = {
         kind:                 'feed',
-        image_id:             primary.id,
-        carousel_image_ids:   rest.length > 0 ? rest.map(img => img.id) : null,
+        media:                state.selectedMedia.map(m => ({ kind: m.kind, id: m.id })),
         caption:              $('caption-input').value.trim() || null,
         scheduled_at:         state.computedDate,
         reel_delay_minutes:   state.reelDelay,
@@ -1647,12 +1787,12 @@ async function schedulePost() {
     if (state.mode === 'reel') {
       ArtRium.toast(`Reel (${state.selectedReelVideos.length} clip${state.selectedReelVideos.length > 1 ? 's' : ''}) scheduled ✓`);
     } else {
-      const n = state.selectedImages.length;
+      const n = state.selectedMedia.length;
       ArtRium.toast(n > 1 ? `Carousel (${n} images) scheduled ✓` : 'Post scheduled ✓');
     }
 
     // Reset form
-    state.selectedImages = [];
+    state.selectedMedia = [];
     state.selectedReelVideos = [];
     state.pickerImages = [];
     state.pickerPage = 0;
@@ -1686,28 +1826,129 @@ async function schedulePost() {
 }
 
 // ── Detail modal ──────────────────────────────────────────────────────────────
+
+/**
+ * Re-render the detail-modal thumbnail strip + title summary from
+ * state.detailMedia. For scheduled feed posts the strip is editable
+ * (× per item, + Bild / + Video buttons); otherwise it is read-only.
+ * Called from openDetail and from the add/remove handlers.
+ */
+function renderDetailMediaUI() {
+  const strip = $('detail-thumb-strip');
+  strip.innerHTML = '';
+  if (!state.activePost) return;
+  const post = state.activePost;
+  // Outpost-dispatched posts forbid media edits server-side (409), but
+  // caption / retime stays editable — keep the strip read-only there.
+  const isOutpost = post.dispatch_target === 'outpost';
+  const editable = post.kind === 'feed' && post.status === 'scheduled' && !isOutpost;
+
+  state.detailMedia.forEach((m, idx) => {
+    const wrap = document.createElement('div');
+    if (editable) {
+      // Reuse the new-post chip styling so the strip looks consistent
+      // across the add and edit flows.
+      if (m.kind === 'video') {
+        wrap.className = 'sel-vid-wrap';
+        wrap.innerHTML = `
+          <img src="${m.thumb_url ? withAuth(m.thumb_url) : ''}" alt="">
+          <div class="sel-vid-play">▶</div>
+          <span class="sel-vid-order">${idx + 1}</span>
+          <button class="sel-vid-remove" onclick="removeDetailMedia(${idx})">×</button>
+        `;
+      } else {
+        wrap.className = 'sel-img-wrap';
+        wrap.innerHTML = `
+          <img src="${withAuth(m.thumb_url)}" alt="">
+          <span class="sel-img-order">${idx + 1}</span>
+          <button class="sel-img-remove" onclick="removeDetailMedia(${idx})">×</button>
+        `;
+      }
+    } else {
+      wrap.className = 'detail-thumb-item';
+      if (m.thumb_url) {
+        const img = document.createElement('img');
+        img.src = withAuth(m.thumb_url);
+        img.alt = m.title || '';
+        wrap.appendChild(img);
+      } else {
+        const ph = document.createElement('div');
+        ph.className = 'detail-thumb-placeholder';
+        ph.textContent = m.kind === 'video' ? '🎬' : '🖼';
+        wrap.appendChild(ph);
+      }
+      if (m.kind === 'video') {
+        const badge = document.createElement('span');
+        badge.className = 'video-badge';
+        badge.title = 'Video';
+        badge.textContent = '▶';
+        wrap.appendChild(badge);
+      }
+    }
+    strip.appendChild(wrap);
+  });
+
+  if (editable && state.detailMedia.length < MAX_CAROUSEL) {
+    const addImg = document.createElement('button');
+    addImg.type = 'button';
+    addImg.className = 'add-image-btn';
+    addImg.id = 'detail-add-image-btn';
+    addImg.title = 'Add image';
+    addImg.textContent = '+ Bild';
+    addImg.onclick = () => openPicker('detail');
+    strip.appendChild(addImg);
+
+    const addVid = document.createElement('button');
+    addVid.type = 'button';
+    addVid.className = 'add-image-btn';
+    addVid.id = 'detail-add-video-btn';
+    addVid.title = 'Add video';
+    addVid.textContent = '+ Video';
+    addVid.onclick = () => openVideoPicker('detail-feed-media');
+    strip.appendChild(addVid);
+  }
+
+  // Title summary.
+  const items = state.detailMedia;
+  const nImg = items.filter(m => m.kind === 'image').length;
+  const nVid = items.filter(m => m.kind === 'video').length;
+  const leadTitle = items[0]?.title || items[0]?.filename || post.image?.title || post.image?.filename || '';
+  let summary;
+  if (items.length <= 1) {
+    summary = leadTitle;
+  } else if (nVid === 0) {
+    summary = `Carousel · ${nImg} image${nImg === 1 ? '' : 's'}${leadTitle ? ' · ' + leadTitle : ''}`;
+  } else if (nImg === 0) {
+    summary = `Carousel · ${nVid} video${nVid === 1 ? '' : 's'}${leadTitle ? ' · ' + leadTitle : ''}`;
+  } else {
+    summary = `Carousel · ${items.length} items (${nImg} image${nImg === 1 ? '' : 's'} + ${nVid} video${nVid === 1 ? '' : 's'})${leadTitle ? ' · ' + leadTitle : ''}`;
+  }
+  $('detail-title-text').textContent = summary;
+}
+
+function removeDetailMedia(idx) {
+  state.detailMedia.splice(idx, 1);
+  renderDetailMediaUI();
+}
+
 function openDetail(post) {
   state.activePost = post;
 
-  // Build thumbnail strip
-  const strip = $('detail-thumb-strip');
-  strip.innerHTML = '';
-  const imgs = post.carousel_images || [];
-  if (imgs.length === 0 && post.image) {
-    imgs.push(post.image);
-  }
-  for (const img of imgs) {
-    const el = document.createElement('img');
-    el.src = withAuth(img.thumb_url);
-    el.alt = '';
-    strip.appendChild(el);
-  }
+  // Seed the editable detail-media copy from the unified `media` array.
+  // Falls back to the legacy `carousel_images` / `image` shape so this still
+  // works against responses from an older server.
+  const media = Array.isArray(post.media) ? post.media : [];
+  const fallbackImgs = (media.length === 0)
+    ? ((post.carousel_images && post.carousel_images.length)
+        ? post.carousel_images
+        : (post.image ? [post.image] : []))
+    : [];
+  state.detailMedia = media.length
+    ? media.map(m => ({ ...m }))
+    : fallbackImgs.map(img => ({ kind: 'image', ...img }));
 
   $('detail-date').textContent = fmtDate(post.scheduled_at);
-  const titleText = post.image?.title || post.image?.filename || '';
-  $('detail-title-text').textContent = post.is_carousel
-    ? `Carousel · ${imgs.length} images${titleText ? ' · ' + titleText : ''}`
-    : titleText;
+  renderDetailMediaUI();
   $('detail-status-badge').innerHTML = `<span class="${statusClass(post.status)}">${statusLabel(post.status)}</span>`;
   const errEl = $('detail-error-msg');
   if (post.status === 'failed' && post.error) {
@@ -1759,6 +2000,8 @@ function closeDetail(e) {
   if (!e || e.target === $('detail-modal')) {
     $('detail-modal').classList.remove('show');
     state.activePost = null;
+    state.detailMedia = [];
+    state.pickerTarget = 'new';
   }
 }
 
@@ -1776,6 +2019,18 @@ async function saveDetail() {
       const timeVal = $('detail-sched-time').value;
       if (dateVal && timeVal) {
         patchBody.scheduled_at = new Date(`${dateVal}T${timeVal}`).toISOString();
+      }
+      // Media composition is editable only for kind='feed' on locally-
+      // scheduled posts. Outpost-dispatched posts reject media edits with
+      // 409, so we skip the field for them (caption/retime still apply).
+      const mediaEditable = state.activePost.kind === 'feed'
+        && state.activePost.dispatch_target !== 'outpost';
+      if (mediaEditable) {
+        if (state.detailMedia.length === 0) {
+          ArtRium.toast('Post must have at least one image or video', true);
+          return;
+        }
+        patchBody.media = state.detailMedia.map(m => ({ kind: m.kind, id: m.id }));
       }
     }
     await api(`/api/instagram/posts/${state.activePost.id}`, {

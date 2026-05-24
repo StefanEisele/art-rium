@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#111111">
+  <meta name="theme-color" content="#0a0a0c">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>Instagram — art-rium</title>
@@ -143,7 +143,7 @@
       font-size: 10px; font-weight: 700; text-transform: uppercase;
       letter-spacing: 0.5px; padding: 2px 7px; border-radius: 5px;
     }
-    .status-scheduled { background: rgba(10,132,255,0.15); color: var(--accent); }
+    .status-scheduled { background: var(--accent-2-soft); color: var(--accent-2); }
     .status-posted    { background: rgba(50,215,75,0.15);  color: var(--green); }
     .status-cancelled { background: var(--surface2); color: var(--text-dim); }
     .status-failed    { background: rgba(255,69,58,0.15); color: var(--red); }
@@ -245,7 +245,7 @@
       transition: all 0.13s;
     }
     .delay-chip.active {
-      background: var(--accent); border-color: var(--accent); color: #000;
+      background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
     }
     .companion-time-input {
       background: var(--surface2); border: 1.5px solid var(--border);
@@ -298,7 +298,8 @@
       transition: all 0.13s;
     }
     .mode-toggle button.active {
-      background: var(--accent); color: #000;
+      background: var(--accent-soft); color: var(--accent);
+      box-shadow: inset 0 0 0 1.5px var(--accent);
     }
 
     /* Reel-mode video strip */
@@ -310,16 +311,19 @@
     .reel-videos-strip::-webkit-scrollbar { display: none; }
     .sel-vid-wrap {
       position: relative; flex-shrink: 0;
-      width: 72px; height: 72px;
-      border-radius: 10px; overflow: hidden;
-      background: var(--surface2);
+      width: 72px;
+      background: transparent;
     }
     .sel-vid-wrap img {
       width: 72px; height: 72px;
+      border-radius: 10px;
       object-fit: cover; display: block;
+      background: var(--surface2);
     }
     .sel-vid-wrap .sel-vid-play {
-      position: absolute; inset: 0;
+      position: absolute; top: 0; left: 0;
+      width: 72px; height: 72px;
+      border-radius: 10px;
       display: flex; align-items: center; justify-content: center;
       background: rgba(0,0,0,0.25); pointer-events: none;
       color: #fff; font-size: 16px;
@@ -333,28 +337,29 @@
       line-height: 1; -webkit-tap-highlight-color: transparent;
     }
     .sel-vid-wrap .sel-vid-order {
-      position: absolute; bottom: 4px; left: 4px;
+      position: absolute; top: 52px; left: 4px;
       background: rgba(0,0,0,0.65); color: #fff;
       font-size: 10px; font-weight: 700;
       border-radius: 4px; padding: 1px 5px;
     }
 
-    /* Selected images strip */
+    /* Selected images strip — height accommodates the chip + arrow row below */
     .selected-images-strip {
       display: flex;
       gap: 8px;
-      align-items: center;
+      align-items: flex-start;
       flex-wrap: nowrap;
       overflow-x: auto;
       scrollbar-width: none;
-      min-height: 72px;
+      min-height: 100px;
+      padding: 2px 0;
     }
     .selected-images-strip::-webkit-scrollbar { display: none; }
 
     .sel-img-wrap {
       position: relative;
       flex-shrink: 0;
-      width: 72px; height: 72px;
+      width: 72px;
     }
     .sel-img-wrap img {
       width: 72px; height: 72px;
@@ -378,13 +383,56 @@
     }
     .sel-img-order {
       position: absolute;
-      bottom: 4px; left: 4px;
+      top: 52px; left: 4px;
       background: rgba(0,0,0,0.65);
       color: #fff;
       font-size: 10px; font-weight: 700;
       border-radius: 4px;
       padding: 1px 5px;
     }
+
+    /* Drag-to-reorder. Chips with [data-drag-idx] are sortable via long-press.
+       Once dragging starts the chip follows the pointer with translate() so
+       the user can see where it's going; siblings reflow around it via
+       insertBefore + an origin-correction so the visual stays under the finger. */
+    .sel-img-wrap[data-drag-idx],
+    .sel-vid-wrap[data-drag-idx] { cursor: grab; }
+    .sel-img-wrap.dragging,
+    .sel-vid-wrap.dragging {
+      cursor: grabbing;
+      opacity: 0.92;
+      z-index: 10;
+      filter: drop-shadow(0 8px 18px rgba(0,0,0,0.55));
+      transition: none;
+      touch-action: none;
+      will-change: transform;
+    }
+
+    /* Arrow-button row below each editable chip — the tap-to-swap fallback
+       for when the long-press drag is fiddly. Only rendered for chips that
+       carry [data-drag-idx]; the reel-mode strip has no data-drag-idx and
+       therefore no arrows. */
+    .sel-arrows {
+      display: flex; gap: 4px;
+      margin-top: 4px;
+      height: 22px;
+    }
+    .sel-arrow {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      padding: 0;
+    }
+    .sel-arrow:active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+    .sel-arrow[disabled] { opacity: 0.25; pointer-events: none; }
 
     .add-image-btn {
       flex-shrink: 0;
@@ -448,12 +496,13 @@
     /* Submit */
     .schedule-btn {
       width: 100%; padding: 14px;
-      border-radius: var(--radius); border: none;
-      background: var(--accent); color: #000;
+      border-radius: var(--radius-pill); border: none;
+      background: var(--accent); color: var(--on-accent);
       font-size: 15px; font-weight: 700; cursor: pointer;
       font-family: inherit; transition: all 0.13s;
       -webkit-tap-highlight-color: transparent;
     }
+    .schedule-btn:not(:disabled):hover { background: var(--accent-hover); }
     .schedule-btn:disabled { opacity: 0.4; cursor: default; }
     .schedule-btn:not(:disabled):active { transform: scale(0.97); }
 
@@ -480,14 +529,14 @@
     .picker-header h2 { font-size: 17px; font-weight: 700; flex: 1; }
     .picker-done-btn {
       background: var(--accent); border: none;
-      color: #000; font-size: 14px; font-weight: 700;
+      color: var(--on-accent); font-size: 14px; font-weight: 700;
       padding: 7px 16px; border-radius: 8px;
       cursor: pointer; font-family: inherit;
       -webkit-tap-highlight-color: transparent;
     }
     .picker-count-badge {
       background: var(--accent);
-      color: #000;
+      color: var(--on-accent);
       font-size: 12px; font-weight: 700;
       border-radius: 10px;
       padding: 2px 8px;
@@ -540,7 +589,7 @@
     /* Selection overlay on picker cell */
     .picker-cell .sel-overlay {
       position: absolute; inset: 0;
-      background: rgba(10,132,255,0.35);
+      background: rgba(224,122,58,0.35);
       display: none; align-items: center; justify-content: center;
       font-size: 28px; color: #fff;
     }
@@ -551,7 +600,7 @@
       position: absolute;
       top: 5px; left: 5px;
       background: var(--accent);
-      color: #000;
+      color: var(--on-accent);
       font-size: 11px; font-weight: 700;
       border-radius: 50%;
       width: 20px; height: 20px;
@@ -608,7 +657,8 @@
     .detail-sheet {
       width: 100%; max-width: 680px; margin: 0 auto;
       background: var(--surface);
-      border-radius: 20px 20px 0 0;
+      border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+      box-shadow: var(--shadow-modal);
       padding: 20px 20px calc(env(safe-area-inset-bottom) + 24px);
       display: flex; flex-direction: column; gap: 14px;
       max-height: 85dvh;
@@ -669,13 +719,13 @@
 
     .detail-actions { display: flex; gap: 10px; }
     .detail-btn {
-      flex: 1; padding: 13px; border-radius: var(--radius); border: none;
+      flex: 1; padding: 13px; border-radius: var(--radius-pill); border: none;
       font-size: 14px; font-weight: 700; cursor: pointer; font-family: inherit;
       -webkit-tap-highlight-color: transparent; transition: all 0.13s;
     }
     .detail-btn:active { transform: scale(0.97); }
-    .detail-btn.save { background: var(--accent); color: #000; }
-    .detail-btn.post-now { background: var(--green); color: #000; }
+    .detail-btn.save { background: var(--accent); color: var(--on-accent); }
+    .detail-btn.post-now { background: var(--green); color: var(--on-accent); }
     .detail-btn.mark-posted { background: rgba(50,215,75,0.15); color: var(--green); border: 1.5px solid rgba(50,215,75,0.3); }
     .detail-btn.cancel-post { background: var(--surface2); color: var(--text-dim); border: 1.5px solid var(--border); }
     .detail-btn.delete { background: rgba(255,69,58,0.12); color: var(--red); border: 1.5px solid rgba(255,69,58,0.2); }
@@ -1185,6 +1235,10 @@ function renderTimeline() {
       const badges     = [storyBadge, reelBadge].filter(Boolean).join('');
       const companionHTML = badges ? `<div class="companion-row">${badges}</div>` : '';
 
+      const captionPreview = p.caption
+        ? escHtml(p.caption).replace(/\n/g, ' ')
+        : '<em>No caption</em>';
+
       // Cloud marker = scheduled remotely (Instagram-native or via Pi outpost)
       let cloudMarker = '';
       if (p.dispatch_target === 'outpost' && p.status !== 'posted' && p.status !== 'cancelled') {
@@ -1362,8 +1416,15 @@ function renderSelectedStrip() {
   const addImgBtn = $('add-image-btn');
   const addVidBtn = $('add-video-btn');
 
+  const lastIdx = state.selectedMedia.length - 1;
   state.selectedMedia.forEach((item, idx) => {
     const wrap = document.createElement('div');
+    wrap.dataset.dragIdx = idx;
+    const arrowsHtml = `
+      <div class="sel-arrows">
+        <button class="sel-arrow" onclick="moveSelectedMedia(${idx},-1)" ${idx === 0       ? 'disabled' : ''} aria-label="Move left">‹</button>
+        <button class="sel-arrow" onclick="moveSelectedMedia(${idx}, 1)" ${idx === lastIdx ? 'disabled' : ''} aria-label="Move right">›</button>
+      </div>`;
     if (item.kind === 'video') {
       wrap.className = 'sel-vid-wrap';
       wrap.innerHTML = `
@@ -1371,6 +1432,7 @@ function renderSelectedStrip() {
         <div class="sel-vid-play">▶</div>
         <span class="sel-vid-order">${idx + 1}</span>
         <button class="sel-vid-remove" onclick="removeSelectedMedia(${idx})">×</button>
+        ${arrowsHtml}
       `;
     } else {
       wrap.className = 'sel-img-wrap';
@@ -1378,6 +1440,7 @@ function renderSelectedStrip() {
         <img src="${withAuth(item.thumb_url)}" alt="">
         <span class="sel-img-order">${idx + 1}</span>
         <button class="sel-img-remove" onclick="removeSelectedMedia(${idx})">×</button>
+        ${arrowsHtml}
       `;
     }
     strip.insertBefore(wrap, addImgBtn);
@@ -1408,6 +1471,140 @@ function renderSelectedStrip() {
 function removeSelectedMedia(idx) {
   state.selectedMedia.splice(idx, 1);
   renderSelectedStrip();
+}
+
+function moveSelectedMedia(idx, delta) {
+  const j = idx + delta;
+  if (j < 0 || j >= state.selectedMedia.length) return;
+  const [it] = state.selectedMedia.splice(idx, 1);
+  state.selectedMedia.splice(j, 0, it);
+  renderSelectedStrip();
+}
+
+// ── Drag-to-reorder ───────────────────────────────────────────────────────────
+// Long-press (150 ms) starts a drag. Once dragging:
+//   * the chip follows the pointer via transform:translate so the user can
+//     see what they're moving;
+//   * crossing another chip's center triggers insertBefore so siblings reflow
+//     in place (cheap, no clone, no re-render mid-drag);
+//   * after each insertBefore the chip's flow position has shifted, so we
+//     compensate by shifting the translate-origin by the same amount —
+//     visually the chip stays glued under the finger.
+// On release we mirror the final DOM order back to the underlying array.
+//
+// Chips opt in by carrying [data-drag-idx]; read-only items omit it so this
+// same listener safely ignores non-editable strips.
+function makeStripSortable(strip, chipSelector, getList, onReorder) {
+  const LONG_PRESS_MS = 150;
+  const MOVE_CANCEL_PX = 8;
+
+  let pressTimer = null;
+  let dragEl = null;
+  let pointerId = null;
+  let pressStartX = 0, pressStartY = 0;
+  // Drag origin: subtracted from current pointer coords to get the translate
+  // offset. After each insertBefore we shift this by the chip's flow delta
+  // so the visual position stays under the finger.
+  let originX = 0, originY = 0;
+
+  const _renumberBadges = () => {
+    const chips = [...strip.querySelectorAll(chipSelector)];
+    const lastIdx = chips.length - 1;
+    chips.forEach((c, i) => {
+      const badge = c.querySelector('.sel-img-order, .sel-vid-order');
+      if (badge) badge.textContent = i + 1;
+      // Arrow disabled state must reflect the new position so the user can
+      // immediately use them after dropping. Clicks during a drag are
+      // suppressed by the dragging class' pointer-events.
+      const arrows = c.querySelectorAll('.sel-arrow');
+      if (arrows.length === 2) {
+        arrows[0].disabled = (i === 0);
+        arrows[1].disabled = (i === lastIdx);
+      }
+    });
+  };
+
+  const _maybeReorder = (x, y) => {
+    if (!dragEl) return;
+    const others = [...strip.querySelectorAll(chipSelector)].filter(c => c !== dragEl);
+    for (const c of others) {
+      const r = c.getBoundingClientRect();
+      if (x < r.left || x > r.right) continue;
+      const midX = r.left + r.width / 2;
+      const before = dragEl.getBoundingClientRect();
+      if (x < midX) strip.insertBefore(dragEl, c);
+      else          strip.insertBefore(dragEl, c.nextSibling);
+      const after = dragEl.getBoundingClientRect();
+      // Shift origin by the chip's flow-delta so translate() keeps the
+      // chip visually pinned under the finger across the swap.
+      originX += after.left - before.left;
+      originY += after.top  - before.top;
+      _renumberBadges();
+      return;
+    }
+  };
+
+  const _endDrag = () => {
+    if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    if (!dragEl) return;
+    const captured = dragEl;
+    dragEl = null;
+    captured.classList.remove('dragging');
+    captured.style.transform = '';
+    captured.style.zIndex = '';
+    try { captured.releasePointerCapture(pointerId); } catch (e) {}
+
+    const list = getList();
+    const newOrder = [...strip.querySelectorAll(chipSelector)]
+      .map(el => list[Number(el.dataset.dragIdx)])
+      .filter(Boolean);
+    const changed = newOrder.length === list.length
+      && newOrder.some((it, i) => it !== list[i]);
+    if (changed) onReorder(newOrder);
+  };
+
+  strip.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('button')) return;  // × and arrow buttons handled separately
+    const chip = e.target.closest(chipSelector);
+    if (!chip) return;
+    pressStartX = e.clientX;
+    pressStartY = e.clientY;
+    pointerId   = e.pointerId;
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      dragEl = chip;
+      // Snapshot the cursor position at pickup as the drag origin — every
+      // pointermove translates the chip by (current - origin).
+      originX = pressStartX;
+      originY = pressStartY;
+      chip.classList.add('dragging');
+      try { chip.setPointerCapture(pointerId); } catch (err) {}
+      if (navigator.vibrate) navigator.vibrate(12);
+    }, LONG_PRESS_MS);
+  });
+
+  strip.addEventListener('pointermove', (e) => {
+    if (pressTimer) {
+      // Long-press not yet triggered — cancel on scroll/swipe so finger pan still works.
+      const dx = e.clientX - pressStartX, dy = e.clientY - pressStartY;
+      if (dx * dx + dy * dy > MOVE_CANCEL_PX * MOVE_CANCEL_PX) {
+        clearTimeout(pressTimer);
+        pressTimer = null;
+      }
+      return;
+    }
+    if (!dragEl || e.pointerId !== pointerId) return;
+    e.preventDefault();
+    _maybeReorder(e.clientX, e.clientY);
+    // Re-apply translate AFTER any insertBefore so we use the post-shift origin.
+    // The 1.06 scale is centred (transform-origin defaults to centre) so the
+    // chip's centre stays at the translated position — pointer-tracking math
+    // is unaffected by the scale.
+    dragEl.style.transform = `translate(${e.clientX - originX}px, ${e.clientY - originY}px) scale(1.06)`;
+  });
+
+  strip.addEventListener('pointerup',     _endDrag);
+  strip.addEventListener('pointercancel', _endDrag);
 }
 
 // ── Image picker ──────────────────────────────────────────────────────────────
@@ -1843,11 +2040,19 @@ function renderDetailMediaUI() {
   const isOutpost = post.dispatch_target === 'outpost';
   const editable = post.kind === 'feed' && post.status === 'scheduled' && !isOutpost;
 
+  const lastIdx = state.detailMedia.length - 1;
   state.detailMedia.forEach((m, idx) => {
     const wrap = document.createElement('div');
     if (editable) {
       // Reuse the new-post chip styling so the strip looks consistent
-      // across the add and edit flows.
+      // across the add and edit flows. data-drag-idx flags the chip as
+      // sortable; read-only branches below omit it.
+      wrap.dataset.dragIdx = idx;
+      const arrowsHtml = `
+        <div class="sel-arrows">
+          <button class="sel-arrow" onclick="moveDetailMedia(${idx},-1)" ${idx === 0       ? 'disabled' : ''} aria-label="Move left">‹</button>
+          <button class="sel-arrow" onclick="moveDetailMedia(${idx}, 1)" ${idx === lastIdx ? 'disabled' : ''} aria-label="Move right">›</button>
+        </div>`;
       if (m.kind === 'video') {
         wrap.className = 'sel-vid-wrap';
         wrap.innerHTML = `
@@ -1855,6 +2060,7 @@ function renderDetailMediaUI() {
           <div class="sel-vid-play">▶</div>
           <span class="sel-vid-order">${idx + 1}</span>
           <button class="sel-vid-remove" onclick="removeDetailMedia(${idx})">×</button>
+          ${arrowsHtml}
         `;
       } else {
         wrap.className = 'sel-img-wrap';
@@ -1862,6 +2068,7 @@ function renderDetailMediaUI() {
           <img src="${withAuth(m.thumb_url)}" alt="">
           <span class="sel-img-order">${idx + 1}</span>
           <button class="sel-img-remove" onclick="removeDetailMedia(${idx})">×</button>
+          ${arrowsHtml}
         `;
       }
     } else {
@@ -1928,6 +2135,14 @@ function renderDetailMediaUI() {
 
 function removeDetailMedia(idx) {
   state.detailMedia.splice(idx, 1);
+  renderDetailMediaUI();
+}
+
+function moveDetailMedia(idx, delta) {
+  const j = idx + delta;
+  if (j < 0 || j >= state.detailMedia.length) return;
+  const [it] = state.detailMedia.splice(idx, 1);
+  state.detailMedia.splice(j, 0, it);
   renderDetailMediaUI();
 }
 
@@ -2167,6 +2382,24 @@ window.addEventListener('load', async () => {
   });
 
   renderSelectedStrip();
+
+  // Drag-to-reorder for both the new-post strip and the detail-modal strip.
+  // Listeners attach to the persistent strip elements; chips opt in via
+  // [data-drag-idx], so read-only detail posts are unaffected.
+  const _chipSel = '.sel-img-wrap[data-drag-idx], .sel-vid-wrap[data-drag-idx]';
+  makeStripSortable(
+    $('selected-images-strip'),
+    _chipSel,
+    () => state.selectedMedia,
+    (newList) => { state.selectedMedia = newList; renderSelectedStrip(); },
+  );
+  makeStripSortable(
+    $('detail-thumb-strip'),
+    _chipSel,
+    () => state.detailMedia,
+    (newList) => { state.detailMedia = newList; renderDetailMediaUI(); },
+  );
+
   await Promise.all([loadTimeline(), loadLastPost(), loadAllVideos(), probeOutpost()]);
 });
 

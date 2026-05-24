@@ -28,6 +28,7 @@ from core.db import AsyncSessionLocal
 from core.imaging import prepare_for_upload
 from core.models import InstagramPost, Video
 from core.scheduling import companion_at
+from services.instagram.ig_video import ensure_ig_compatible
 from services.instagram.media import load_media_refs
 from services.instagram.reel_concat import concat_reel_videos
 from workers.video_generator import generate_slideshow
@@ -161,12 +162,16 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
         await _record_failure(post_id, f"Image re-encode failed: {exc}")
         return
 
-    # ── Read carousel video bytes (no re-encode; Meta accepts the source MP4) ─
+    # ── Read carousel video bytes (transcoded to H.264 if needed) ─────────
+    # Meta rejects HEVC/10-bit with error 2207082. ensure_ig_compatible
+    # returns the source unchanged when it's already H.264/yuv420p,
+    # otherwise produces a cached `<stem>_ig.mp4` sibling.
     video_bytes_list: list[tuple[bytes, str]] = []
     try:
         for ref in video_refs:
             src = settings.storage_dir / ref.filepath
-            video_bytes_list.append((src.read_bytes(), ref.filename))
+            ig_path = await ensure_ig_compatible(src)
+            video_bytes_list.append((ig_path.read_bytes(), ig_path.name))
     except Exception as exc:
         await _record_failure(post_id, f"Video read failed: {exc}")
         return
@@ -174,7 +179,11 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
     # ── Resolve the reel video — reuse stored video if picked, else render slideshow ─
     reel_path: Path | None = None
     if reel_video_path is not None:
-        reel_path = reel_video_path
+        try:
+            reel_path = await ensure_ig_compatible(reel_video_path)
+        except Exception as exc:
+            await _record_failure(post_id, f"Reel video transcode failed: {exc}")
+            return
         logger.info("dispatch_to_outpost %s — reusing stored video %s", post_id, reel_path.name)
     elif reel_publish_at is not None:
         if not image_refs:

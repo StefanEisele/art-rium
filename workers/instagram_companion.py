@@ -29,6 +29,7 @@ from services.instagram.graph import (
     share_url,
     wait_container_ready,
 )
+from services.instagram.ig_video import ensure_ig_compatible
 from services.instagram.media import load_media_refs
 from workers.video_generator import generate_slideshow
 
@@ -109,7 +110,7 @@ async def publish_reel(post_id: uuid.UUID) -> None:
                 vid = await db2.get(Video, post.reel_video_id)
             if not vid or vid.status != "done" or not vid.filepath:
                 raise ValueError(f"Referenced video {post.reel_video_id} is not ready")
-            video_path = settings.storage_dir / vid.filepath
+            video_path = await ensure_ig_compatible(settings.storage_dir / vid.filepath)
             video_is_temp = False
             logger.info("Reel: using existing video %s for post %s", vid.filename, post_id)
         else:

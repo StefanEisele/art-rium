@@ -137,21 +137,23 @@ async def wait_container_ready(
     while True:
         r = await client.get(
             f"{graph}/{container_id}",
-            params={"fields": "status_code", "access_token": token},
+            params={"fields": "status_code,status", "access_token": token},
         )
         body = r.json()
-        status = body.get("status_code", "")
-        logger.debug("Container %s status: %s", container_id, status)
+        status_code = body.get("status_code", "")
+        detail = body.get("status", "")
+        logger.debug("Container %s status: %s — %s", container_id, status_code, detail)
 
-        if status == "FINISHED":
+        if status_code == "FINISHED":
             return
-        if status == "ERROR":
+        if status_code == "ERROR":
             raise RuntimeError(
-                f"Instagram container {container_id} failed processing: {body}"
+                f"Instagram container {container_id} failed processing: "
+                f"{detail or body}"
             )
         if asyncio.get_event_loop().time() >= deadline:
             raise TimeoutError(
                 f"Instagram container {container_id} not ready after "
-                f"{max_wait}s (status={status!r})"
+                f"{max_wait}s (status_code={status_code!r}, detail={detail!r})"
             )
         await asyncio.sleep(poll_interval)

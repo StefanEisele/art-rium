@@ -44,6 +44,7 @@ from services.instagram.graph import (
     share_url,
     wait_container_ready,
 )
+from services.instagram.ig_video import ensure_ig_compatible
 from services.instagram.media import MediaRef, load_media_refs
 
 logger = logging.getLogger(__name__)
@@ -203,17 +204,23 @@ async def _call_graph_api(
         return None, api_error
 
 
-def _child_payload(ref: MediaRef, *, is_carousel_item: bool) -> dict[str, str]:
+async def _child_payload(ref: MediaRef, *, is_carousel_item: bool) -> dict[str, str]:
     """Build the per-child media-container payload for Graph API.
 
     For carousel children, `is_carousel_item=true` is required and the
     `caption` must NOT be set (it's set on the parent container).
+
+    Video children are routed through ensure_ig_compatible so any
+    HEVC/10-bit master is transcoded to H.264/yuv420p before the share
+    URL is built — Meta rejects everything else with error 2207082.
     """
-    url = share_url(ref.filename, kind=ref.share_kind)
-    payload: dict[str, str] = (
-        {"video_url": url, "media_type": "VIDEO"} if ref.kind == "video"
-        else {"image_url": url}
-    )
+    if ref.kind == "video":
+        src = settings.storage_dir / ref.filepath
+        ig_path = await ensure_ig_compatible(src)
+        url = share_url(ig_path.name, kind="video")
+        payload: dict[str, str] = {"video_url": url, "media_type": "VIDEO"}
+    else:
+        payload = {"image_url": share_url(ref.filename, kind=ref.share_kind)}
     if is_carousel_item:
         payload["is_carousel_item"] = "true"
     return payload
@@ -224,7 +231,7 @@ async def _create_single_container(
     *, scheduled_publish_time: int | None = None,
 ) -> str:
     ref = snap.media[0]
-    data = _child_payload(ref, is_carousel_item=False)
+    data = await _child_payload(ref, is_carousel_item=False)
     data["caption"] = snap.caption
     if scheduled_publish_time is not None:
         data["scheduled_publish_time"] = str(scheduled_publish_time)
@@ -247,7 +254,7 @@ async def _create_carousel_container(
     for ref in snap.media:
         item_id = await create_media_container(
             client,
-            _child_payload(ref, is_carousel_item=True),
+            await _child_payload(ref, is_carousel_item=True),
             f"create carousel item {ref.filename}",
         )
         child_ids.append(item_id)

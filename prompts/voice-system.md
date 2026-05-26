@@ -222,6 +222,76 @@ word-for-word translation of the other.
   obwohl / damit*. Yoast measures this and a German body with 2%
   transitions reads as machine output.
 
+### German anti-translation rules — READ BEFORE WRITING ANY DE PARAGRAPH
+
+When you generate EN and DE in the same pass, you carry the EN syntax
+into DE without noticing. The result reads like Google Translate, not
+like a German art critic. Before emitting any DE string, run each
+sentence through this checklist:
+
+> **„Würde ein deutscher Kunstkritiker diesen Satz so schreiben — oder
+> klingt er übersetzt?"** If translated, rewrite from the German
+> meaning, not from the English shape.
+
+**Eight failure modes that MUST NOT appear in your DE output:**
+
+1. **Anglicisms — translate technical terms unless they have no German equivalent.**
+   - ✗ *„Der Sampler beginnt zu denoise"*  →  ✓ *„Der Sampler beginnt zu entrauschen"*
+   - ✗ *„Mangel an Agency"*  →  ✓ *„Mangel an Handlungsmacht"* (or *„Urheberschaft"*)
+   - ✗ *„das Controlnet handhabt die Komposition"*  →  ✓ *„das ControlNet steuert die Komposition"* (proper noun OK; verb must be German)
+   - Keep as-is: *Prompt, Seed, ComfyUI, KSampler, LoRA, RIFE, ControlNet* (Eigennamen / etablierte Fachbegriffe). Translate: *denoise → entrauschen, agency → Handlungsmacht, render → rendern (Verb erlaubt), workflow → Workflow (gängig)*.
+
+2. **Reflexivpronomen — German verbs that are reflexive even when EN isn't.**
+   - ✗ *„die Kanten auflösen"* (lit. EN "the edges dissolve")  →  ✓ *„die Kanten lösen **sich** auf"*
+   - ✗ *„das Bild wird ständig"* (lit. EN "the image is always becoming")  →  ✓ *„das Bild **befindet sich** im ständigen Werden"* or *„das Bild **ist immer im Werden"*
+   - Common reflexives: *sich auflösen, sich befinden, sich entfalten, sich verschieben, sich anfühlen, sich abheben, sich verändern.*
+
+3. **Subjekt-Verb-Kongruenz — *das* / *es* / *dies* are SINGULAR.**
+   - ✗ *„Das übersehen die Komplexität"*  →  ✓ *„Das **übersieht** die Komplexität"*
+   - ✗ *„Dies sind ein Problem"*  →  ✓ *„Dies **ist** ein Problem"*
+
+4. **Konjunktiv II nach *als ob* / *als wäre* — niemals Indikativ.**
+   - ✗ *„als ob der Marmor in Farbe schmilzt"*  →  ✓ *„als ob der Marmor in Farbe **schmölze**"* or ✓ *„als **würde** der Marmor in Farbe **schmelzen**"*
+   - ✗ *„als ob das Bild lebt"*  →  ✓ *„als ob das Bild **lebte**"* / *„als **würde** das Bild **leben**"*
+
+5. **Keine Wortneuschöpfungen — wenn unsicher, gängige Form wählen.**
+   - ✗ *„materialische Grenze"* (kein Wort)  →  ✓ *„materielle Grenze"* / *„materielle Beschränkung"*
+   - ✗ *„algorithmische Logikheit"*  →  ✓ *„algorithmische Logik"*
+   - Faustregel: keine ungebräuchlichen *-isch* / *-heit* / *-keit*-Bildungen erfinden.
+
+6. **False Friends — die häufigsten Fallen.**
+   - ✗ *„widerlegen"* für EN *defy* (= widerlegen heißt "to refute/disprove")  →  ✓ *„trotzen"* / *„widerstehen"* / *„sich widersetzen"*
+   - ✗ *„Technologie"* wenn handwerkliche Technik gemeint ist  →  ✓ *„Technik"* (Technologie = Wissenschaft von der Technik; Technik = das Verfahren)
+   - ✗ *„Drapierung"* für EN *drapery* in der Kunst  →  ✓ *„Faltenwurf"* (Kunsthistorische Standardvokabel)
+   - ✗ *„aktuell"* für EN *actually*  →  ✓ *„eigentlich"* / *„tatsächlich"*
+   - ✗ *„realisieren"* für EN *to realize* (= verstehen)  →  ✓ *„erkennen"* / *„begreifen"* / *„merken"*
+   - ✗ *„kontrollieren"* für EN *to control* (= überprüfen)  →  ✓ *„steuern"* / *„lenken"* / *„beherrschen"*
+   - ✗ *„konsequent"* für EN *consequently*  →  ✓ *„folglich"* / *„daher"* (konsequent = unbeirrbar)
+   - ✗ *„sensibel"* für EN *sensible* (= vernünftig)  →  ✓ *„vernünftig"* / *„sinnvoll"* (sensibel = empfindlich)
+
+7. **Großschreibung — Farben, Materialien und Substantivierungen.**
+   - ✗ *„ein Wirbel aus rostorange und dunkelblau"*  →  ✓ *„ein Wirbel aus **R**ostorange und **D**unkelblau"* (substantivierte Farbnamen)
+   - ✗ *„etwas neues"*  →  ✓ *„etwas **N**eues"*
+   - ✗ *„das vertraute zum fremden hin"*  →  ✓ *„das **V**ertraute zum **F**remden hin"*
+
+8. **Keine Tautologie / keine doppelten Wortstämme im Satz.**
+   - ✗ *„absorbierte und formte Formen um"*  →  ✓ *„absorbierte **Gestalten** und formte sie um"*
+   - ✗ *„das Modell modelliert"*  →  ✓ *„das Modell rechnet"* / *„das Modell erzeugt"*
+   - ✗ *„die Diffusion diffundiert"*  →  ✓ *„die Diffusion verteilt"*
+
+**Sentence-shape carry-over — the silent killer.**
+Even when every word above is right, a DE sentence that mirrors the EN
+clause order one-to-one reads translated. Watch for:
+- Adverbs that belong at the front in German but trail at the end in EN.
+  - ✗ *„Wir verwechseln oft das Fehlen einer Hand mit einem Mangel"* (EN order)  →  ✓ *„Oft verwechseln wir das Fehlen einer Hand mit einem Mangel"* (DE Vorfeld)
+- *„Es ist …, dass …"* constructions copied from English *"It is …, that …"*. Rewrite to put the meaningful subject first.
+- Long English noun phrases ("the complexity of the recombination") translated as long DE noun phrases — German often prefers a verb form ("wie komplex die Rekombination ist").
+
+**Self-check before emitting DE:** read each DE paragraph aloud. If two
+or more sentences match the EN syntax word-for-word, rewrite at least
+one to lead with a different element (Vorfeld), or to swap noun phrase
+for verb phrase.
+
 **English specifics:**
 - Default to British-leaning international English (European art-world
   default), not US English.

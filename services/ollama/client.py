@@ -114,7 +114,16 @@ async def _chat_json(
     for attempt in range(1, max_attempts + 1):
         async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
-            r.raise_for_status()
+            if r.status_code >= 400:
+                # Ollama 5xx usually carries the real cause (OOM, ctx overflow,
+                # model-load failure) in the response body. raise_for_status()
+                # would drop it. Surface it before re-raising.
+                body_snippet = (r.text or "")[:1000]
+                logger.error(
+                    "%s: Ollama returned HTTP %d — body: %s",
+                    label, r.status_code, body_snippet or "(empty)",
+                )
+                r.raise_for_status()
             data = r.json()
 
         if "error" in data:
@@ -663,6 +672,11 @@ async def write_rich_article(
 _MODAL_LANGS = ("en", "de")
 _MODAL_MODES = ("essay", "work", "lab")
 
+# Serialise modal article generation. Two concurrent jobs hitting qwen3.6:27b
+# with num_ctx=24576 + 9 images each crash Ollama's model-runner subprocess
+# (KV-cache allocation fails). One generation at a time; everyone else waits.
+_MODAL_ARTICLE_LOCK = asyncio.Lock()
+
 
 def _modal_user_text(
     *,
@@ -1131,6 +1145,128 @@ def _validate_lab_block(lang: str, block: dict) -> dict:
     }
 
 
+# ── DE revision pass — fix EN→DE carry-over after the main bilingual call ───
+
+_PLACEHOLDER_VIDEO_RE = re.compile(r"\[VIDEO_\d+\]")
+
+
+def _count_placeholders(block: dict) -> tuple[int, int]:
+    """Count [VIDEO_K] and [PARENT_SERIES] occurrences anywhere in a block.
+    Serializes via json so nested arrays/dicts are covered uniformly."""
+    s = json.dumps(block, ensure_ascii=False)
+    return (len(_PLACEHOLDER_VIDEO_RE.findall(s)), s.count("[PARENT_SERIES]"))
+
+
+async def _revise_german_block(
+    de_block: dict,
+    *,
+    mode: str,
+    has_singulart: bool,
+    has_parent: bool,
+    timeout: float = 600.0,
+) -> dict | None:
+    """
+    Second pass: rewrite the German block to remove anti-translation tells
+    that appear when EN+DE are generated in the same model call.
+
+    Returns the revised block on success, or None on any failure — caller
+    falls back to the original DE block.
+
+    Invariants enforced (revision is rejected if violated):
+      - focus_keyphrase byte-equal to original (Yoast target locked).
+      - [VIDEO_K] and [PARENT_SERIES] placeholder counts unchanged.
+      - metadata{} (Work mode) restored verbatim from original.
+      - code_blocks[i].code and .language (Lab mode) restored verbatim;
+        only captions may be revised.
+    """
+    original_focus_kp = de_block.get("focus_keyphrase", "")
+    original_metadata = de_block.get("metadata") if mode == "work" else None
+    original_code_blocks = de_block.get("code_blocks") if mode == "lab" else None
+    orig_video_count, orig_parent_count = _count_placeholders(de_block)
+
+    user_text = (
+        f"MODE: {mode}\n\n"
+        "Hier ist der zu überarbeitende deutsche Sprachblock als JSON. "
+        "Überarbeite die Prosa idiomatisch nach den Regeln im System-Prompt. "
+        "Gib EXAKT dieselben JSON-Schlüssel zurück — keine entfernten, keine neuen. "
+        "Behalte focus_keyphrase, metadata, code_blocks[].code/.language und alle "
+        "[VIDEO_K] / [PARENT_SERIES] Platzhalter unverändert.\n\n"
+        f"{json.dumps(de_block, ensure_ascii=False, indent=2)}\n\n"
+        "Antworte mit dem überarbeiteten JSON-Objekt — kein Vorspann, keine Fences."
+    )
+
+    try:
+        revised = await _chat_json(
+            model=settings.ollama_llm_model,
+            system=_read_prompt("de-revision.md"),
+            user_text=user_text,
+            options={"temperature": 0.5, "num_ctx": 16384, "num_predict": 6000},
+            think=False,
+            timeout=timeout,
+            label=f"revise_german[{mode}]",
+            salvage=_iterative_salvage,
+            max_attempts=2,
+        )
+    except Exception as exc:
+        logger.warning("DE revision pass failed (%s) — keeping original DE block", exc)
+        return None
+
+    try:
+        if mode == "essay":
+            revised = _validate_essay_block("de", revised)
+        elif mode == "work":
+            revised = _validate_work_block(
+                "de", revised, has_singulart=has_singulart, has_parent=has_parent,
+            )
+        else:
+            revised = _validate_lab_block("de", revised)
+    except RuntimeError as exc:
+        logger.warning("DE revision returned invalid block (%s) — keeping original", exc)
+        return None
+
+    if revised.get("focus_keyphrase") != original_focus_kp:
+        logger.warning(
+            "DE revision changed focus_keyphrase (%r → %r) — keeping original",
+            original_focus_kp, revised.get("focus_keyphrase"),
+        )
+        return None
+
+    rev_video_count, rev_parent_count = _count_placeholders(revised)
+    if rev_video_count != orig_video_count:
+        logger.warning(
+            "DE revision changed [VIDEO_K] count (%d → %d) — keeping original",
+            orig_video_count, rev_video_count,
+        )
+        return None
+    if rev_parent_count != orig_parent_count:
+        logger.warning(
+            "DE revision changed [PARENT_SERIES] count (%d → %d) — keeping original",
+            orig_parent_count, rev_parent_count,
+        )
+        return None
+
+    # Metadata + code blocks are data, not prose — restore verbatim defensively
+    # even if the model already left them alone.
+    if mode == "work" and original_metadata is not None:
+        revised["metadata"] = original_metadata
+
+    if mode == "lab" and original_code_blocks is not None:
+        revised_blocks = revised.get("code_blocks") or []
+        if len(revised_blocks) != len(original_code_blocks):
+            logger.warning(
+                "DE revision changed code_blocks count (%d → %d) — keeping original",
+                len(original_code_blocks), len(revised_blocks),
+            )
+            return None
+        for orig_cb, new_cb in zip(original_code_blocks, revised_blocks):
+            if isinstance(new_cb, dict) and isinstance(orig_cb, dict):
+                new_cb["code"] = orig_cb.get("code", "")
+                new_cb["language"] = orig_cb.get("language", "text")
+
+    logger.info("DE revision pass succeeded for mode=%s", mode)
+    return revised
+
+
 async def write_modal_article(
     jpgs: list[bytes],
     *,
@@ -1168,6 +1304,44 @@ async def write_modal_article(
     if parent_series is not None and not (parent_series.get("name") and parent_series.get("url")):
         raise ValueError("parent_series must have both 'name' and 'url' keys")
 
+    if _MODAL_ARTICLE_LOCK.locked():
+        logger.info("Modal article: another generation in progress, queueing (mode=%s)", mode)
+    async with _MODAL_ARTICLE_LOCK:
+        return await _write_modal_article_locked(
+            jpgs,
+            mode=mode,
+            series_name=series_name,
+            parent_series=parent_series,
+            has_singulart=has_singulart,
+            title_hints=title_hints,
+            alt_texts=alt_texts,
+            notes_list=notes_list,
+            user_notes=user_notes,
+            artist_mode=artist_mode,
+            video_descriptions=video_descriptions,
+            video_frame_jpgs=video_frame_jpgs,
+            timeout=timeout,
+        )
+
+
+async def _write_modal_article_locked(
+    jpgs: list[bytes],
+    *,
+    mode: str,
+    series_name: str | None,
+    parent_series: dict[str, str] | None,
+    has_singulart: bool,
+    title_hints: list[str | None] | None,
+    alt_texts:   list[str | None] | None,
+    notes_list:  list[str | None] | None,
+    user_notes:  str | None,
+    artist_mode: str,
+    video_descriptions: list[str] | None,
+    video_frame_jpgs: list[list[bytes]] | None,
+    timeout: float,
+) -> dict[str, dict[str, Any]]:
+    """Body of write_modal_article, running under _MODAL_ARTICLE_LOCK.
+    All Ollama I/O for one article (main pass + DE revision) runs here."""
     n = len(jpgs)
     title_hints, alt_texts, notes_list = _normalize_meta_lists(
         n, title_hints, alt_texts, notes_list,
@@ -1225,6 +1399,16 @@ async def write_modal_article(
     # ~1000–2000 tokens and the default 16k cap gets tight past 2–3 videos.
     num_ctx = 24576 if n_frames else 16384
 
+    # Free VRAM for the 17 GB article LLM. The titler model (qwen2.5vl:3b)
+    # holds ~3 GB resident for 30 min after warm-up; loading qwen3.6:27b on
+    # top of that crashes Ollama's model-runner subprocess on constrained
+    # GPUs. Unloading the titler first is the cleanest fix.
+    if (
+        settings.ollama_titler_model
+        and settings.ollama_titler_model != settings.ollama_llm_model
+    ):
+        await unload_model(settings.ollama_titler_model)
+
     parsed = await _chat_json(
         model=settings.ollama_llm_model,
         system=system_prompt,
@@ -1248,6 +1432,19 @@ async def write_modal_article(
             out[lang] = _validate_work_block(lang, block, has_singulart=has_singulart, has_parent=has_parent)
         else:  # lab
             out[lang] = _validate_lab_block(lang, block)
+
+    # DE revision pass — Qwen-family models carry EN syntax into the DE block
+    # when both languages are generated together. The revision rewrites
+    # idiomatically; on any failure or invariant violation we keep the original.
+    if "de" in out:
+        revised_de = await _revise_german_block(
+            out["de"],
+            mode=mode,
+            has_singulart=has_singulart,
+            has_parent=has_parent,
+        )
+        if revised_de is not None:
+            out["de"] = revised_de
 
     return out
 
@@ -1397,6 +1594,37 @@ async def reachable() -> bool:
             return r.status_code == 200
     except Exception:
         return False
+
+
+async def unload_model(model: str, timeout: float = 30.0) -> None:
+    """
+    Tell Ollama to unload *model* from VRAM immediately.
+
+    Best-effort: errors are logged and swallowed. Calling this on a model
+    that isn't loaded is a no-op on Ollama's side. We use POST /api/generate
+    with no prompt and keep_alive=0 — the documented way to evict a model.
+
+    Used before the heavy modal-article LLM call (qwen3.6:27b, 17 GB) to
+    free VRAM that the small titler model (qwen2.5vl:3b) holds resident
+    for 30 min after warm-up. Without this, loading the 17 GB model on top
+    of the resident titler crashes Ollama's model-runner subprocess on
+    constrained GPUs.
+    """
+    if not model:
+        return
+    payload = {"model": model, "keep_alive": 0}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(f"{settings.ollama_host}/api/generate", json=payload)
+        if r.status_code == 200:
+            logger.info("Ollama: unloaded model %s from VRAM", model)
+        else:
+            logger.warning(
+                "Ollama: unload of %s returned %d — %s",
+                model, r.status_code, (r.text or "")[:200],
+            )
+    except Exception as exc:
+        logger.warning("Ollama: unload of %s failed (%s) — proceeding anyway", model, exc)
 
 
 # ── Z-Image Turbo prompt enhancer ────────────────────────────────────────────

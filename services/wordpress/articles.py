@@ -41,6 +41,7 @@ from core.models import Article, Image, Video
 from core.video_thumb import extract_video_frames
 from services.ollama.client import write_article, write_modal_article, write_rich_article
 from services.wordpress.client import request_json
+from services.wordpress.tags import resolve_tag_ids
 
 logger = logging.getLogger(__name__)
 
@@ -112,13 +113,15 @@ async def _publish_translation(
     yoast_meta: dict[str, str] | None = None,
     extra_result_fields: dict[str, Any] | None = None,
     category_id: int | None = None,
+    tag_ids: list[int] | None = None,
 ) -> dict:
     """POST one language to WP + queue the Article row + return the result dict.
 
     The caller owns db.commit() — we only db.add() so the whole translation
     set commits in a single tx. When *category_id* is set, the post is
     assigned to that taxonomy term — required for the new permalink
-    structure /%category%/%postname%/.
+    structure /%category%/%postname%/. When *tag_ids* is set, the post is
+    attached to those tag terms (resolved upstream via tags.resolve_tag_ids).
     """
     slug = _slugify(block["title"], lang)
     target_status = "publish" if publish else "draft"
@@ -136,6 +139,8 @@ async def _publish_translation(
         post_payload["meta"] = yoast_meta
     if category_id is not None:
         post_payload["categories"] = [category_id]
+    if tag_ids:
+        post_payload["tags"] = tag_ids
 
     post = await request_json("POST", "/wp/v2/posts", json=post_payload, params={"lang": lang})
     wp_post_id = post["id"]
@@ -729,6 +734,86 @@ async def generate_rich_articles_for_series(
 
 _MODAL_MODES = ("essay", "work", "lab")
 
+
+# Soft alt-text cap. Yoast doesn't penalise long alts and screen readers
+# tolerate 200+ chars, but we keep some headroom so the weaved-in keyphrase
+# clauses don't push alts into truncation behaviour on some themes.
+_ALT_TEXT_MAX_CHARS = 200
+
+
+def _alt_covers_keyphrase(alt: str, keyphrase: str) -> bool:
+    """Yoast's check: at least half the keyphrase content words must
+    appear (case-insensitive) somewhere in the alt text. We mirror that
+    threshold so we skip patching when the alt already qualifies."""
+    if not keyphrase or not alt:
+        return False
+    alt_lc = alt.lower()
+    words = [w for w in keyphrase.lower().split() if w]
+    if not words:
+        return False
+    hits = sum(1 for w in words if w in alt_lc)
+    return hits * 2 >= len(words)
+
+
+async def _patch_featured_alt_with_keyphrases(
+    featured: Image,
+    db: AsyncSession,
+    *,
+    bodies: dict[str, dict],
+    selected_langs: tuple[str, ...],
+) -> None:
+    """Append the per-language focus_keyphrases to the featured image's
+    WordPress alt_text so Yoast's image-alt SEO check passes for every
+    language being published. No-ops when the alt already covers each
+    keyphrase, when the featured image has no wp_media_id, or when no
+    keyphrases were emitted by the LLM.
+    """
+    if not featured.wp_media_id:
+        return
+
+    base_alt = (featured.wp_alt_text or "").strip()
+    keyphrases = [
+        (lang, (bodies.get(lang) or {}).get("focus_keyphrase") or "")
+        for lang in selected_langs
+    ]
+    missing = [
+        (lang, kp) for (lang, kp) in keyphrases
+        if kp and not _alt_covers_keyphrase(base_alt, kp)
+    ]
+    if not missing:
+        return
+
+    # Build the suffix as " — kp1 — kp2" (em-dash separated). Skip dupes
+    # when the same keyphrase ended up in both languages.
+    seen: set[str] = set()
+    suffix_parts: list[str] = []
+    for _lang, kp in missing:
+        key = kp.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        suffix_parts.append(kp)
+
+    new_alt = (base_alt + " — " + " — ".join(suffix_parts)).strip(" —")
+    if len(new_alt) > _ALT_TEXT_MAX_CHARS:
+        new_alt = new_alt[:_ALT_TEXT_MAX_CHARS].rstrip(" —,;:")
+
+    logger.info(
+        "Patching featured-media alt_text for SEO: media_id=%s, langs=%s",
+        featured.wp_media_id, ",".join(lang for lang, _ in missing),
+    )
+    try:
+        await request_json(
+            "POST", f"/wp/v2/media/{featured.wp_media_id}",
+            json={"alt_text": new_alt},
+        )
+    except Exception as exc:
+        logger.warning("Featured-media alt PATCH failed (continuing): %s", exc)
+        return
+
+    featured.wp_alt_text = new_alt
+    db.add(featured)  # ensure the row stays in the unit-of-work for the caller's commit
+
 # WordPress category slug per (mode, language). The permalink structure on
 # stefaneisele.com is /%category%/%postname%/, so a missing or wrong slug
 # means posts land under /uncategorized/. Keep this in sync with the WP
@@ -1258,6 +1343,15 @@ async def generate_modal_article(
             raise RuntimeError(f"No category slug mapped for mode={mode!r} lang={lang!r}")
         category_ids[lang] = await _resolve_category_id(slug)
 
+    # Patch the featured image's alt_text to weave in the focus keyphrases
+    # so Yoast's "Keyphrase in image alt attributes" check passes for both
+    # languages. Only the featured image is patched — Yoast accepts one
+    # qualifying image per post, and patching every gallery item would
+    # ripple unwanted alt-text changes through other posts that reuse them.
+    await _patch_featured_alt_with_keyphrases(
+        images[0], db, bodies=bodies, selected_langs=selected_langs,
+    )
+
     for lang in selected_langs:
         block = bodies[lang]
         if mode == "essay":
@@ -1273,10 +1367,12 @@ async def generate_modal_article(
         if block.get("focus_keyphrase"):
             yoast_meta["_yoast_wpseo_focuskw"] = block["focus_keyphrase"]
 
+        tag_ids = await resolve_tag_ids(block.get("tags") or [], lang)
+
         logger.info(
-            "Modal article — POST /wp/v2/posts?lang=%s (mode=%s, status=%s, slug=%s, category=%d, %d blocks)",
+            "Modal article — POST /wp/v2/posts?lang=%s (mode=%s, status=%s, slug=%s, category=%d, tags=%d, %d blocks)",
             lang, mode, target_status, _slugify(block["title"], lang),
-            category_ids[lang],
+            category_ids[lang], len(tag_ids),
             body_html.count("<!-- wp:"),
         )
         result = await _publish_translation(
@@ -1287,6 +1383,7 @@ async def generate_modal_article(
             body_md_for_db=_flatten_modal_body_for_search(block, mode),
             featured_media=featured_media,
             category_id=category_ids[lang],
+            tag_ids=tag_ids or None,
             translation_group_id=translation_group_id,
             image_ids=image_ids,
             publish=publish,
@@ -1296,6 +1393,7 @@ async def generate_modal_article(
                 "meta_description": block.get("meta_description") or "",
                 "focus_keyphrase":  block.get("focus_keyphrase") or "",
                 "og_image_idea":    block.get("og_image_idea") or "",
+                "wp_tag_ids":       tag_ids,
             },
         )
         results.append(result)

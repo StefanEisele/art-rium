@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#111111">
+  <meta name="theme-color" content="#0a0a0c">
   <title>Articles — art-rium</title>
   <link rel="stylesheet" href="/shared/shared.css">
   <style>
@@ -41,13 +41,13 @@
     .sel-wrap img { width: 80px; height: 80px; border-radius: 10px; object-fit: cover; display: block; }
     .sel-remove { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%; background: var(--red); color: #fff; border: none; font-size: 13px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; }
     .sel-order { position: absolute; bottom: 4px; left: 4px; background: rgba(0,0,0,0.65); color: #fff; font-size: 10px; font-weight: 700; border-radius: 4px; padding: 1px 5px; }
-    .sel-pending { position: absolute; bottom: 4px; right: 4px; background: rgba(245,166,35,0.9); color: #000; font-size: 9px; font-weight: 700; border-radius: 4px; padding: 1px 5px; letter-spacing: 0.4px; }
+    .sel-pending { position: absolute; bottom: 4px; right: 4px; background: var(--accent); color: var(--on-accent); font-size: 9px; font-weight: 700; border-radius: 4px; padding: 1px 5px; letter-spacing: 0.4px; }
     .add-btn { flex-shrink: 0; width: 80px; height: 80px; border-radius: 10px; border: 1.5px dashed var(--border); background: var(--surface2); color: var(--text-dim); font-size: 28px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 
     /* Chips & toggles */
     .chips { display: flex; gap: 6px; flex-wrap: wrap; }
     .chip { font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all 0.13s; }
-    .chip.active { background: var(--accent); border-color: var(--accent); color: #000; }
+    .chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
     /* Collapsible sections */
     details.collapsible { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 0; }
@@ -63,7 +63,7 @@
     .sing-add-btn { padding: 8px; border-radius: 8px; border: 1.5px dashed var(--border); background: transparent; color: var(--text-dim); font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit; }
 
     /* Generate button */
-    .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius); border: none; background: var(--accent); color: #000; font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.13s; }
+    .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius-pill); border: none; background: var(--accent); color: var(--on-accent); font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.13s; }
     .gen-btn:disabled { opacity: 0.4; cursor: default; }
     .gen-btn:active:not(:disabled) { transform: scale(0.98); }
 
@@ -77,7 +77,7 @@
     /* Result cards */
     #result-section { display: none; }
     #result-section.show { display: block; }
-    .lang-badge { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 5px; background: rgba(245,166,35,0.15); color: var(--accent); }
+    .lang-badge { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); }
     .post-card { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 10px; }
     .post-header { display: flex; align-items: center; gap: 10px; }
     .post-title { font-size: 15px; font-weight: 700; flex: 1; }
@@ -89,7 +89,7 @@
     .post-tag { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: var(--surface2); color: var(--text-dim); }
     .post-actions { display: flex; gap: 8px; }
     .post-action { flex: 1; padding: 8px; border-radius: 8px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; text-align: center; text-decoration: none; transition: all 0.13s; }
-    .post-action.primary { background: var(--accent); border-color: var(--accent); color: #000; }
+    .post-action.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
     .error-card { background: rgba(255,69,58,0.08); border: 1.5px solid rgba(255,69,58,0.3); color: var(--red); padding: 12px 14px; border-radius: 10px; font-size: 13px; word-break: break-word; }
 
     /* Picker modal */
@@ -97,7 +97,7 @@
     #picker-modal.show { display: flex; }
     .picker-header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
     .picker-header h2 { font-size: 17px; font-weight: 700; flex: 1; }
-    .picker-done-btn { background: var(--accent); border: none; color: #000; font-size: 14px; font-weight: 700; padding: 7px 16px; border-radius: 8px; cursor: pointer; font-family: inherit; }
+    .picker-done-btn { background: var(--accent); border: none; color: var(--on-accent); font-size: 14px; font-weight: 700; padding: 7px 16px; border-radius: 8px; cursor: pointer; font-family: inherit; }
     .picker-controls { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; display: flex; gap: 10px; align-items: center; }
     #picker-search { flex: 1; background: var(--surface2); border: 1.5px solid transparent; border-radius: 10px; color: var(--text); font-size: 15px; padding: 9px 14px; outline: none; font-family: inherit; }
     #picker-search:focus { border-color: var(--accent); }
@@ -105,12 +105,12 @@
     .picker-cell { position: relative; height: 0; padding-bottom: 100%; cursor: pointer; overflow: hidden; border-radius: 4px; background: var(--surface2); }
     .picker-cell img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
     .picker-cell.not-uploaded::before { content: 'Not on WP'; position: absolute; bottom: 4px; left: 4px; background: rgba(0,0,0,0.75); color: var(--red); font-size: 9px; font-weight: 700; padding: 2px 5px; border-radius: 3px; z-index: 2; }
-    .sel-overlay { position: absolute; inset: 0; background: rgba(245,166,35,0.35); display: none; align-items: center; justify-content: center; font-size: 28px; color: #fff; }
+    .sel-overlay { position: absolute; inset: 0; background: rgba(224,122,58,0.35); display: none; align-items: center; justify-content: center; font-size: 28px; color: #fff; }
     .picker-cell.selected .sel-overlay { display: flex; }
     .picker-cell.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
-    .order-badge { position: absolute; top: 5px; left: 5px; background: var(--accent); color: #000; font-size: 11px; font-weight: 700; border-radius: 50%; width: 22px; height: 22px; display: none; align-items: center; justify-content: center; z-index: 2; }
+    .order-badge { position: absolute; top: 5px; left: 5px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 700; border-radius: 50%; width: 22px; height: 22px; display: none; align-items: center; justify-content: center; z-index: 2; }
     .picker-cell.selected .order-badge { display: flex; }
-    .picker-count { background: var(--accent); color: #000; font-size: 12px; font-weight: 700; border-radius: 10px; padding: 2px 8px; display: none; }
+    .picker-count { background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 700; border-radius: 10px; padding: 2px 8px; display: none; }
     .picker-count.show { display: inline-block; }
     .picker-empty { padding: 40px 20px; text-align: center; color: var(--text-dim); font-size: 14px; grid-column: 1 / -1; }
 
@@ -129,9 +129,9 @@
     .video-cell .video-tag { background: var(--surface); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; }
     .video-cell .video-tag.yt { background: rgba(255,0,0,0.15); color: #ff6b6b; border-color: rgba(255,0,0,0.3); }
     .video-cell.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
-    .video-cell .sel-overlay { position: absolute; inset: 0; background: rgba(245,166,35,0.35); display: none; align-items: center; justify-content: center; font-size: 28px; color: #fff; }
+    .video-cell .sel-overlay { position: absolute; inset: 0; background: rgba(224,122,58,0.35); display: none; align-items: center; justify-content: center; font-size: 28px; color: #fff; }
     .video-cell.selected .sel-overlay { display: flex; }
-    .video-cell .order-badge { position: absolute; top: 5px; left: 5px; background: var(--accent); color: #000; font-size: 11px; font-weight: 700; border-radius: 50%; width: 22px; height: 22px; display: none; align-items: center; justify-content: center; z-index: 2; }
+    .video-cell .order-badge { position: absolute; top: 5px; left: 5px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 700; border-radius: 50%; width: 22px; height: 22px; display: none; align-items: center; justify-content: center; z-index: 2; }
     .video-cell.selected .order-badge { display: flex; }
 
     .yt-not-configured { color: var(--red); font-size: 12px; }
@@ -1011,7 +1011,7 @@ function makePostCard(a) {
       <span class="lang-badge">${langName}</span>
       ${modeName ? `<span class="lang-badge" style="background:rgba(125,211,252,0.15);color:#7dd3fc">${_esc(modeName)}</span>` : ''}
       <span class="post-title">${_esc(a.title)}</span>
-      <span class="post-tag" style="background:${a.status === 'published' ? 'rgba(50,215,75,0.15)' : 'rgba(245,166,35,0.15)'};color:${a.status === 'published' ? 'var(--green)' : 'var(--accent)'}">${_esc(a.status)}</span>
+      <span class="post-tag" style="background:${a.status === 'published' ? 'rgba(78,168,112,0.18)' : 'var(--accent-soft)'};color:${a.status === 'published' ? 'var(--green)' : 'var(--accent)'}">${_esc(a.status)}</span>
     </div>
     ${a.focus_keyphrase ? `
       <div class="post-row">

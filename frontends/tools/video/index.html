@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#111111">
+  <meta name="theme-color" content="#0a0a0c">
   <title>Video — art-rium</title>
   <link rel="stylesheet" href="/shared/shared.css">
   <style>
@@ -21,7 +21,7 @@
     /* Mode chips */
     .mode-chips { display: flex; gap: 6px; flex-wrap: wrap; }
     .mode-chip { font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all 0.13s; }
-    .mode-chip.active { background: var(--accent); border-color: var(--accent); color: #000; }
+    .mode-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
     /* Images strip */
     .images-strip { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; min-height: 72px; }
@@ -47,7 +47,7 @@
     /* Resolution chips */
     .res-chips { display: flex; gap: 6px; flex-wrap: wrap; }
     .res-chip { font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all 0.13s; }
-    .res-chip.active { background: var(--accent); border-color: var(--accent); color: #000; }
+    .res-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
     /* Shared prompt (flf2v) */
     textarea#prompt-input { width: 100%; box-sizing: border-box; resize: none; background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); font-size: 14px; padding: 10px 12px; outline: none; font-family: inherit; line-height: 1.5; transition: border-color 0.2s; min-height: 60px; }
@@ -66,7 +66,7 @@
     .per-img-frames-row { display: flex; align-items: center; gap: 10px; }
 
     /* Generate button */
-    .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius); border: none; background: var(--accent); color: #000; font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.13s; }
+    .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius-pill); border: none; background: var(--accent); color: var(--on-accent); font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.13s; }
     .gen-btn:disabled { opacity: 0.4; cursor: default; }
 
     /* ── Video list ── */
@@ -79,8 +79,8 @@
     .video-meta { font-size: 12px; color: var(--text-dim); display: flex; gap: 8px; flex-wrap: wrap; }
     .video-meta strong { color: var(--text); font-weight: 600; }
     .status-badge { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 5px; }
-    .status-generating { background: rgba(10,132,255,0.15); color: var(--accent); }
-    .status-assembling { background: rgba(10,132,255,0.15); color: var(--accent); }
+    .status-generating { background: var(--accent-2-soft); color: var(--accent-2); }
+    .status-assembling { background: var(--accent-2-soft); color: var(--accent-2); }
     .status-review     { background: rgba(255,159,10,0.15); color: #ff9f0a; }
     .status-done       { background: rgba(50,215,75,0.15);  color: var(--green); }
     .status-failed     { background: rgba(255,69,58,0.15);  color: var(--red); }
@@ -93,7 +93,7 @@
       background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px;
       padding: 8px; cursor: pointer; transition: border-color 0.15s, background 0.15s;
     }
-    .seg-row.selected { border-color: var(--accent); background: rgba(10,132,255,0.07); }
+    .seg-row.selected { border-color: var(--accent); background: var(--accent-soft); }
     .seg-thumb-wrap { position: relative; flex-shrink: 0; width: 96px; height: 96px; border-radius: 8px; overflow: hidden; background: #000; }
     .seg-thumb-wrap img, .seg-thumb-wrap video { width: 100%; height: 100%; object-fit: cover; display: block; }
     .seg-thumb-wrap video { display: none; }
@@ -116,10 +116,10 @@
       display: flex; align-items: center; justify-content: center;
       font-size: 14px; color: transparent;
     }
-    .seg-row.selected .seg-check { background: var(--accent); border-color: var(--accent); color: #000; }
+    .seg-row.selected .seg-check { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
     .seg-assemble-btn {
       width: 100%; padding: 12px; border-radius: 10px; border: none;
-      background: var(--accent); color: #000; font-size: 14px; font-weight: 700;
+      background: var(--accent); color: var(--on-accent); font-size: 14px; font-weight: 700;
       cursor: pointer; font-family: inherit; transition: opacity 0.15s;
     }
     .seg-assemble-btn:disabled { opacity: 0.4; cursor: default; }
@@ -165,7 +165,7 @@
       background: rgba(50,215,75,0.12); color: var(--green); border-color: rgba(50,215,75,0.25);
     }
     .step-pill.active {
-      background: var(--accent); color: #000; border-color: var(--accent);
+      background: var(--accent); color: var(--on-accent); border-color: var(--accent);
       animation: step-pulse 1.4s ease-in-out infinite;
     }
     @keyframes step-pulse {
@@ -212,19 +212,19 @@
     #picker-modal.show { display: flex; }
     .picker-header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
     .picker-header h2 { font-size: 17px; font-weight: 700; flex: 1; }
-    .picker-done-btn { background: var(--accent); border: none; color: #000; font-size: 14px; font-weight: 700; padding: 7px 16px; border-radius: 8px; cursor: pointer; font-family: inherit; }
+    .picker-done-btn { background: var(--accent); border: none; color: var(--on-accent); font-size: 14px; font-weight: 700; padding: 7px 16px; border-radius: 8px; cursor: pointer; font-family: inherit; }
     .picker-search { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
     #picker-search { width: 100%; background: var(--surface2); border: 1.5px solid transparent; border-radius: 10px; color: var(--text); font-size: 15px; padding: 9px 14px; outline: none; font-family: inherit; }
     #picker-search:focus { border-color: var(--accent); }
     #picker-grid { flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; }
     .picker-cell { position: relative; height: 0; padding-bottom: 100%; cursor: pointer; overflow: hidden; border-radius: 4px; background: var(--surface2); }
     .picker-cell img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
-    .sel-overlay { position: absolute; inset: 0; background: rgba(10,132,255,0.35); display: none; align-items: center; justify-content: center; font-size: 28px; color: #fff; }
+    .sel-overlay { position: absolute; inset: 0; background: rgba(224,122,58,0.35); display: none; align-items: center; justify-content: center; font-size: 28px; color: #fff; }
     .picker-cell.selected .sel-overlay { display: flex; }
     .picker-cell.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
-    .order-badge { position: absolute; top: 5px; left: 5px; background: var(--accent); color: #000; font-size: 11px; font-weight: 700; border-radius: 50%; width: 20px; height: 20px; display: none; align-items: center; justify-content: center; }
+    .order-badge { position: absolute; top: 5px; left: 5px; background: var(--accent); color: var(--on-accent); font-size: 11px; font-weight: 700; border-radius: 50%; width: 20px; height: 20px; display: none; align-items: center; justify-content: center; }
     .picker-cell.selected .order-badge { display: flex; }
-    .picker-count { background: var(--accent); color: #000; font-size: 12px; font-weight: 700; border-radius: 10px; padding: 2px 8px; display: none; }
+    .picker-count { background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 700; border-radius: 10px; padding: 2px 8px; display: none; }
     .picker-count.show { display: inline-block; }
 
     #toast { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 90px); left: 50%; transform: translateX(-50%) translateY(12px); background: var(--surface2); border: 1px solid var(--border); color: var(--text); font-size: 14px; font-weight: 500; padding: 10px 18px; border-radius: 20px; opacity: 0; transition: opacity 0.25s, transform 0.25s; pointer-events: none; white-space: nowrap; z-index: 999; }

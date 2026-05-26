@@ -1,22 +1,62 @@
 /* ── art-rium shared stylesheet ──────────────────────────────────────────────
-   Included by every page. Contains only rules that are identical (or
-   a safe superset) across all tools and the dashboard.
-   Page-specific overrides belong in each page's own <style> block.
+   Included by every page. Defines the design system tokens + a handful of
+   shared primitives. Page-specific overrides belong in each page's <style>.
+
+   Palette: Stefan's signature Rust Orange (primary) + Dim Blue (secondary)
+   on a deep near-black surface stack. Inspired by modern dark-mode app
+   chrome — soft radii, pill action buttons, subtle dividers.
    ─────────────────────────────────────────────────────────────────────────── */
 
 /* ── Design tokens ── */
 :root {
-  --bg:         #111111;
-  --surface:    #1c1c1e;
-  --surface2:   #2c2c2e;
-  --accent:     #f5a623;
-  --accent-tap: #d4901e;
-  --text:       #f2f2f7;
-  --text-dim:   #8e8e93;
-  --border:     #3a3a3c;
-  --green:      #32d74b;
-  --red:        #ff453a;
-  --radius:     14px;
+  /* Surfaces — near-black background, ascending tiers for cards / inputs / modals */
+  --bg:         #0a0a0c;
+  --surface:    #141417;
+  --surface2:   #1d1d22;
+  --surface3:   #26262c;
+
+  /* Borders — subtle, faintly cool */
+  --border:        rgba(255,255,255,0.07);
+  --border-strong: rgba(255,255,255,0.14);
+
+  /* Text */
+  --text:       #f0f0f3;
+  --text-dim:   #8a8a93;
+  --text-faint: #56565d;
+
+  /* Primary accent — rust orange (Stefan's signature) */
+  --accent:        #e07a3a;
+  --accent-hover:  #ec8a4d;
+  --accent-tap:    #c5642a;
+  --accent-soft:   rgba(224,122,58,0.14);
+  --accent-border: rgba(224,122,58,0.45);
+  --on-accent:     #fff;            /* text colour on filled accent surfaces */
+
+  /* Secondary accent — dim blue (Stefan's signature) */
+  --accent-2:        #6b8fb5;
+  --accent-2-hover:  #7c9fc4;
+  --accent-2-soft:   rgba(107,143,181,0.14);
+  --accent-2-border: rgba(107,143,181,0.45);
+  --on-accent-2:     #fff;
+
+  /* Semantic — desaturated to match the dim palette */
+  --green:      #4ea870;
+  --red:        #c54a3b;
+  --yellow:     #d9a544;
+
+  /* Radii — softer than before, matches the reference's roundedness */
+  --radius-sm:   10px;
+  --radius:      14px;
+  --radius-lg:   18px;
+  --radius-xl:   22px;
+  --radius-pill: 999px;
+
+  /* Shadows */
+  --shadow-card:  0 1px 3px rgba(0,0,0,0.45);
+  --shadow-modal: 0 -10px 36px rgba(0,0,0,0.55);
+
+  /* Font stack */
+  --font: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
 }
 
 /* ── Base reset ── */
@@ -26,7 +66,7 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font);
   font-size: 16px;
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
@@ -40,7 +80,6 @@ html, body {
 .dot.connected    { background: var(--green); }
 .dot.connecting   { background: var(--accent); animation: blink 1.2s ease-in-out infinite; }
 .dot.disconnected { background: var(--red); }
-
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.35} }
 
 /* ── Back button (tool pages) ── */
@@ -54,34 +93,54 @@ html, body {
   display: flex; align-items: center; flex-shrink: 0;
 }
 
-/* ── Generic action button ── */
+/* ── Generic action button — pill-shaped per the reference ──
+   .btn          → outlined neutral (Cancel / secondary actions)
+   .btn.primary  → filled rust orange (Save, Schedule, primary CTA)
+   .btn.secondary→ filled dim blue (informational / alt action)
+   .btn.ghost    → transparent, accent text (low-emphasis link-style)
+   .btn.danger   → outlined red (destructive) */
 .btn {
-  flex: 1; padding: 14px;
-  border-radius: var(--radius); border: 1.5px solid var(--border);
-  background: var(--surface); color: var(--text);
+  flex: 1;
+  padding: 13px 18px;
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
   font-size: 15px; font-weight: 600;
   cursor: pointer; font-family: inherit;
-  transition: all 0.13s;
+  transition: transform 0.12s, background 0.12s, border-color 0.12s, color 0.12s;
   -webkit-tap-highlight-color: transparent;
 }
-.btn.primary  { background: var(--accent); border-color: var(--accent); color: #000; }
-.btn.danger   { background: none; border-color: var(--red); color: var(--red); }
+.btn:hover    { border-color: var(--border-strong); background: var(--surface2); }
 .btn:active   { transform: scale(0.97); }
 .btn:disabled { opacity: 0.4; cursor: default; transform: none; }
+.btn.primary  { background: var(--accent);   border-color: var(--accent);   color: var(--on-accent); }
+.btn.primary:hover  { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.primary:active { background: var(--accent-tap);   border-color: var(--accent-tap); }
+.btn.secondary { background: var(--accent-2); border-color: var(--accent-2); color: var(--on-accent-2); }
+.btn.secondary:hover { background: var(--accent-2-hover); border-color: var(--accent-2-hover); }
+.btn.ghost    { background: none; border-color: transparent; color: var(--accent); }
+.btn.ghost:hover { background: var(--accent-soft); }
+.btn.danger   { background: none; border-color: var(--red); color: var(--red); }
 
 /* ── Toast notification ── */
 #toast {
   position: fixed; left: 16px; right: 16px;
   bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
   max-width: 560px; margin: 0 auto;
-  background: var(--surface2); color: var(--text); font-size: 14px;
-  padding: 12px 16px; border-radius: var(--radius);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 14px;
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-card);
   transform: translateY(120px); opacity: 0;
   transition: transform 0.3s ease, opacity 0.3s ease;
   z-index: 999; pointer-events: none; text-align: center;
 }
 #toast.show  { transform: translateY(0); opacity: 1; }
-#toast.error { background: var(--red); color: #fff; }
+#toast.error { background: var(--red); color: #fff; border-color: var(--red); }
 
 /* ── Progress track (inner bar styled per-page) ── */
 .prog-track {

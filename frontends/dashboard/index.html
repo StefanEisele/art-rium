@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#111111">
+  <meta name="theme-color" content="#0a0a0c">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="art-rium">
@@ -90,9 +90,15 @@
       display: flex; align-items: center; justify-content: center;
       font-size: 22px;
       background: var(--surface2);
+      border: 1px solid var(--border);
       flex-shrink: 0;
+      transition: background 0.15s, border-color 0.15s;
     }
-    .tool-card.active .tool-icon { background: var(--accent); }
+    /* Active cards: subtle accent tint instead of a solid orange block. */
+    .tool-card.active .tool-icon {
+      background: var(--accent-soft);
+      border-color: var(--accent-border);
+    }
 
     .tool-body { flex: 1; min-width: 0; }
     .tool-name {
@@ -183,9 +189,9 @@
     .field input[type="password"]:focus { border-color: var(--accent); }
 
     .connect-btn {
-      padding: 13px 16px; border-radius: var(--radius);
+      padding: 13px 16px; border-radius: var(--radius-pill);
       border: none; background: var(--accent);
-      color: #000; font-size: 15px; font-weight: 700;
+      color: var(--on-accent); font-size: 15px; font-weight: 700;
       cursor: pointer; font-family: inherit; transition: all 0.13s;
       -webkit-tap-highlight-color: transparent;
     }

@@ -237,6 +237,14 @@ _LOOP_PLAYER_HTML = """<!doctype html>
   #starttap{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
             background:rgba(0,0,0,0.7);color:#fff;font-size:18px;font-weight:600;z-index:8;cursor:pointer}
   #starttap.show{display:flex}
+
+  /* One-shot hint that AudioContext needs a user gesture on iOS. Auto-fades. */
+  #sndhint{position:fixed;left:50%;bottom:max(28px,calc(env(safe-area-inset-bottom) + 22px));
+           transform:translateX(-50%);padding:9px 16px;border-radius:999px;
+           background:rgba(20,20,22,0.78);color:#fff;font-size:12px;font-weight:600;
+           border:1px solid rgba(255,255,255,0.14);backdrop-filter:blur(8px);
+           opacity:0;transition:opacity 320ms;z-index:7;pointer-events:none}
+  #sndhint.show{opacity:0.95}
 </style>
 </head><body>
 <video id="v" src="__SRC__" muted playsinline preload="auto" disablepictureinpicture></video>
@@ -250,6 +258,7 @@ _LOOP_PLAYER_HTML = """<!doctype html>
   <label>Tick every (frames) <input id="cfg-tick" type="number" min="1" step="1"></label>
   <label>Accent every (ticks, 0=off) <input id="cfg-accent" type="number" min="0" step="1"></label>
   <label>Loop bars (0=auto) <input id="cfg-bars" type="number" min="0" step="1"></label>
+  <label>Click sound <input id="cfg-sound" type="checkbox"></label>
   <div class="hint" id="hint">—</div>
   <div class="row">
     <button id="btn-restart" class="primary">Restart</button>
@@ -257,6 +266,7 @@ _LOOP_PLAYER_HTML = """<!doctype html>
   </div>
 </div>
 <div id="starttap">Tap to start</div>
+<div id="sndhint">🔊 Tap anywhere to enable sound</div>
 <script>
   const qs = new URLSearchParams(location.search);
   const STORE_KEY = 'improv_loop_settings_v1';
@@ -276,6 +286,7 @@ _LOOP_PLAYER_HTML = """<!doctype html>
     tick_every:   Math.max(1, pick('tick_every', 24)),
     accent_every: Math.max(0, pick('accent_every', 4)),
     loop_bars:    Math.max(0, pick('loop_bars', 0)),
+    sound:        pick('sound', 1) ? 1 : 0,
   };
 
   const v = document.getElementById('v');
@@ -286,6 +297,67 @@ _LOOP_PLAYER_HTML = """<!doctype html>
   const panel = document.getElementById('panel');
   const hint = document.getElementById('hint');
   const startTap = document.getElementById('starttap');
+  const sndHint = document.getElementById('sndhint');
+
+  // ── Audio click (Web Audio API, no asset) ────────────────────────────────
+  // iOS Safari keeps the AudioContext suspended until a user gesture, even
+  // though the muted video can autoplay. We create+resume on any first tap
+  // and show a one-shot hint pill in the meantime so the user knows why
+  // the metronome is silent on iPad.
+  let audioCtx = null;
+  let audioUnlocked = false;
+  let sndHintTimer = null;
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      } catch { return; }
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(() => {});
+    }
+    if (audioCtx.state === 'running' && !audioUnlocked) {
+      audioUnlocked = true;
+      hideSoundHint();
+    }
+  }
+
+  function showSoundHint() {
+    if (!cfg.sound || audioUnlocked) return;
+    sndHint.classList.add('show');
+    clearTimeout(sndHintTimer);
+    sndHintTimer = setTimeout(hideSoundHint, 6000);
+  }
+  function hideSoundHint() {
+    sndHint.classList.remove('show');
+    clearTimeout(sndHintTimer);
+  }
+
+  function playClick(isAccent) {
+    if (!cfg.sound || !audioCtx || audioCtx.state !== 'running') return;
+    try {
+      const t0 = audioCtx.currentTime;
+      const dur = isAccent ? 0.075 : 0.045;
+      const peak = isAccent ? 0.32 : 0.20;
+      const freq = isAccent ? 1600 : 1000;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t0);
+      gain.gain.setValueAtTime(0, t0);
+      gain.gain.linearRampToValueAtTime(peak, t0 + 0.003);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.02);
+    } catch {}
+  }
+
+  // Unlock on any user gesture (capture so it fires before other handlers).
+  ['pointerdown', 'touchstart', 'keydown'].forEach(evt => {
+    document.addEventListener(evt, ensureAudio, { capture: true, passive: true });
+  });
 
   let totalFrames = 0;
   let loopEndFrame = 0;
@@ -337,6 +409,7 @@ _LOOP_PLAYER_HTML = """<!doctype html>
       await v.play();
       startTap.classList.remove('show');
       running = true;
+      if (cfg.sound) showSoundHint();
       requestAnimationFrame(loop);
     } catch {
       // Autoplay blocked — show tap-to-start overlay, retry on tap.
@@ -364,6 +437,7 @@ _LOOP_PLAYER_HTML = """<!doctype html>
       tickEl.classList.add('on');
       if (isAccent) tickEl.classList.add('accent');
       setTimeout(() => tickEl.classList.remove('on'), 110);
+      playClick(isAccent);
     }
     requestAnimationFrame(loop);
   }
@@ -385,6 +459,7 @@ _LOOP_PLAYER_HTML = """<!doctype html>
     document.getElementById('cfg-tick').value       = cfg.tick_every;
     document.getElementById('cfg-accent').value     = cfg.accent_every;
     document.getElementById('cfg-bars').value       = cfg.loop_bars;
+    document.getElementById('cfg-sound').checked    = !!cfg.sound;
   }
   cog.addEventListener('click', () => { syncInputs(); recomputeLoop(); panel.classList.add('show'); });
 
@@ -393,15 +468,20 @@ _LOOP_PLAYER_HTML = """<!doctype html>
     cfg.tick_every   = Math.max(1, parseInt(document.getElementById('cfg-tick').value || '24', 10));
     cfg.accent_every = Math.max(0, parseInt(document.getElementById('cfg-accent').value || '0', 10));
     cfg.loop_bars    = Math.max(0, parseInt(document.getElementById('cfg-bars').value || '0', 10));
+    cfg.sound        = document.getElementById('cfg-sound').checked ? 1 : 0;
     writeStored({
       countdown: cfg.countdown, tick_every: cfg.tick_every,
       accent_every: cfg.accent_every, loop_bars: cfg.loop_bars,
+      sound: cfg.sound,
     });
     recomputeLoop();
+    if (cfg.sound) { ensureAudio(); if (!audioUnlocked) showSoundHint(); }
+    else { hideSoundHint(); }
   }
   ['cfg-countdown','cfg-tick','cfg-accent','cfg-bars'].forEach(id => {
     document.getElementById(id).addEventListener('input', applyPanel);
   });
+  document.getElementById('cfg-sound').addEventListener('change', applyPanel);
   document.getElementById('btn-restart').addEventListener('click', () => {
     panel.classList.remove('show');
     beginSession();

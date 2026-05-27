@@ -70,7 +70,7 @@
   "46": {
     "inputs": {
       "unet_name": "z_image_turbo_bf16.safetensors",
-      "weight_dtype": "default"
+      "weight_dtype": "fp8_e4m3fn"
     },
     "class_type": "UNETLoader",
     "_meta": {"title": "Load Diffusion Model"}

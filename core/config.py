@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import field_validator
@@ -29,6 +30,12 @@ class Settings(BaseSettings):
     wp_username: str = ""
     wp_app_password: str = ""      # WP Application Password (not account pw)
     wp_default_language: str = "en"  # Polylang language code for media uploads
+    # Media-upload encoding. AVIF is ~40-60% smaller than JPEG at comparable
+    # quality and the live host has Imagick+libavif (sub-sizes generated in
+    # AVIF too). Flip to "jpeg" to fall back without code change.
+    wp_upload_format: Literal["jpeg", "avif"] = "avif"
+    wp_avif_quality: int = 65   # 0-100; 65 is the AVIF sweet spot
+    wp_avif_speed:   int = 6    # 0=slowest/smallest, 10=fastest/largest
 
     # ── Ollama (local VLM for image analysis) ────────────────────────────────
     ollama_host: str = "http://localhost:11434"

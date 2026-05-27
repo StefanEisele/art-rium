@@ -3,7 +3,9 @@ WordPress media uploader — Single Source of Truth for pushing gallery
 images into the WP media library with VLM-generated metadata.
 
 Pipeline per image:
-  1. Re-encode source PNG → JPG (max 1080 longest edge, quality 88)
+  1. Re-encode source PNG → AVIF or JPEG (max 1080 longest edge) per
+     settings.wp_upload_format. AVIF is the default; flip to "jpeg" to
+     fall back.
   2. VLM analyse via Ollama → alt_text, seo_description, caption (EN — Polylang default)
   3. POST /wp/v2/media (binary) → returns {id, source_url}
   4. POST /wp/v2/media/{id} with metadata fields (WP REST accepts POST as update)
@@ -21,7 +23,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.imaging import prepare_for_upload, prepare_for_vlm
+from core.imaging import prepare_for_vlm, prepare_for_wp
 from core.models import Image
 from services.ollama.client import analyze_image
 from services.wordpress.client import request_json, upload_binary
@@ -84,10 +86,11 @@ async def upload_image_to_wp(image: Image, db: AsyncSession) -> dict:
         if not src.exists():
             raise FileNotFoundError(f"Source image missing on disk: {src}")
 
-        # Two encodings: full-quality for WP upload, downscaled for the VLM.
-        logger.info("WP upload %s — re-encoding %s", image.id, src.name)
-        jpg_bytes,    jpg_filename = await prepare_for_upload(src)
-        vlm_jpg_bytes, _           = await prepare_for_vlm(src)
+        # Two encodings: web-optimized for WP upload, downscaled JPEG for the VLM.
+        logger.info("WP upload %s — re-encoding %s (format=%s)",
+                    image.id, src.name, settings.wp_upload_format)
+        body, filename, content_type = await prepare_for_wp(src)
+        vlm_jpg_bytes, _             = await prepare_for_vlm(src)
 
         logger.info(
             "WP upload %s — analysing with %s (vlm payload %d KB, edge %d)",
@@ -101,18 +104,21 @@ async def upload_image_to_wp(image: Image, db: AsyncSession) -> dict:
             language=settings.wp_default_language,
         )
 
-        logger.info("WP upload %s — POSTing to /wp/v2/media (lang=%s)", image.id, settings.wp_default_language)
+        logger.info(
+            "WP upload %s — POSTing to /wp/v2/media (lang=%s, %s, %d KB)",
+            image.id, settings.wp_default_language, content_type, len(body) // 1024,
+        )
         media = await upload_binary(
             "/wp/v2/media",
-            body=jpg_bytes,
-            filename=jpg_filename,
-            content_type="image/jpeg",
+            body=body,
+            filename=filename,
+            content_type=content_type,
             params={"lang": settings.wp_default_language},
         )
         media_id   = media["id"]
         source_url = media["source_url"]
 
-        title_for_wp = image.title or metadata["seo_title"] or jpg_filename
+        title_for_wp = image.title or metadata["seo_title"] or filename
         await request_json(
             "POST",
             f"/wp/v2/media/{media_id}",

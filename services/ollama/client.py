@@ -29,6 +29,7 @@ from typing import Any, Callable
 import httpx
 
 from core.config import settings
+from services.comfy.client import free_memory as comfy_free_memory
 
 logger = logging.getLogger(__name__)
 
@@ -1395,19 +1396,34 @@ async def _write_modal_article_locked(
         has_singulart,
     )
 
-    # Bump context budget when video frames are present — each VL frame costs
-    # ~1000–2000 tokens and the default 16k cap gets tight past 2–3 videos.
-    num_ctx = 24576 if n_frames else 16384
+    # Context budget capped at 16k. The article model (gemma3:27b Q3) runs at
+    # the VRAM edge (spilling onto the 2070); bumping num_ctx to 24576 for
+    # video frames overflows the KV/compute buffer and crashes the runner
+    # (GGML_ASSERT(buffer) failed). Gemma 3 encodes each image with a fixed
+    # ~256 tokens regardless of resolution, so even multi-video essays fit in
+    # 16k — the old 24576 bump was for Qwen VL frames (~1-2k tokens each).
+    num_ctx = 16384
 
-    # Free VRAM for the 17 GB article LLM. The titler model (qwen2.5vl:3b)
-    # holds ~3 GB resident for 30 min after warm-up; loading qwen3.6:27b on
-    # top of that crashes Ollama's model-runner subprocess on constrained
-    # GPUs. Unloading the titler first is the cleanest fix.
-    if (
-        settings.ollama_titler_model
-        and settings.ollama_titler_model != settings.ollama_llm_model
+    # Free VRAM for the 17 GB article LLM. The titler, VLM, and prompt-enhancer
+    # models all may sit resident in VRAM (titler warm-up = 30 min keep-alive;
+    # VLM stays for the default 5 min after the per-image analyze_image batch
+    # during WP upload; prompt-enhancer is fired by the Z-Image tool). ComfyUI
+    # also holds the z-Image-Turbo UNet/VAE/CLIP from the latest generation.
+    # On constrained GPUs (12-16 GB) the article LLM load crashes with an OOM
+    # that surfaces as `model runner has unexpectedly stopped` from /api/chat.
+    article_model = settings.ollama_llm_model
+    for other_model in (
+        settings.ollama_titler_model,
+        settings.ollama_vlm_model,
+        settings.ollama_prompt_model,
     ):
-        await unload_model(settings.ollama_titler_model)
+        if other_model and other_model != article_model:
+            await unload_model(other_model)
+
+    # Tell ComfyUI to release its loaded checkpoints. The next ComfyUI prompt
+    # pays a cold-load (~10-30s), but the article LLM gets the headroom it needs.
+    async with httpx.AsyncClient() as client:
+        await comfy_free_memory(client)
 
     parsed = await _chat_json(
         model=settings.ollama_llm_model,

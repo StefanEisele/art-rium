@@ -68,6 +68,21 @@ _LORA_LOW   = "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
 _VAE_NAME   = "wan_2.1_vae.safetensors"
 _RIFE_CKPT  = "rife49.pth"
 
+# ── LTX-2.3 i2v (separate model family, native audio) ─────────────────────────
+# Single checkpoint carries the diffusion model + pixel VAE + audio VAE. The
+# distilled LoRA gives the few-step turbo path; the Gemma text encoder and the
+# spatial upscaler are loaded separately. Combo strings verified against
+# ComfyUI /object_info — the checkpoint lives in a `ltx\` subfolder.
+_LTX_CKPT      = "ltx\\ltx-2.3-22b-dev-fp8.safetensors"
+_LTX_LORA      = "ltx-2.3-22b-distilled-lora-384.safetensors"
+_LTX_TEXT_ENC  = "gemma_3_12B_it_fp8_e4m3fn.safetensors"
+_LTX_UPSCALER  = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+_LTX_NEG       = "pc game, console game, video game, cartoon, childish, ugly"
+# Two-stage sigma schedules baked into the source workflow: a longer low-res
+# pass, then a short refinement pass on the 2×-upscaled latent.
+_LTX_SIGMAS_LO = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+_LTX_SIGMAS_HI = "0.85, 0.7250, 0.4219, 0.0"
+
 POLL_INTERVAL = 15    # seconds between ComfyUI history polls
 POLL_TIMEOUT  = 1800  # 30 minutes max
 SAVE_NODE_ID  = "save"
@@ -312,6 +327,101 @@ def _build_i2v_single_workflow(
     return wf, save_id
 
 
+# ── LTX-2.3 i2v workflow builder (native-audio, two-stage upscale) ────────────
+
+def _build_ltx_single_workflow(
+    comfy_filename: str,
+    prompt: str,
+    frame_count: int,
+    width: int, height: int, fps: int,
+    vid_prefix: str,
+) -> tuple[dict, str]:
+    """Single-image LTX-2.3 i2v segment producing an mp4 *with* generated audio.
+
+    Faithful API-format translation of the `Image to Video (LTX-2.3)` subgraph:
+      preprocess image → low-res AV sample → 2× latent upscale → high-res
+      refine → tiled video decode + audio decode → VHS mux (h264 + audio).
+
+    Like the Wan builder, one image == one ComfyUI submission so the VRAM peak
+    is independent of how many images the batch holds. Returns (workflow,
+    save_node_id) for the shared harvesting path.
+    """
+    # LTX latent compression is 32 spatially; the low-res pass runs at half the
+    # final size and is upscaled 2×, so the full dims must be divisible by 64.
+    width  = max(64, (width  // 64) * 64)
+    height = max(64, (height // 64) * 64)
+    half_w, half_h = width // 2, height // 2
+    # Temporal compression is 8: valid lengths are k*8 + 1. Snap the requested
+    # frame count to the nearest such value so EmptyLTXVLatentVideo validates.
+    length = max(9, ((frame_count - 1 + 4) // 8) * 8 + 1)
+    seed = random.randint(0, 2**32 - 1)
+
+    p = "ltx_"
+    wf: dict = {
+        p+"load":    {"class_type": "LoadImage",               "inputs": {"image": comfy_filename, "upload": "image"}},
+        # ── Model / encoders ──
+        p+"ckpt":    {"class_type": "CheckpointLoaderSimple",  "inputs": {"ckpt_name": _LTX_CKPT}},
+        p+"lora":    {"class_type": "LoraLoaderModelOnly",     "inputs": {"model": [p+"ckpt", 0], "lora_name": _LTX_LORA, "strength_model": 0.5}},
+        p+"avae":    {"class_type": "LTXVAudioVAELoader",      "inputs": {"ckpt_name": _LTX_CKPT}},
+        p+"te":      {"class_type": "LTXAVTextEncoderLoader",  "inputs": {"text_encoder": _LTX_TEXT_ENC, "ckpt_name": _LTX_CKPT, "device": "default"}},
+        p+"upsmod":  {"class_type": "LatentUpscaleModelLoader","inputs": {"model_name": _LTX_UPSCALER}},
+        # ── Conditioning ──
+        p+"pos":     {"class_type": "CLIPTextEncode",  "inputs": {"clip": [p+"te", 0], "text": prompt}},
+        p+"neg":     {"class_type": "CLIPTextEncode",  "inputs": {"clip": [p+"te", 0], "text": _LTX_NEG}},
+        p+"cond":    {"class_type": "LTXVConditioning", "inputs": {"positive": [p+"pos", 0], "negative": [p+"neg", 0], "frame_rate": float(fps)}},
+        # ── Image preprocess ──
+        p+"scale":   {"class_type": "ImageScale",              "inputs": {"image": [p+"load", 0], "upscale_method": "lanczos", "width": width, "height": height, "crop": "center"}},
+        p+"longer":  {"class_type": "ResizeImagesByLongerEdge","inputs": {"images": [p+"scale", 0], "longer_edge": 1536}},
+        p+"pre":     {"class_type": "LTXVPreprocess",          "inputs": {"image": [p+"longer", 0], "img_compression": 18}},
+        # ── Empty latents (low-res video + audio) ──
+        p+"evid":    {"class_type": "EmptyLTXVLatentVideo", "inputs": {"width": half_w, "height": half_h, "length": length, "batch_size": 1}},
+        p+"eaud":    {"class_type": "LTXVEmptyLatentAudio", "inputs": {"frames_number": length, "frame_rate": fps, "batch_size": 1, "audio_vae": [p+"avae", 0]}},
+        # ── Low-res AV sampling pass ──
+        p+"i2vlo":   {"class_type": "LTXVImgToVideoInplace", "inputs": {"vae": [p+"ckpt", 2], "image": [p+"pre", 0], "latent": [p+"evid", 0], "strength": 0.7, "bypass": False}},
+        p+"catlo":   {"class_type": "LTXVConcatAVLatent",    "inputs": {"video_latent": [p+"i2vlo", 0], "audio_latent": [p+"eaud", 0]}},
+        p+"noiselo": {"class_type": "RandomNoise",           "inputs": {"noise_seed": seed}},
+        p+"samlo":   {"class_type": "KSamplerSelect",        "inputs": {"sampler_name": "euler_ancestral_cfg_pp"}},
+        p+"siglo":   {"class_type": "ManualSigmas",          "inputs": {"sigmas": _LTX_SIGMAS_LO}},
+        p+"gdlo":    {"class_type": "CFGGuider",             "inputs": {"model": [p+"lora", 0], "positive": [p+"cond", 0], "negative": [p+"cond", 1], "cfg": 1}},
+        p+"kslo":    {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": [p+"noiselo", 0], "guider": [p+"gdlo", 0], "sampler": [p+"samlo", 0], "sigmas": [p+"siglo", 0], "latent_image": [p+"catlo", 0]}},
+        p+"seplo":   {"class_type": "LTXVSeparateAVLatent",  "inputs": {"av_latent": [p+"kslo", 0]}},
+        # ── 2× latent upscale + re-inject the image at full res ──
+        p+"ups":     {"class_type": "LTXVLatentUpsampler",  "inputs": {"samples": [p+"seplo", 0], "upscale_model": [p+"upsmod", 0], "vae": [p+"ckpt", 2]}},
+        p+"i2vhi":   {"class_type": "LTXVImgToVideoInplace","inputs": {"vae": [p+"ckpt", 2], "image": [p+"pre", 0], "latent": [p+"ups", 0], "strength": 1.0, "bypass": False}},
+        p+"cathi":   {"class_type": "LTXVConcatAVLatent",   "inputs": {"video_latent": [p+"i2vhi", 0], "audio_latent": [p+"seplo", 1]}},
+        # ── High-res refinement pass ──
+        p+"noisehi": {"class_type": "RandomNoise",           "inputs": {"noise_seed": 42}},
+        p+"samhi":   {"class_type": "KSamplerSelect",        "inputs": {"sampler_name": "euler_cfg_pp"}},
+        p+"sighi":   {"class_type": "ManualSigmas",          "inputs": {"sigmas": _LTX_SIGMAS_HI}},
+        p+"crop":    {"class_type": "LTXVCropGuides",        "inputs": {"positive": [p+"cond", 0], "negative": [p+"cond", 1], "latent": [p+"seplo", 0]}},
+        p+"gdhi":    {"class_type": "CFGGuider",             "inputs": {"model": [p+"lora", 0], "positive": [p+"crop", 0], "negative": [p+"crop", 1], "cfg": 1}},
+        p+"kshi":    {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": [p+"noisehi", 0], "guider": [p+"gdhi", 0], "sampler": [p+"samhi", 0], "sigmas": [p+"sighi", 0], "latent_image": [p+"cathi", 0]}},
+        p+"sephi":   {"class_type": "LTXVSeparateAVLatent",  "inputs": {"av_latent": [p+"kshi", 0]}},
+        # ── Decode video (tiled) + audio ──
+        p+"vdec":    {"class_type": "VAEDecodeTiled",     "inputs": {"samples": [p+"sephi", 0], "vae": [p+"ckpt", 2], "tile_size": 768, "overlap": 64, "temporal_size": 4096, "temporal_overlap": 4}},
+        p+"adec":    {"class_type": "LTXVAudioVAEDecode", "inputs": {"samples": [p+"sephi", 1], "audio_vae": [p+"avae", 0]}},
+    }
+
+    # VHS mux so the existing _comfy_save_path harvester finds the output, and
+    # the segment carries LTX's generated audio (h264/yuv420p for broad
+    # browser playback). Multi-clip assembly still concatenates video only.
+    save_id = "ltx_save"
+    wf[save_id] = {"class_type": "VHS_VideoCombine", "inputs": {
+        "frame_rate":      fps,
+        "loop_count":      0,
+        "filename_prefix": vid_prefix,
+        "format":          "video/h264-mp4",
+        "pix_fmt":         "yuv420p",
+        "crf":             19,
+        "save_metadata":   False,
+        "pingpong":        False,
+        "save_output":     True,
+        "images":          [p+"vdec", 0],
+        "audio":           [p+"adec", 0],
+    }}
+    return wf, save_id
+
+
 # ── Segment storage helpers ───────────────────────────────────────────────────
 
 def _segments_dir(video_id: uuid.UUID) -> Path:
@@ -468,10 +578,15 @@ async def _run_i2v_multi(
         pct_seg_hi  = seg_band_lo + int(seg_span * (i + 1)   / n_imgs)
 
         _set_progress(vid_key, "submitting", f"Clip {i + 1}/{n_imgs} — submitting to ComfyUI…", pct_seg_lo)
-        wf, save_node = _build_i2v_single_workflow(
-            fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
-            req.rife_multiplier, req.pingpong,
-        )
+        if req.workflow == "ltx_i2v":
+            wf, save_node = _build_ltx_single_workflow(
+                fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
+            )
+        else:
+            wf, save_node = _build_i2v_single_workflow(
+                fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
+                req.rife_multiplier, req.pingpong,
+            )
         prompt_id = await _post_workflow_with_retry(client, wf)
         logger.info("Video job %s segment %d → ComfyUI prompt %s", video_id, i + 1, prompt_id)
         if i == 0:
@@ -508,7 +623,7 @@ async def _run_i2v_multi(
     # Sidecar metadata — consumed by /jobs/{id}/segments and _assemble_video.
     meta = {
         "video_id":        str(video_id),
-        "workflow":        "i2v_multi",
+        "workflow":        req.workflow,
         "width":           req.width,
         "height":          req.height,
         "fps":             req.fps,
@@ -676,6 +791,12 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
             raise HTTPException(status_code=400, detail="flf2v requires 2 or 3 image IDs")
         if body.frame_count < 5 or body.frame_count > 81:
             raise HTTPException(status_code=400, detail="frame_count must be 5–81")
+    elif body.workflow == "ltx_i2v":
+        if not (1 <= n <= 6):
+            raise HTTPException(status_code=400, detail="ltx_i2v requires 1–6 image IDs")
+        for fc in body.frame_counts:
+            if not (5 <= fc <= 81):
+                raise HTTPException(status_code=400, detail="frame_counts values must be 5–81")
     else:
         if not (1 <= n <= 10):
             raise HTTPException(status_code=400, detail="i2v_multi requires 1–10 image IDs")
@@ -686,7 +807,7 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
             raise HTTPException(status_code=400, detail="rife_multiplier must be 2, 3 or 4")
 
     # Summarise per-image prompts for display
-    if body.workflow == "i2v_multi" and body.prompts:
+    if body.workflow in ("i2v_multi", "ltx_i2v") and body.prompts:
         prompt_display = " | ".join(p for p in body.prompts if p) or body.prompt or None
     else:
         prompt_display = body.prompt or None

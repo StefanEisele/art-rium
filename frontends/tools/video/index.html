@@ -58,6 +58,11 @@
     .per-img-section { display: flex; flex-direction: column; gap: 10px; }
     .per-img-row { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
     .per-img-header { display: flex; align-items: center; gap: 10px; }
+    .per-img-header .per-img-num { flex: 1; }
+    .paste-btn { flex-shrink: 0; background: var(--surface2); border: 1.5px solid var(--border); border-radius: 8px; color: var(--text-dim); font-size: 12px; font-weight: 700; padding: 5px 10px; cursor: pointer; font-family: inherit; -webkit-user-select: none; user-select: none; }
+    .paste-btn:active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+    .prompt-wrap { position: relative; }
+    .prompt-wrap .paste-btn { position: absolute; top: 8px; right: 8px; }
     .per-img-thumb { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; flex-shrink: 0; }
     .per-img-num { font-size: 13px; font-weight: 700; }
     .per-img-prompt { width: 100%; box-sizing: border-box; resize: none; background: var(--bg); border: 1.5px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; padding: 8px 10px; outline: none; font-family: inherit; line-height: 1.5; transition: border-color 0.2s; min-height: 52px; }
@@ -295,6 +300,7 @@
           <span class="field-label">Mode</span>
           <div class="mode-chips" id="mode-chips">
             <button class="mode-chip active" data-mode="i2v_multi" onclick="setMode('i2v_multi',this)">Animate (i2v)</button>
+            <button class="mode-chip" data-mode="ltx_i2v" onclick="setMode('ltx_i2v',this)">LTX-2.3 (i2v)</button>
             <button class="mode-chip" data-mode="flf2v" onclick="setMode('flf2v',this)">Transitions (FLF2V)</button>
           </div>
         </div>
@@ -358,7 +364,10 @@
         </div>
 
         <!-- Shared prompt (flf2v only) -->
-        <textarea id="prompt-input" rows="2" placeholder="Optional motion prompt (e.g. 'slow zoom in, cinematic')" style="display:none"></textarea>
+        <div class="prompt-wrap" id="prompt-wrap" style="display:none">
+          <textarea id="prompt-input" rows="2" placeholder="Optional motion prompt (e.g. 'slow zoom in, cinematic')"></textarea>
+          <button type="button" class="paste-btn" onclick="pasteInto(this)">📋 Paste</button>
+        </div>
 
         <button class="gen-btn" id="gen-btn" onclick="generate()" disabled>Generate Video</button>
       </div>
@@ -424,7 +433,11 @@ const $ = id => document.getElementById(id);
 const api = (url, opts={}) => ArtRium.apiFetch(url, opts, state.apiKey);
 const withAuth = url => ArtRium.withAuth(url, state.apiKey);
 const PICKER_LIMIT = 30;
-const maxImagesForMode = () => state.mode === 'i2v_multi' ? 10 : 3;
+// i2v_multi and ltx_i2v share the per-image-clip workflow (one clip per image,
+// per-image prompts, review→merge). flf2v is the odd one out (key frames).
+const isPerImageMode = () => state.mode === 'i2v_multi' || state.mode === 'ltx_i2v';
+const maxImagesForMode = () =>
+  state.mode === 'i2v_multi' ? 10 : state.mode === 'ltx_i2v' ? 6 : 3;
 
 // ── Mode ──────────────────────────────────────────────────────────────────────
 function setMode(mode, el) {
@@ -441,11 +454,13 @@ function setMode(mode, el) {
 }
 
 function _updateModeFields() {
-  const isI2v = state.mode === 'i2v_multi';
-  $('shared-frames-row').style.display = isI2v ? 'none' : '';
-  $('prompt-input').style.display      = isI2v ? 'none' : '';
-  $('rife-row').style.display          = isI2v ? '' : 'none';
-  $('pingpong-row').style.display      = isI2v ? '' : 'none';
+  const perImage = isPerImageMode();
+  // RIFE interpolation + pingpong loop are Wan-i2v specific (LTX has neither).
+  const isWanI2v = state.mode === 'i2v_multi';
+  $('shared-frames-row').style.display = perImage ? 'none' : '';
+  $('prompt-wrap').style.display       = perImage ? 'none' : '';
+  $('rife-row').style.display          = isWanI2v ? '' : 'none';
+  $('pingpong-row').style.display      = isWanI2v ? '' : 'none';
 }
 
 function setRife(mult, el) {
@@ -476,11 +491,11 @@ function renderStrip() {
   const n = state.selectedImages.length;
   const maxN = maxImagesForMode();
   addBtn.style.display = n >= maxN ? 'none' : '';
-  const isI2v = state.mode === 'i2v_multi';
-  if (isI2v) {
+  if (isPerImageMode()) {
+    const maxLabel = maxImagesForMode();
     $('img-hint').textContent = n === 0
-      ? 'Select 1–10 images. Each gets its own animation clip — you pick which to merge.'
-      : n === 1 ? '1 image — animated loop (skips review, single clip becomes the video).'
+      ? `Select 1–${maxLabel} images. Each gets its own animation clip — you pick which to merge.`
+      : n === 1 ? '1 image — single clip becomes the video (skips review).'
       : `${n} images — ${n} independent clips; pick which to merge after generation.`;
     $('gen-btn').disabled = n < 1;
   } else {
@@ -501,7 +516,7 @@ function removeImage(idx) {
 // ── Per-image section ─────────────────────────────────────────────────────────
 function renderPerImageSection() {
   const sec = $('per-img-section');
-  if (state.mode !== 'i2v_multi' || state.selectedImages.length === 0) {
+  if (!isPerImageMode() || state.selectedImages.length === 0) {
     sec.style.display = 'none';
     return;
   }
@@ -527,6 +542,7 @@ function renderPerImageSection() {
       <div class="per-img-header">
         <img class="per-img-thumb" src="${withAuth(img.thumb_url)}" alt="">
         <span class="per-img-num">Image ${idx + 1}</span>
+        <button type="button" class="paste-btn" onclick="pasteInto(this)">📋 Paste</button>
       </div>
       <textarea class="per-img-prompt" rows="2" placeholder="Animation prompt for image ${idx + 1}…">${_esc(saved.prompt || '')}</textarea>
       <div class="per-img-frames-row">
@@ -540,6 +556,22 @@ function renderPerImageSection() {
 
 function _esc(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// One-tap paste into the nearest prompt textarea — saves the long-press /
+// context-menu dance on mobile. Reads the clipboard and drops the text in.
+async function pasteInto(btn) {
+  const ta = btn.closest('.prompt-wrap, .per-img-row')?.querySelector('textarea');
+  if (!ta) return;
+  try {
+    const text = await navigator.clipboard.readText();
+    if (!text) { ArtRium.toast('Clipboard is empty'); return; }
+    ta.value = text;
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    ta.focus();
+  } catch (e) {
+    ArtRium.toast('Paste blocked — long-press the field instead', true);
+  }
 }
 
 // ── Image picker ──────────────────────────────────────────────────────────────
@@ -642,11 +674,11 @@ async function generate() {
   btn.disabled = true; btn.textContent = 'Queuing…';
   try {
     let body;
-    if (state.mode === 'i2v_multi') {
+    if (isPerImageMode()) {
       const rows = Array.from($('per-img-section').querySelectorAll('.per-img-row'));
       body = {
         image_ids:       state.selectedImages.map(i => i.id),
-        workflow:        'i2v_multi',
+        workflow:        state.mode,   // 'i2v_multi' | 'ltx_i2v'
         width:           state.width,
         height:          state.height,
         fps:             parseInt($('fps-select').value) || 24,
@@ -876,6 +908,9 @@ function renderVideos() {
 
 function _videoMeta(v) {
   const n = v.n_images || '?';
+  if (v.workflow === 'ltx_i2v') {
+    return `${n} LTX clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps · 🔊`;
+  }
   if (v.workflow === 'i2v_multi') {
     return `${n} i2v clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
   }

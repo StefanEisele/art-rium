@@ -1703,10 +1703,29 @@ async def _enhance_one_zimage(idea: str, style_letter: str, timeout: float) -> s
             "num_predict":    512,
         },
     }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
-        r.raise_for_status()
-        data = r.json()
+    # Connect-level retry. All N styles fire concurrently in one burst, so a
+    # momentary Ollama hiccup (model swap, brief restart, the app's own VRAM-free
+    # pass) can refuse every connection in the same instant and 502 the whole
+    # request. Ollama recovers within a second or two, so retry connect failures
+    # with a short backoff. HTTP-status / empty-content errors are NOT retried —
+    # those are genuine and retrying 6× concurrently would only pile up.
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(f"{settings.ollama_host}/api/chat", json=payload)
+                r.raise_for_status()
+                data = r.json()
+            break
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            if attempt == attempts:
+                raise
+            delay = 1.5 * attempt
+            logger.warning(
+                "enhance: style %s connect failed (attempt %d/%d), retrying in %.1fs: %s",
+                style_letter, attempt, attempts, delay, exc,
+            )
+            await asyncio.sleep(delay)
     if "error" in data:
         raise RuntimeError(f"Ollama error: {data['error']}")
     content = (data.get("message", {}).get("content", "") or "").strip()

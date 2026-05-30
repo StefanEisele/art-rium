@@ -88,6 +88,14 @@ class Settings(BaseSettings):
             v = "http://" + v
         if urlparse(v).port is None:
             v = v.rstrip("/") + ":11434"
+        # OLLAMA_HOST is a *server bind* address; people set it to 0.0.0.0 / ::
+        # to expose Ollama on the LAN. As a *client* target those are
+        # unconnectable (on Windows: WinError 10049 "address invalid in this
+        # context"), surfacing as httpx "All connection attempts failed".
+        # Rewrite any wildcard bind address to loopback for our own calls.
+        parsed = urlparse(v)
+        if parsed.hostname in ("0.0.0.0", "::", "[::]", "0"):
+            v = v.replace(parsed.hostname, "127.0.0.1", 1)
         return v
 
     @property

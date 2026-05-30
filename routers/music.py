@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, desc
@@ -48,11 +48,11 @@ _progress: dict[str, dict] = {}
 
 # ── Workflow constants ───────────────────────────────────────────────────────
 
-_UNET_NAME = "acestep_v1.5_turbo.safetensors"
+_UNET_NAME = "acestep_v1.5_xl_turbo_bf16.safetensors"
 _CLIP_NAME_1 = "qwen_0.6b_ace15.safetensors"
-_CLIP_NAME_2 = "qwen_1.7b_ace15.safetensors"
+_CLIP_NAME_2 = "qwen_4b_ace15.safetensors"
 _VAE_NAME = "ace_1.5_vae.safetensors"
-_WORKFLOW_NAME = "ace_step_1.5_turbo"
+_WORKFLOW_NAME = "ace_step_1.5_xl_turbo"
 
 # KSampler / model defaults pulled from the source workflow
 # (workflows/audio_ace_step_1_5_split (1).json).
@@ -95,7 +95,7 @@ class SongUpdate(BaseModel):
 def _build_ace_step_workflow(req: GenerateMusicRequest, seed: int, save_prefix: str) -> dict:
     """Convert the source workflow JSON into ComfyUI API form.
 
-    Nodes mirror workflows/audio_ace_step_1_5_split (1).json exactly:
+    Nodes mirror workflows/audio_ace_step1_5_xl_turbo.json exactly:
       UNETLoader → ModelSamplingAuraFlow → DualCLIPLoader → TextEncodeAceStepAudio1.5
       → ConditioningZeroOut (negative) → EmptyAceStep1.5LatentAudio → KSampler
       → VAELoader → VAEDecodeAudio → SaveAudioMP3
@@ -301,8 +301,12 @@ async def generate_music(body: GenerateMusicRequest, db: AsyncSession = Depends(
 
 
 @router.get("/jobs/{song_id}/progress")
-async def get_job_progress(song_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """Lightweight progress — reads module-level dict + optional ComfyUI queue check."""
+async def get_job_progress(
+    song_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight progress — reads module-level dict + optional ComfyUI queue check + live step info."""
     song = await db.get(Song, song_id)
     if not song:
         raise HTTPException(status_code=404, detail="Song job not found")
@@ -327,6 +331,21 @@ async def get_job_progress(song_id: uuid.UUID, db: AsyncSession = Depends(get_db
             prog["message"] = f"Queued in ComfyUI (position {pos})…"
             prog["pct"]     = 15
         prog["queue"] = qi
+
+    # Live per-sampler-step pct from the shared ComfyUI WebSocket listener.
+    # Scales the running phase between 40 % and 85 %, then "finalizing"
+    # (saving the MP3) covers the last stretch.
+    listener = getattr(request.app.state, "comfy_listener", None)
+    step = listener.get_step_progress(song.comfy_prompt_id) if listener else None
+    if step and step.get("max") and prog["phase"] in ("running", "processing"):
+        v = int(step.get("value") or 0)
+        m = int(step.get("max")  or 0)
+        if m > 0:
+            ratio = max(0.0, min(1.0, v / m))
+            prog["phase"]   = "running"
+            prog["pct"]     = int(40 + ratio * 45)
+            prog["message"] = f"Sampling step {v}/{m}…"
+            prog["step"]    = {"value": v, "max": m}
 
     return prog
 

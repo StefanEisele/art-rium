@@ -44,6 +44,21 @@ class ComfyListener:
         # client_id → [image_data, ...] buffered while client is offline
         self._pending: dict[str, list] = {}
 
+        # prompt_id → {"value": int, "max": int, "node": str} — last `progress`
+        # event seen for ANY prompt running through ComfyUI. Read by tool
+        # routers (video / music) to surface per-sampler-step progress without
+        # opening their own WebSocket subscription. Entries are evicted in
+        # `_route` when a `executing` event with no node fires (idle).
+        self._step_progress: dict[str, dict] = {}
+
+    # ── Read-only progress query (called by music/video routers) ─────────────
+
+    def get_step_progress(self, prompt_id: str | None) -> dict | None:
+        """Most recent `progress` event for this prompt_id, or None."""
+        if not prompt_id:
+            return None
+        return self._step_progress.get(prompt_id)
+
     # ── Registration API (called by generate router) ─────────────────────────
 
     def register_prompt(
@@ -122,6 +137,18 @@ class ComfyListener:
 
         if not prompt_id:
             return
+
+        # Stash live step progress for ALL prompts, regardless of whether the
+        # image-gen pipeline owns them. Tool routers read this to render fine-
+        # grained per-sampler-step progress.
+        if msg_type == "progress":
+            self._step_progress[prompt_id] = {
+                "value": data.get("value"),
+                "max":   data.get("max"),
+                "node":  data.get("node"),
+            }
+        elif msg_type in ("execution_success", "execution_error"):
+            self._step_progress.pop(prompt_id, None)
 
         if prompt_id not in self._prompt_meta:
             return

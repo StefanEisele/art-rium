@@ -56,7 +56,7 @@ echo.
 set COMFY_DIR=E:\00_comfy
 if exist "%COMFY_DIR%\venv\Scripts\activate.bat" (
     echo  Starting ComfyUI...
-    start "ComfyUI" cmd /k cd /d "%COMFY_DIR%" ^&^& call venv\Scripts\activate.bat ^&^& python main.py
+    start "ComfyUI" cmd /k cd /d "%COMFY_DIR%" ^&^& call venv\Scripts\activate.bat ^&^& python main.py --listen
     echo  ComfyUI starting in background...
 ) else (
     echo  WARNING: ComfyUI not found at %COMFY_DIR% — skipping.

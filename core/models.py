@@ -229,6 +229,11 @@ class Video(Base):
     prompt: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(String(255))   # user-editable display title
     notes: Mapped[str | None] = mapped_column(Text)          # user-editable free-form notes
+    # Optional muxed soundtrack (Song attached via /tools/video detail modal)
+    soundtrack_song_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("songs.id", ondelete="SET NULL"), nullable=True
+    )
+    muxed_filename: Mapped[str | None] = mapped_column(String(512))   # in storage/videos/, sibling of `filename`
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     frame_count: Mapped[int | None] = mapped_column(Integer)  # frames per transition (length param)
@@ -286,3 +291,37 @@ class ImprovSession(Base):
         DateTime(timezone=True), default=_now, nullable=False
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Songs (ACE-Step 1.5 Turbo audio generation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Song(Base):
+    __tablename__ = "songs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    filename: Mapped[str | None] = mapped_column(String(512), unique=True)   # null until done
+    filepath: Mapped[str | None] = mapped_column(Text)                       # relative to storage_dir
+    tags: Mapped[str] = mapped_column(Text, nullable=False)                  # ACE "tags" prompt (style / genre / mood)
+    lyrics: Mapped[str | None] = mapped_column(Text)
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)   # 5–240
+    bpm: Mapped[int | None] = mapped_column(Integer)
+    musical_key: Mapped[str | None] = mapped_column(String(32))              # e.g. "E minor"
+    language: Mapped[str | None] = mapped_column(String(8))                  # "en" | "de" | "zh" | ...
+    seed: Mapped[int | None] = mapped_column(BigInteger)
+    steps: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=8, server_default="8")
+    cfg: Mapped[float | None] = mapped_column(Numeric(4, 2))
+    shift: Mapped[float | None] = mapped_column(Numeric(4, 2))               # ModelSamplingAuraFlow shift
+    title: Mapped[str | None] = mapped_column(String(255))                   # user-editable display title
+    notes: Mapped[str | None] = mapped_column(Text)                          # user-editable free-form notes
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="generating")
+    error: Mapped[str | None] = mapped_column(Text)
+    comfy_prompt_id: Mapped[str | None] = mapped_column(String(128))
+    workflow: Mapped[str | None] = mapped_column(String(32))                 # "ace_step_1.5_turbo"
+    waveform_path: Mapped[str | None] = mapped_column(Text)                  # optional PNG thumbnail
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )

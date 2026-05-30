@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
     settings.shop_prep_dir.mkdir(parents=True, exist_ok=True)
     settings.videos_dir.mkdir(parents=True, exist_ok=True)
     settings.improv_dir.mkdir(parents=True, exist_ok=True)
+    settings.songs_dir.mkdir(parents=True, exist_ok=True)
 
     # Start ComfyUI WebSocket listener
     listener = ComfyListener(app.state)
@@ -180,7 +181,7 @@ async def gate_frontend(request: Request, call_next):
 
 
 # ── Routers ──────────────────────────────────────────────────────────────────
-from routers import generate, images, titler, instagram, video, wordpress, system, improv  # noqa: E402  (after app is created)
+from routers import generate, images, titler, instagram, video, wordpress, system, improv, music  # noqa: E402  (after app is created)
 
 app.include_router(generate.router)
 app.include_router(images.router)
@@ -190,6 +191,7 @@ app.include_router(video.router)
 app.include_router(wordpress.router)
 app.include_router(system.router)
 app.include_router(improv.router)
+app.include_router(music.router)
 
 # ── Static frontends ──────────────────────────────────────────────────────────
 # Mount order matters: /shared and /tools/* must precede the / catch-all.
@@ -199,7 +201,7 @@ _shared = _frontends_dir / "shared"
 if _shared.exists():
     app.mount("/shared", StaticFiles(directory=str(_shared)), name="shared")
 
-_TOOL_NAMES = ("z-image", "gallery", "titler", "instagram", "video", "articles", "improv")
+_TOOL_NAMES = ("z-image", "gallery", "titler", "instagram", "video", "articles", "improv", "music")
 for _tool in _TOOL_NAMES:
     _dir = _frontends_dir / "tools" / _tool
     if _dir.exists():

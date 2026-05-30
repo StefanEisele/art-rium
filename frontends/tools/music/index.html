@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0a0c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Music">
+  <title>Music — art-rium</title>
+  <link rel="stylesheet" href="/shared/shared.css">
+  <style>
+    .app {
+      display: flex; flex-direction: column;
+      min-height: 100dvh;
+      max-width: 700px;
+      margin: 0 auto;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
+    }
+
+    header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    header .back {
+      font-size: 22px; color: var(--text-dim); text-decoration: none;
+      padding: 4px 8px; line-height: 1;
+    }
+    header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; }
+
+    main {
+      flex: 1;
+      padding: 16px;
+      display: flex; flex-direction: column; gap: 22px;
+    }
+
+    /* ── Form card ── */
+    .form-card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px 16px 14px;
+      display: flex; flex-direction: column; gap: 12px;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .field label {
+      font-size: 11px; font-weight: 700; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.7px;
+    }
+    .field textarea, .field input[type="number"], .field input[type="text"], .field select {
+      width: 100%; box-sizing: border-box;
+      background: var(--surface2);
+      border: 1.5px solid var(--border); border-radius: 10px;
+      color: var(--text); font-size: 15px; font-family: inherit;
+      padding: 10px 12px;
+      outline: none; resize: vertical;
+      -webkit-appearance: none;
+      transition: border-color 0.15s;
+    }
+    .field textarea:focus, .field input:focus, .field select:focus {
+      border-color: var(--accent);
+    }
+    .field textarea { min-height: 64px; line-height: 1.4; }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 480px) {
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+
+    .generate-btn {
+      margin-top: 4px;
+      padding: 13px 16px;
+      border-radius: var(--radius-pill);
+      border: none;
+      background: var(--accent);
+      color: var(--on-accent);
+      font-size: 15px; font-weight: 700;
+      cursor: pointer; font-family: inherit;
+      transition: transform 0.13s, opacity 0.13s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .generate-btn:active { transform: scale(0.97); }
+    .generate-btn[disabled] { opacity: 0.5; cursor: default; transform: none; }
+
+    /* ── Progress strip ── */
+    #progress {
+      display: none;
+      flex-direction: column; gap: 6px;
+      margin-top: 4px;
+    }
+    #progress.show { display: flex; }
+    .phase-row {
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 13px;
+    }
+    #phase-text { color: var(--text-dim); }
+    #phase-pct  { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+    .progress-track { height: 3px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+    #progress-bar { height: 100%; background: var(--accent); width: 0%; transition: width 0.35s ease; }
+
+    /* ── Songs list ── */
+    .songs-header {
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    }
+    .songs-header h2 { font-size: 14px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.7px; }
+    #search {
+      flex-shrink: 1; max-width: 200px;
+      background: var(--surface2); border: 1.5px solid transparent; border-radius: 10px;
+      color: var(--text); font-size: 14px; font-family: inherit;
+      padding: 7px 11px; outline: none;
+      transition: border-color 0.15s; -webkit-appearance: none;
+    }
+    #search:focus { border-color: var(--accent); }
+    #search::placeholder { color: var(--text-dim); }
+
+    .songs-list { display: flex; flex-direction: column; gap: 10px; }
+
+    .song-card {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 14px 12px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .song-card.failed { border-color: rgba(232,85,85,0.4); }
+
+    .song-head { display: flex; align-items: flex-start; gap: 10px; }
+    .song-title-wrap { flex: 1; min-width: 0; }
+    .song-title {
+      font-size: 15px; font-weight: 600; line-height: 1.3;
+      cursor: text; padding: 1px 0;
+    }
+    .song-title.empty { color: var(--text-dim); font-style: italic; }
+    .song-title-input {
+      width: 100%; background: var(--surface2);
+      border: 1.5px solid var(--accent); border-radius: 6px;
+      color: var(--text); font-size: 15px; font-weight: 600; font-family: inherit;
+      padding: 3px 7px; outline: none; -webkit-appearance: none;
+    }
+    .song-meta {
+      font-size: 12px; color: var(--text-dim);
+      margin-top: 2px; display: flex; flex-wrap: wrap; gap: 8px;
+    }
+    .song-meta span::before { content: ""; }
+    .song-meta span + span::before { content: "·"; margin-right: 8px; }
+
+    .song-actions {
+      display: flex; gap: 4px; flex-shrink: 0;
+    }
+    .icon-btn {
+      background: none; border: none;
+      color: var(--text-dim); font-size: 16px;
+      padding: 4px 8px; cursor: pointer; border-radius: 6px;
+      font-family: inherit; line-height: 1;
+      -webkit-tap-highlight-color: transparent;
+      transition: color 0.15s, background 0.15s;
+    }
+    .icon-btn:hover { background: var(--surface2); color: var(--text); }
+    .icon-btn.danger:hover { color: #e85; }
+
+    .song-tags {
+      font-size: 13px; color: var(--text-dim); line-height: 1.4;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+
+    .song-error {
+      font-size: 13px; color: #e85;
+      background: rgba(232,85,85,0.08);
+      border-radius: 8px; padding: 8px 10px;
+      line-height: 1.4;
+    }
+
+    audio { width: 100%; }
+    audio::-webkit-media-controls-panel { background: var(--surface2); }
+
+    .empty-state {
+      text-align: center; color: var(--text-dim); font-size: 14px;
+      padding: 28px 16px;
+    }
+
+    /* ── Generating placeholder card ── */
+    .song-card.generating { border-color: var(--accent-border); background: var(--accent-soft); }
+    .song-card.generating .song-meta { color: var(--accent); }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <a href="/" class="back" aria-label="Dashboard">←</a>
+    <h1>Music</h1>
+  </header>
+
+  <main>
+    <!-- ── Generation form ── -->
+    <section class="form-card">
+      <div class="field">
+        <label for="tags">Tags / Style *</label>
+        <textarea id="tags" rows="3" placeholder="Electronic lofi minimal melancholic experimental: sus chords, intricate piano, dark tones"></textarea>
+      </div>
+
+      <div class="field">
+        <label for="lyrics">Lyrics (optional)</label>
+        <textarea id="lyrics" rows="3" placeholder="Leave empty for instrumental"></textarea>
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <label for="duration">Duration (s)</label>
+          <input id="duration" type="number" min="5" max="240" value="25" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label for="bpm">BPM</label>
+          <input id="bpm" type="number" min="40" max="240" value="120" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label for="key">Key</label>
+          <select id="key">
+            <option value="">Auto</option>
+            <optgroup label="Major">
+              <option>C major</option><option>C# major</option><option>D major</option><option>D# major</option>
+              <option>E major</option><option>F major</option><option>F# major</option><option>G major</option>
+              <option>G# major</option><option>A major</option><option>A# major</option><option>B major</option>
+            </optgroup>
+            <optgroup label="Minor">
+              <option>C minor</option><option>C# minor</option><option>D minor</option><option>D# minor</option>
+              <option selected>E minor</option><option>F minor</option><option>F# minor</option><option>G minor</option>
+              <option>G# minor</option><option>A minor</option><option>A# minor</option><option>B minor</option>
+            </optgroup>
+          </select>
+        </div>
+        <div class="field">
+          <label for="language">Language</label>
+          <select id="language">
+            <option value="en" selected>English</option>
+            <option value="de">Deutsch</option>
+            <option value="zh">中文</option>
+            <option value="fr">Français</option>
+            <option value="es">Español</option>
+            <option value="it">Italiano</option>
+            <option value="ja">日本語</option>
+            <option value="ko">한국어</option>
+            <option value="pt">Português</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="seed">Seed (optional)</label>
+          <input id="seed" type="number" min="0" placeholder="random" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label for="time_signature">Time signature</label>
+          <select id="time_signature">
+            <option value="4" selected>4/4</option>
+            <option value="3">3/4</option>
+            <option value="6">6/8</option>
+            <option value="2">2/4</option>
+          </select>
+        </div>
+      </div>
+
+      <button id="generate-btn" class="generate-btn">Generate</button>
+
+      <div id="progress">
+        <div class="phase-row">
+          <span id="phase-text">Submitting…</span>
+          <span id="phase-pct">0%</span>
+        </div>
+        <div class="progress-track"><div id="progress-bar"></div></div>
+      </div>
+    </section>
+
+    <!-- ── Songs list ── -->
+    <section class="songs">
+      <div class="songs-header">
+        <h2>Songs</h2>
+        <input id="search" type="text" placeholder="Search title / tags…">
+      </div>
+      <div id="songs-list" class="songs-list">
+        <div class="empty-state">Loading…</div>
+      </div>
+    </section>
+  </main>
+
+</div>
+
+<script>
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const POLL_INTERVAL_MS = 3000;
+
+// In-memory cache of songs (for client-side search). Reloaded on every list fetch.
+let songs = [];
+let activePollTimer = null;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function fmtDuration(seconds) {
+  if (seconds == null) return '';
+  const s = Number(seconds);
+  const m = Math.floor(s / 60);
+  const r = Math.round(s % 60);
+  return m > 0 ? `${m}:${String(r).padStart(2,'0')}` : `${r}s`;
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  if (sameDay) return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  return d.toLocaleDateString([], {month:'short', day:'numeric'});
+}
+
+function escHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
+    .replaceAll('"','&quot;').replaceAll("'",'&#39;');
+}
+
+async function api(method, path, body) {
+  const opts = {method, credentials: 'same-origin', headers: {}};
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const r = await fetch(path, opts);
+  if (!r.ok) {
+    let detail = `${r.status}`;
+    try { detail = (await r.json()).detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  if (r.status === 204) return null;
+  return await r.json();
+}
+
+// ── Song card rendering ────────────────────────────────────────────────────
+
+function renderSongCard(s) {
+  const failed = s.status === 'failed';
+  const generating = s.status === 'generating';
+  const cls = ['song-card', failed && 'failed', generating && 'generating'].filter(Boolean).join(' ');
+
+  const metaParts = [
+    fmtDuration(s.duration_seconds),
+    s.bpm ? `${s.bpm} BPM` : null,
+    s.musical_key || null,
+    s.language ? s.language.toUpperCase() : null,
+    fmtDate(s.created_at),
+  ].filter(Boolean);
+
+  const audioHtml = (s.status === 'done' && s.url)
+    ? `<audio controls preload="metadata" src="${escHtml(s.url)}"></audio>`
+    : '';
+
+  const errorHtml = failed
+    ? `<div class="song-error">${escHtml(s.error || 'Generation failed.')}</div>`
+    : '';
+
+  const titleText = s.title || (generating ? 'Generating…' : 'Untitled');
+  const titleClass = s.title ? 'song-title' : 'song-title empty';
+
+  return `
+    <div class="${cls}" data-id="${escHtml(s.id)}">
+      <div class="song-head">
+        <div class="song-title-wrap">
+          <div class="${titleClass}" data-edit="title">${escHtml(titleText)}</div>
+          <div class="song-meta">${metaParts.map(p=>`<span>${escHtml(p)}</span>`).join('')}</div>
+        </div>
+        <div class="song-actions">
+          ${!generating ? `<button class="icon-btn" data-action="rename" title="Rename">✎</button>` : ''}
+          <button class="icon-btn danger" data-action="delete" title="Delete">✕</button>
+        </div>
+      </div>
+      <div class="song-tags">${escHtml(s.tags || '')}</div>
+      ${audioHtml}
+      ${errorHtml}
+    </div>
+  `;
+}
+
+function renderList(filter = '') {
+  const q = filter.trim().toLowerCase();
+  const filtered = q
+    ? songs.filter(s => (s.title||'').toLowerCase().includes(q) || (s.tags||'').toLowerCase().includes(q))
+    : songs;
+
+  const container = $('songs-list');
+  if (filtered.length === 0) {
+    container.innerHTML = `<div class="empty-state">${songs.length === 0 ? 'No songs yet. Generate your first one above.' : 'No matches.'}</div>`;
+    return;
+  }
+  container.innerHTML = filtered.map(renderSongCard).join('');
+}
+
+// ── Data layer ─────────────────────────────────────────────────────────────
+
+async function loadSongs() {
+  try {
+    songs = await api('GET', '/api/music');
+  } catch (e) {
+    songs = [];
+    $('songs-list').innerHTML = `<div class="empty-state">Failed to load: ${escHtml(e.message)}</div>`;
+    return;
+  }
+  renderList($('search').value);
+}
+
+// ── Generation ─────────────────────────────────────────────────────────────
+
+function setProgress(phase, message, pct) {
+  $('progress').classList.add('show');
+  $('phase-text').textContent = message || phase || '';
+  $('phase-pct').textContent  = `${Math.round(pct ?? 0)}%`;
+  $('progress-bar').style.width = `${Math.min(100, Math.max(0, pct ?? 0))}%`;
+}
+
+function hideProgress() {
+  $('progress').classList.remove('show');
+  $('progress-bar').style.width = '0%';
+}
+
+function setGenerating(yes) {
+  $('generate-btn').disabled = yes;
+  $('generate-btn').textContent = yes ? 'Generating…' : 'Generate';
+}
+
+async function pollProgress(songId) {
+  let p;
+  try {
+    p = await api('GET', `/api/music/jobs/${songId}/progress`);
+  } catch (e) {
+    setProgress('failed', `Lost connection: ${e.message}`, 0);
+    setGenerating(false);
+    return;
+  }
+
+  setProgress(p.phase, p.message, p.pct);
+
+  if (p.phase === 'done') {
+    hideProgress();
+    setGenerating(false);
+    await loadSongs();
+    return;
+  }
+  if (p.phase === 'failed') {
+    setGenerating(false);
+    await loadSongs();
+    setTimeout(hideProgress, 4000);
+    return;
+  }
+
+  activePollTimer = setTimeout(() => pollProgress(songId), POLL_INTERVAL_MS);
+}
+
+async function generate() {
+  const tags = $('tags').value.trim();
+  if (!tags) { $('tags').focus(); return; }
+
+  const seedRaw = $('seed').value.trim();
+  const body = {
+    tags,
+    lyrics:           $('lyrics').value.trim() || null,
+    duration_seconds: Number($('duration').value) || 25,
+    bpm:              Number($('bpm').value) || 120,
+    musical_key:      $('key').value || null,
+    language:         $('language').value || 'en',
+    time_signature:   $('time_signature').value || '4',
+    seed:             seedRaw === '' ? null : Number(seedRaw),
+  };
+
+  setGenerating(true);
+  setProgress('submitting', 'Submitting workflow to ComfyUI…', 5);
+
+  let resp;
+  try {
+    resp = await api('POST', '/api/music/generate', body);
+  } catch (e) {
+    setProgress('failed', `Failed to submit: ${e.message}`, 0);
+    setGenerating(false);
+    setTimeout(hideProgress, 4000);
+    return;
+  }
+
+  // Cancel any in-flight poll from a previous job before starting a new one.
+  if (activePollTimer) { clearTimeout(activePollTimer); activePollTimer = null; }
+  pollProgress(resp.song_id);
+}
+
+// ── Inline rename + delete (event delegation) ──────────────────────────────
+
+function findCard(target) {
+  return target.closest('.song-card');
+}
+
+async function startRename(card) {
+  const titleEl = card.querySelector('[data-edit="title"]');
+  const current = titleEl.classList.contains('empty') ? '' : titleEl.textContent;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'song-title-input';
+  input.value = current;
+  input.maxLength = 255;
+  titleEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const commit = async () => {
+    if (done) return; done = true;
+    const newTitle = input.value.trim();
+    try {
+      const updated = await api('PATCH', `/api/music/jobs/${card.dataset.id}`, {title: newTitle});
+      // replace card with updated render
+      const fresh = document.createElement('div');
+      fresh.innerHTML = renderSongCard(updated);
+      card.replaceWith(fresh.firstElementChild);
+    } catch (e) {
+      alert(`Rename failed: ${e.message}`);
+      await loadSongs();
+    }
+  };
+
+  input.addEventListener('blur', commit);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter')  { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { done = true; loadSongs(); }
+  });
+}
+
+async function deleteSong(card) {
+  if (!confirm('Delete this song? This is permanent.')) return;
+  try {
+    await api('DELETE', `/api/music/${card.dataset.id}`);
+    card.remove();
+    songs = songs.filter(s => s.id !== card.dataset.id);
+    if (songs.length === 0) renderList($('search').value);
+  } catch (e) {
+    alert(`Delete failed: ${e.message}`);
+  }
+}
+
+// ── Wiring ─────────────────────────────────────────────────────────────────
+
+$('generate-btn').addEventListener('click', generate);
+
+$('search').addEventListener('input', (e) => renderList(e.target.value));
+
+$('songs-list').addEventListener('click', (e) => {
+  const card = findCard(e.target);
+  if (!card) return;
+  const action = e.target.dataset.action;
+  if (action === 'delete') return deleteSong(card);
+  if (action === 'rename') return startRename(card);
+});
+
+$('songs-list').addEventListener('dblclick', (e) => {
+  if (e.target.dataset.edit === 'title') {
+    const card = findCard(e.target);
+    if (card && !card.classList.contains('generating')) startRename(card);
+  }
+});
+
+// Initial load
+loadSongs();
+</script>
+</body>
+</html>

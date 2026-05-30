@@ -111,5 +111,10 @@ class Settings(BaseSettings):
         """Raw user-uploaded improvisation recordings (iPhone MP4s) before muxing."""
         return self.storage_dir / "improv"
 
+    @property
+    def songs_dir(self) -> Path:
+        """Generated audio (ACE-Step 1.5 Turbo MP3s + optional waveform PNGs)."""
+        return self.storage_dir / "songs"
+
 
 settings = Settings()

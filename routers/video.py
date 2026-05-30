@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
-from core.models import Image, Video
+from core.models import Image, Song, Video
 from core.video_thumb import make_video_thumbnail
 from services.comfy.client import (
     free_memory,
@@ -43,6 +43,7 @@ from services.comfy.client import (
     queue_info,
     upload_image,
 )
+from services.video.soundtrack import mux_soundtrack
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/video", dependencies=[Depends(require_auth)])
@@ -875,6 +876,9 @@ async def delete_video(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         p = settings.storage_dir / video.filepath
         if p.exists():
             p.unlink(missing_ok=True)
+    if video.muxed_filename:
+        mp = settings.videos_dir / video.muxed_filename
+        mp.unlink(missing_ok=True)
     thumb = settings.videos_dir / f"{video_id}_thumb.jpg"
     thumb.unlink(missing_ok=True)
     seg_dir = _segments_dir(video_id)
@@ -882,6 +886,106 @@ async def delete_video(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         shutil.rmtree(seg_dir, ignore_errors=True)
     await db.delete(video)
     await db.commit()
+
+
+# ── Soundtrack (mux a generated Song onto a generated Video) ──────────────────
+
+class SoundtrackAttach(BaseModel):
+    song_id: uuid.UUID
+
+
+async def _run_soundtrack_mux(video_id: uuid.UUID, song_id: uuid.UUID) -> None:
+    """Background task: probe the video, mux the song's audio with fade-out,
+    persist the muxed filename + FK. On failure write `error` on the Video row."""
+    video_key = str(video_id)
+    try:
+        async with AsyncSessionLocal() as db:
+            video = await db.get(Video, video_id)
+            song = await db.get(Song, song_id)
+            if not video or not video.filepath:
+                raise RuntimeError("Video row gone or has no file")
+            if not song or not song.filepath:
+                raise RuntimeError("Song row gone or has no file")
+            video_path = settings.storage_dir / video.filepath
+            song_path = settings.storage_dir / song.filepath
+
+        out_name = f"{video_id}_muxed.mp4"
+        out_path = settings.videos_dir / out_name
+
+        _progress[video_key] = {
+            "phase": "muxing",
+            "message": "Adding soundtrack…",
+            "pct": 50,
+        }
+        await mux_soundtrack(
+            video_path, song_path, out_path,
+            ffmpeg_path=settings.ffmpeg_path,
+            fade_out_seconds=1.0,
+        )
+
+        async with AsyncSessionLocal() as db:
+            video = await db.get(Video, video_id)
+            if video:
+                video.soundtrack_song_id = song_id
+                video.muxed_filename = out_name
+                video.error = None
+                await db.commit()
+        _progress.pop(video_key, None)
+        logger.info("Soundtrack attached: video=%s song=%s → %s", video_id, song_id, out_name)
+
+    except Exception as exc:
+        logger.exception("Soundtrack mux failed for video=%s song=%s", video_id, song_id)
+        _progress.pop(video_key, None)
+        msg = str(exc).strip()
+        err = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+        async with AsyncSessionLocal() as db:
+            video = await db.get(Video, video_id)
+            if video:
+                video.error = err[:1000]
+                await db.commit()
+
+
+@router.post("/jobs/{video_id}/soundtrack", status_code=202)
+async def attach_soundtrack(
+    video_id: uuid.UUID,
+    body: SoundtrackAttach,
+    db: AsyncSession = Depends(get_db),
+):
+    video = await db.get(Video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.status != "done" or not video.filename:
+        raise HTTPException(status_code=409, detail="Video is not ready (status must be 'done')")
+
+    song = await db.get(Song, body.song_id)
+    if not song:
+        raise HTTPException(status_code=404, detail="Song not found")
+    if song.status != "done" or not song.filename:
+        raise HTTPException(status_code=409, detail="Song is not ready (status must be 'done')")
+
+    # Optimistic UI signal — the actual write happens in the background task.
+    _progress[str(video_id)] = {
+        "phase": "muxing",
+        "message": "Adding soundtrack…",
+        "pct": 10,
+    }
+    asyncio.create_task(_run_soundtrack_mux(video_id, body.song_id))
+    return _serialize(video)
+
+
+@router.delete("/jobs/{video_id}/soundtrack")
+async def detach_soundtrack(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    video = await db.get(Video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.muxed_filename:
+        mp = settings.videos_dir / video.muxed_filename
+        mp.unlink(missing_ok=True)
+    video.muxed_filename = None
+    video.soundtrack_song_id = None
+    await db.commit()
+    await db.refresh(video)
+    return _serialize(video)
 
 
 @router.get("/file/{filename}")
@@ -896,12 +1000,20 @@ async def serve_video(filename: str):
 # ── Serializer ────────────────────────────────────────────────────────────────
 
 def _serialize(v: Video) -> dict:
+    # When a soundtrack is attached, the muxed file is the default `url`
+    # so players load the audio-bearing variant. The silent original stays
+    # available via `original_url`.
+    primary_name = v.muxed_filename or v.filename
     return {
         "id":                str(v.id),
         "status":            v.status,
         "workflow":          v.workflow or "flf2v",
         "filename":          v.filename,
-        "url":               f"/api/video/file/{v.filename}" if v.filename else None,
+        "url":               f"/api/video/file/{primary_name}" if primary_name else None,
+        "original_url":      f"/api/video/file/{v.filename}" if v.filename else None,
+        "soundtrack_song_id": str(v.soundtrack_song_id) if v.soundtrack_song_id else None,
+        "muxed_filename":    v.muxed_filename,
+        "has_soundtrack":    bool(v.muxed_filename),
         "thumb_url":         f"/api/video/thumb/{v.id}" if v.status == "done" else None,
         "image_ids":         [str(i) for i in v.image_ids] if v.image_ids else [],
         "prompt":            v.prompt,

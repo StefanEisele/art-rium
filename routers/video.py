@@ -747,22 +747,39 @@ async def _assemble_video(video_id: uuid.UUID, indices: list[int]) -> None:
         else:
             # See _run_generation: concat *demuxer* with -c copy is unreliable for HEVC,
             # re-encode through the concat filter instead.
+            #
+            # LTX segments carry a generated audio stream; concat it too so the
+            # merged video keeps its soundtrack (the AAC re-encode is negligible
+            # next to the x265 video pass). Wan/flf2v segments are silent, so
+            # forcing a=1 there would fail — gate on the workflow.
+            has_audio = meta.get("workflow") == "ltx_i2v"
             cmd: list[str] = [settings.ffmpeg_path, "-y"]
             for sf in chosen_files:
                 cmd += ["-i", str(sf)]
             n = len(chosen_files)
-            filter_inputs = "".join(f"[{i}:v]" for i in range(n))
+            if has_audio:
+                filter_inputs = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+                cmd += [
+                    "-filter_complex", f"{filter_inputs}concat=n={n}:v=1:a=1[v][a]",
+                    "-map", "[v]", "-map", "[a]",
+                ]
+            else:
+                filter_inputs = "".join(f"[{i}:v]" for i in range(n))
+                cmd += [
+                    "-filter_complex", f"{filter_inputs}concat=n={n}:v=1:a=0[v]",
+                    "-map", "[v]",
+                ]
             cmd += [
-                "-filter_complex", f"{filter_inputs}concat=n={n}:v=1:a=0[v]",
-                "-map", "[v]",
                 "-c:v",     "libx265",
                 "-preset",  "medium",
                 "-crf",     "22",
                 "-pix_fmt", "yuv420p10le",
                 "-tag:v",   "hvc1",
                 "-r",       str(fps),
-                str(dest),
             ]
+            if has_audio:
+                cmd += ["-c:a", "aac", "-b:a", "192k"]
+            cmd += [str(dest)]
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,

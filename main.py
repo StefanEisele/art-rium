@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from core.auth import AUTH_COOKIE_NAME, AUTH_COOKIE_MAX_AGE, auth_ok
 from core.config import settings
+from core.startup_sweep import sweep_stuck_jobs
 from core.tasks import safe_create_task
 from services.ollama.client import warm_titler_model
 from workers.comfy_listener import ComfyListener
@@ -38,6 +39,10 @@ async def lifespan(app: FastAPI):
     settings.videos_dir.mkdir(parents=True, exist_ok=True)
     settings.improv_dir.mkdir(parents=True, exist_ok=True)
     settings.songs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Mark jobs orphaned by the previous process's death as failed before
+    # anything else starts polling/dispatching.
+    await sweep_stuck_jobs()
 
     # Start ComfyUI WebSocket listener
     listener = ComfyListener(app.state)

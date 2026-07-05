@@ -35,6 +35,7 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.models import Image, Song, Video
+from core.tasks import safe_create_task
 from core.video_thumb import make_video_thumbnail
 from services.comfy.client import (
     free_memory,
@@ -846,7 +847,7 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
     await db.commit()
     await db.refresh(video)
 
-    asyncio.create_task(_run_generation(video.id, body))
+    safe_create_task(_run_generation(video.id, body), name=f"video_generation:{video.id}")
     logger.info("Queued video generation job %s (%s, %d images)", video.id, body.workflow, n)
 
     return {"video_id": str(video.id), "status": "generating"}
@@ -943,7 +944,7 @@ async def assemble_video(
     video.status = "assembling"
     await db.commit()
 
-    asyncio.create_task(_assemble_video(video_id, body.indices))
+    safe_create_task(_assemble_video(video_id, body.indices), name=f"video_assemble:{video_id}")
     logger.info("Assembling video %s from segments %s", video_id, body.indices)
     return {"video_id": str(video_id), "status": "assembling", "n_selected": len(body.indices)}
 
@@ -1107,7 +1108,7 @@ async def attach_soundtrack(
         "message": "Adding soundtrack…",
         "pct": 10,
     }
-    asyncio.create_task(_run_soundtrack_mux(video_id, body.song_id))
+    safe_create_task(_run_soundtrack_mux(video_id, body.song_id), name=f"soundtrack_mux:{video_id}")
     return _serialize(video)
 
 

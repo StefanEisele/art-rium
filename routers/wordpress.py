@@ -16,6 +16,7 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
 from core.models import Image, Video
+from core.tasks import safe_create_task
 from services.ollama import client as ollama_client
 from services.wordpress import article_jobs
 from services.wordpress import client as wp_client
@@ -229,7 +230,7 @@ async def generate_article(
         "publish":         body.publish,
     }
     job_id = await article_jobs.create_job(params)
-    asyncio.create_task(_run_modal_article_job(job_id, params))
+    safe_create_task(_run_modal_article_job(job_id, params), name=f"article_job:{job_id}")
 
     return {"job_id": job_id, "status": "queued"}
 

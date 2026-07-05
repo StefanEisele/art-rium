@@ -22,6 +22,7 @@ from core.config import settings
 from core.db import get_db
 from core.models import InstagramPost, InstagramPostMedia, Image, Video
 from core.scheduling import companion_at
+from core.tasks import safe_create_task
 from services.instagram.graph import missing_config
 from services.instagram.media import replace_media_items
 from services.instagram.publisher import publish_feed, schedule_feed
@@ -386,9 +387,9 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
     # Outpost path: package + upload to Pi. Local path: try Graph-side
     # scheduled_publish_time (whitelist-gated, falls through to local scheduler).
     if dispatch_target == "outpost":
-        asyncio.create_task(outpost_svc.dispatch_to_outpost(post.id))
+        safe_create_task(outpost_svc.dispatch_to_outpost(post.id), name=f"outpost_dispatch:{post.id}")
     else:
-        asyncio.create_task(_remote_schedule(post.id))
+        safe_create_task(_remote_schedule(post.id), name=f"remote_schedule:{post.id}")
 
     images, videos = await _load_media_for_post(post, db)
     return _serialize(post, images, videos)
@@ -522,9 +523,9 @@ async def update_post(
     await db.commit()
 
     if creation_ids_to_drop:
-        asyncio.create_task(_drop_remote_containers(creation_ids_to_drop))
+        safe_create_task(_drop_remote_containers(creation_ids_to_drop), name=f"drop_remote_containers:{post.id}")
     if invalidates_remote and post.status == "scheduled":
-        asyncio.create_task(_remote_schedule(post.id))
+        safe_create_task(_remote_schedule(post.id), name=f"remote_schedule:{post.id}")
 
     images, videos = await _load_media_for_post(post, db)
     return _serialize(post, images, videos)
@@ -543,9 +544,9 @@ async def delete_post(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     logger.info(f"Deleted Instagram post {post_id}")
 
     if creation_ids:
-        asyncio.create_task(_drop_remote_containers(creation_ids))
+        safe_create_task(_drop_remote_containers(creation_ids), name=f"drop_remote_containers:{post_id}")
     if outpost_id:
-        asyncio.create_task(outpost_svc.cancel_on_outpost(outpost_id))
+        safe_create_task(outpost_svc.cancel_on_outpost(outpost_id), name=f"outpost_cancel:{post_id}")
     if reel_filename:
         try:
             (settings.reels_dir / reel_filename).unlink(missing_ok=True)

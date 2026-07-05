@@ -28,6 +28,7 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
 from core.models import ImprovSession, Video
+from core.tasks import safe_create_task
 from services.improv.runner import run_improv_session
 from services.instagram.graph import share_url
 
@@ -98,7 +99,10 @@ async def create_session(
     db.add(session)
     await db.commit()
 
-    asyncio.create_task(run_improv_session(session_id, pip_corner=corner, pip_width_pct=width_pct))
+    safe_create_task(
+        run_improv_session(session_id, pip_corner=corner, pip_width_pct=width_pct),
+        name=f"improv_session:{session_id}",
+    )
     logger.info(
         "Improv session %s queued — source=%s, recording=%s (%.1f MB), pip_corner=%s, pip_width=%.2f",
         session_id, source_video_id, rec_name, written / 1_048_576, corner, width_pct,

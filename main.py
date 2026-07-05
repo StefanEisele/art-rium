@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from core.auth import AUTH_COOKIE_NAME, AUTH_COOKIE_MAX_AGE, auth_ok
 from core.config import settings
+from core.tasks import safe_create_task
 from services.ollama.client import warm_titler_model
 from workers.comfy_listener import ComfyListener
 from workers.instagram_scheduler import InstagramScheduler
@@ -40,17 +41,17 @@ async def lifespan(app: FastAPI):
 
     # Start ComfyUI WebSocket listener
     listener = ComfyListener(app.state)
-    comfy_task = asyncio.create_task(listener.run())
+    comfy_task = safe_create_task(listener.run(), name="comfy_listener")
     app.state.comfy_listener = listener
 
     # Start Instagram auto-poster
     scheduler = InstagramScheduler()
-    scheduler_task = asyncio.create_task(scheduler.run())
+    scheduler_task = safe_create_task(scheduler.run(), name="instagram_scheduler")
 
     # Warm the titler VLM in the background — cold load is ~2.5 min, which
     # exceeds the Cloudflare tunnel's ~100s upstream timeout for the first
     # frontend request. Fire-and-forget; never blocks server startup.
-    warm_task = asyncio.create_task(warm_titler_model())
+    warm_task = safe_create_task(warm_titler_model(), name="titler_warmup")
     logger.info("Titler warm-up scheduled in background")
 
     yield

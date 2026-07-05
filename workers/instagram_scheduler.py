@@ -24,6 +24,7 @@ from sqlalchemy import select
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import InstagramPost
+from core.tasks import safe_create_task
 from services.instagram.graph import missing_config
 from services.instagram.publisher import publish_feed
 from services.instagram.reel import reel_publish_time
@@ -103,7 +104,7 @@ class InstagramScheduler:
 
         for post_id in due_ids:
             logger.info("InstagramScheduler: launching reel for post %s (immediate fallback)", post_id)
-            asyncio.create_task(publish_reel(post_id))
+            safe_create_task(publish_reel(post_id), name=f"publish_reel:{post_id}")
 
     # ── 2. Detect Instagram-side publication ─────────────────────────────────
 

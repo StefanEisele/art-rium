@@ -37,6 +37,7 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.models import Song
+from core.tasks import safe_create_task
 from services.comfy.client import poll_history, post_workflow, queue_info
 
 logger = logging.getLogger(__name__)
@@ -293,7 +294,7 @@ async def generate_music(body: GenerateMusicRequest, db: AsyncSession = Depends(
     await db.commit()
     await db.refresh(song)
 
-    asyncio.create_task(_run_generation(song.id, body, seed))
+    safe_create_task(_run_generation(song.id, body, seed), name=f"music_generation:{song.id}")
     logger.info("Queued music generation job %s (%ds, bpm=%d, key=%s)",
                 song.id, body.duration_seconds, body.bpm, body.musical_key or "(auto)")
 

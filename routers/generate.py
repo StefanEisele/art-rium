@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import random
+import re
 import uuid
 from pathlib import Path
 
@@ -150,12 +151,30 @@ def _verify_share_token(token: str = "") -> None:
         raise HTTPException(status_code=403, detail="Invalid share token")
 
 
+_SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _validate_share_filename(filename: str) -> str:
+    """Reduce the path param to a bare filename and reject anything outside
+    a strict charset. `Path(...).name` alone strips directory components but
+    lets glob metacharacters (`*`, `?`, `[...]`) through, which turns
+    `_find_image_on_disk`'s `rglob()` into a file-enumeration primitive on a
+    public, single-static-token endpoint."""
+    name = Path(filename).name
+    if not name or not _SAFE_FILENAME_RE.match(name):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    return name
+
+
 def _find_image_on_disk(safe_name: str) -> Path | None:
     """Locate an image by its bare filename. Looks in managed storage first,
-    then the raw ComfyUI output directory. Returns None when missing."""
+    then the raw ComfyUI output directory. Returns None when missing.
+    `safe_name` must come from `_validate_share_filename` — it is used as an
+    `rglob` pattern for recursive lookup across date-sharded subdirectories,
+    and an unvalidated name could contain glob metacharacters."""
     for search_dir in (settings.images_dir, settings.comfyui_output_dir):
         for candidate in search_dir.rglob(safe_name):
-            if candidate.exists():
+            if candidate.is_file():
                 return candidate
     return None
 
@@ -163,7 +182,7 @@ def _find_image_on_disk(safe_name: str) -> Path | None:
 @router.get("/share/image/{filename}", dependencies=[Depends(_verify_share_token)])
 async def get_shared_image(filename: str):
     """Public image endpoint for external services (e.g. Instagram)."""
-    candidate = _find_image_on_disk(Path(filename).name)
+    candidate = _find_image_on_disk(_validate_share_filename(filename))
     if candidate is None:
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(candidate, media_type="image/png")
@@ -172,9 +191,9 @@ async def get_shared_image(filename: str):
 @router.get("/share/reel/{filename}", dependencies=[Depends(_verify_share_token)])
 async def get_shared_reel(filename: str):
     """Public video endpoint for Reel uploads to Instagram Graph API."""
-    safe_name = Path(filename).name
+    safe_name = _validate_share_filename(filename)
     candidate = settings.reels_dir / safe_name
-    if candidate.exists():
+    if candidate.is_file():
         return FileResponse(candidate, media_type="video/mp4")
     raise HTTPException(status_code=404, detail="Reel not found")
 
@@ -182,9 +201,9 @@ async def get_shared_reel(filename: str):
 @router.get("/share/video/{filename}", dependencies=[Depends(_verify_share_token)])
 async def get_shared_video(filename: str):
     """Public endpoint for serving generated videos to Instagram Graph API."""
-    safe_name = Path(filename).name
+    safe_name = _validate_share_filename(filename)
     candidate = settings.videos_dir / safe_name
-    if candidate.exists():
+    if candidate.is_file():
         return FileResponse(candidate, media_type="video/mp4")
     raise HTTPException(status_code=404, detail="Video not found")
 
@@ -507,8 +526,8 @@ async def get_shared_video_loop(filename: str):
     The loop player reads these from `location.search` directly, so this
     endpoint doesn't need to parse them — it just serves the static HTML.
     """
-    safe_name = Path(filename).name
-    if not (settings.videos_dir / safe_name).exists():
+    safe_name = _validate_share_filename(filename)
+    if not (settings.videos_dir / safe_name).is_file():
         raise HTTPException(status_code=404, detail="Video not found")
     src = f"/share/video/{safe_name}"
     if settings.image_share_token:

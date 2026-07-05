@@ -8,12 +8,14 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     BigInteger,
     DateTime,
+    ForeignKey,
+    Index,
     Integer,
     Numeric,
     SmallInteger,
     String,
     Text,
-    ForeignKey,
+    UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -42,7 +44,7 @@ class Image(Base):
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     workflow_name: Mapped[str | None] = mapped_column(String(128))
-    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     thumbnail_path: Mapped[str | None] = mapped_column(Text)        # relative to storage_dir, JPEG 512 px
     title: Mapped[str | None] = mapped_column(String(512))          # chosen display title
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String))
@@ -81,7 +83,7 @@ class Article(Base):
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String))  # 3–6 tags, generated with the article
     language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")  # Polylang slug: en | de (zh rows exist historically; no longer produced)
     translation_group_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), nullable=False, default=uuid.uuid4
+        UUID(as_uuid=True), nullable=False, default=uuid.uuid4, index=True
     )                                                               # shared across the EN+DE siblings of one piece
     wp_post_id: Mapped[int | None] = mapped_column(Integer)        # null until pushed
     wp_link: Mapped[str | None] = mapped_column(Text)              # canonical URL after WP push
@@ -130,6 +132,11 @@ class ShopListing(Base):
 
 class InstagramPost(Base):
     __tablename__ = "instagram_posts"
+    __table_args__ = (
+        # The scheduler polls WHERE status='scheduled' AND scheduled_at <= now()
+        # every 60s (workers/instagram_scheduler.py) — this is the hot path.
+        Index("ix_instagram_posts_status_scheduled_at", "status", "scheduled_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -144,10 +151,10 @@ class InstagramPost(Base):
     )                                                               # ordered list of 1–4 source videos for kind='reel' concat
     caption: Mapped[str | None] = mapped_column(Text)
     scheduled_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True), nullable=False, index=True
     )
     status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="scheduled"
+        String(32), nullable=False, default="scheduled", index=True
     )                                                               # scheduled | posted | cancelled
     instagram_media_id: Mapped[str | None] = mapped_column(String(128))  # filled after posting
     # Companion posts (auto-created alongside the feed post)
@@ -191,12 +198,17 @@ class InstagramPostMedia(Base):
     """One ordered child of a feed post's carousel. kind='image' references
     an Image row; kind='video' references a Video row. Up to 10 per post."""
     __tablename__ = "instagram_post_media"
+    __table_args__ = (
+        UniqueConstraint("post_id", "position", name="uq_ig_post_media_position"),
+        Index("ix_ig_post_media_post_id", "post_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     post_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("instagram_posts.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("instagram_posts.id", ondelete="CASCADE"),
+        nullable=False,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)        # 0..9
     kind: Mapped[str] = mapped_column(String(8), nullable=False)          # 'image' | 'video'
@@ -239,7 +251,7 @@ class Video(Base):
     frame_count: Mapped[int | None] = mapped_column(Integer)  # frames per transition (length param)
     n_images: Mapped[int | None] = mapped_column(Integer)     # 2–6 key frames
     fps: Mapped[int | None] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="generating")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="generating", index=True)
     error: Mapped[str | None] = mapped_column(Text)
     comfy_prompt_id: Mapped[str | None] = mapped_column(String(128))
     workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "flf2v"
@@ -288,7 +300,7 @@ class ImprovSession(Base):
     # queued | processing | done | failed
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, nullable=False
+        DateTime(timezone=True), default=_now, nullable=False, index=True
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

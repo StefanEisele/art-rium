@@ -38,7 +38,7 @@ from core.config import settings
 from core.imaging import prepare_for_vlm
 from core.models import Article, Image, Video
 from core.video_thumb import extract_video_frames
-from services.ollama.client import write_article, write_modal_article, write_rich_article
+from services.ollama.articles import write_article, write_modal_article, write_rich_article
 from services.wordpress.client import request_json
 from services.wordpress.tags import resolve_tag_ids
 

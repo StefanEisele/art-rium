@@ -124,7 +124,7 @@ async def enhance_prompts(body: EnhancePromptsRequest):
     """Run the local Qwen prompt-enhancer over a short idea and return one
     prompt per style family (A..F default, +G if n=7). Styles that fail
     are silently skipped — the response may contain fewer than n entries."""
-    from services.ollama.client import enhance_zimage_prompts
+    from services.ollama.zimage_enhance import enhance_zimage_prompts
 
     if not body.idea.strip():
         raise HTTPException(status_code=400, detail="idea is required")

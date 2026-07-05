@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.imaging import prepare_for_vlm, prepare_for_wp
 from core.models import Image
-from services.ollama.client import analyze_image
+from services.ollama.analysis import analyze_image
 from services.wordpress.client import request_json, upload_binary
 
 logger = logging.getLogger(__name__)

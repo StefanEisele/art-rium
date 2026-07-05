@@ -1,16 +1,17 @@
 """
 Unit tests for the hand-rolled adversarial-LLM-output parsing in
-services/ollama/client.py (code review P1) — fence stripping, the German
-curly-quote JSON salvage pass, and the essay-block validator.
+services/ollama/{chat,articles,validators}.py (code review P1) — fence
+stripping, the German curly-quote JSON salvage pass, and the essay-block
+validator. (These modules were split out of the former services/ollama/
+client.py god-module — code review A1.)
 """
 import pytest
 
-from services.ollama.client import (
+from services.ollama.articles import _iterative_salvage, _salvage_curly_quotes
+from services.ollama.chat import _strip_json_fences
+from services.ollama.validators import (
     _clamp_focus_keyphrase,
     _count_substring,
-    _iterative_salvage,
-    _salvage_curly_quotes,
-    _strip_json_fences,
     _strip_list,
     _strip_str,
     _truncate_at_word,

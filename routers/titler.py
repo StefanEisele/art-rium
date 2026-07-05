@@ -18,7 +18,7 @@ from core.db import get_db
 from core.imaging import prepare_jpg_for_web
 from core.models import Image, Video
 from core.video_thumb import extract_video_frames
-from services.ollama.client import generate_titles, generate_video_titles
+from services.ollama.analysis import generate_titles, generate_video_titles
 
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(require_auth)])

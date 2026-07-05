@@ -20,7 +20,7 @@ from core.auth import (
 from core.config import settings
 from core.startup_sweep import sweep_stuck_jobs
 from core.tasks import safe_create_task
-from services.ollama.client import warm_titler_model
+from services.ollama.analysis import warm_titler_model
 from workers.comfy_listener import ComfyListener
 from workers.instagram_scheduler import InstagramScheduler
 

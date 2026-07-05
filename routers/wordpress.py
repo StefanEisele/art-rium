@@ -16,7 +16,7 @@ from core.config import settings
 from core.db import get_db
 from core.models import Image, Video
 from core.tasks import safe_create_task
-from services.ollama import client as ollama_client
+from services.ollama import chat as ollama_client
 from services.wordpress import article_jobs
 from services.wordpress import client as wp_client
 from services.wordpress.articles import generate_modal_article

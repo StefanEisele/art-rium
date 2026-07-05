@@ -1,11 +1,12 @@
 """
 Unit tests for the Gutenberg block renderers in
-services/wordpress/articles.py (code review P1) — pure string-in/string-out
-functions, no DB or network needed.
+services/wordpress/gutenberg.py (code review P1) — pure string-in/string-out
+functions, no DB or network needed. (Split out of the former services/
+wordpress/articles.py god-module — code review A1.)
 """
 from types import SimpleNamespace
 
-from services.wordpress.articles import (
+from services.wordpress.gutenberg import (
     _aspect_class,
     _attr,
     _attr_url,

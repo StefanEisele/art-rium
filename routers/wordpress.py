@@ -19,7 +19,7 @@ from core.tasks import safe_create_task
 from services.ollama import chat as ollama_client
 from services.wordpress import article_jobs
 from services.wordpress import client as wp_client
-from services.wordpress.articles import generate_modal_article
+from services.wordpress.orchestrator import generate_modal_article
 from services.wordpress.media import upload_image_to_wp
 from services.youtube import client as yt_client
 from services.youtube.uploader import upload_video_to_youtube

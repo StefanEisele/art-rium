@@ -119,9 +119,16 @@ class ComfyListener:
                             continue  # Skip binary preview frames
                         try:
                             msg = json.loads(raw)
+                        except Exception as exc:
+                            logger.error(f"ComfyUI WS: malformed message dropped: {exc}")
+                            continue
+                        try:
                             await self._route(msg)
                         except Exception:
-                            pass
+                            logger.exception(
+                                f"ComfyUI WS: _route failed for message type "
+                                f"{msg.get('type')!r} (prompt_id={msg.get('data', {}).get('prompt_id')!r})"
+                            )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

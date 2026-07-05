@@ -1,3 +1,6 @@
+# Floor-only spec — what's needed and why. For a reproducible install with
+# exact versions, use requirements-lock.txt instead.
+
 # Web framework
 fastapi>=0.111
 uvicorn[standard]>=0.29

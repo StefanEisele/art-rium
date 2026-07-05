@@ -37,5 +37,5 @@ LORAS: list[LoraSpec] = [
     },
 ]
 
-ALLOWED_LORAS: set[str] = {l["filename"] for l in LORAS}
+ALLOWED_LORAS: set[str] = {lora["filename"] for lora in LORAS}
 DEFAULT_LORA: str = LORAS[0]["filename"]

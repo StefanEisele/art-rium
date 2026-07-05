@@ -3,7 +3,6 @@ Image gallery API — list, search, tag, rate, and delete ingested images.
 """
 import uuid
 import logging
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query

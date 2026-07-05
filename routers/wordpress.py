@@ -3,7 +3,6 @@ WordPress integration API — uploads gallery images to the WP media library
 with VLM-generated alt-text / SEO description / caption, and generates
 EN+DE blog post drafts in the art-rium voice (Essay / Work / Lab modes).
 """
-import asyncio
 import logging
 import uuid
 from typing import Literal

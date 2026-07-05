@@ -16,7 +16,6 @@ DELETE /api/improv/sessions/{id}       remove session + output files (best-effor
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 

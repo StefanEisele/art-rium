@@ -1,0 +1,8 @@
+[tool.ruff]
+extend-exclude = ["venv", "migrations/versions"]
+
+[tool.ruff.lint.per-file-ignores]
+# One-off dev/debug utilities that sys.path.insert() before importing local
+# packages (they're run directly, not through the app) — same pattern main.py
+# itself uses (with an inline noqa) for the router imports.
+"scripts/*.py" = ["E401", "E402"]

@@ -5,7 +5,6 @@ Supports single-image and carousel (multi-image) posts.
 Actual posting to the Instagram Graph API requires a public image URL (e.g.
 via Cloudflare tunnel). Use the /post-now endpoint once that is configured.
 """
-import asyncio
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -20,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
-from core.models import InstagramPost, InstagramPostMedia, Image, Video
+from core.models import InstagramPost, Image, Video
 from core.scheduling import companion_at
 from core.tasks import safe_create_task
 from services.instagram.graph import missing_config

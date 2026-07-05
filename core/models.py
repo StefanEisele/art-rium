@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -73,6 +74,9 @@ class Image(Base):
 
 class Article(Base):
     __tablename__ = "articles"
+    __table_args__ = (
+        CheckConstraint("status IN ('draft', 'published', 'failed')", name="ck_articles_status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -105,6 +109,11 @@ class Article(Base):
 
 class ShopListing(Base):
     __tablename__ = "shop_listings"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft', 'ready', 'submitted', 'live')", name="ck_shop_listings_status"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -136,6 +145,20 @@ class InstagramPost(Base):
         # The scheduler polls WHERE status='scheduled' AND scheduled_at <= now()
         # every 60s (workers/instagram_scheduler.py) — this is the hot path.
         Index("ix_instagram_posts_status_scheduled_at", "status", "scheduled_at"),
+        CheckConstraint(
+            "status IN ('scheduled', 'posted', 'cancelled', 'failed')",
+            name="ck_instagram_posts_status",
+        ),
+        # NOT constrained: story_status, outpost_status, outpost_reel_status.
+        # All three get written verbatim from the Pi outpost's own /status
+        # response (services/instagram/outpost.py::_apply_remote_state) — a
+        # vocabulary this repo doesn't own, so a CHECK here could start
+        # rejecting writes the moment the Pi side adds a new status string.
+        CheckConstraint(
+            "reel_status IS NULL OR reel_status IN "
+            "('pending', 'processing', 'posted', 'failed', 'remote_scheduled')",
+            name="ck_instagram_posts_reel_status",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -155,16 +178,16 @@ class InstagramPost(Base):
     )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, default="scheduled", index=True
-    )                                                               # scheduled | posted | cancelled
+    )                                                               # scheduled | posted | cancelled | failed
     instagram_media_id: Mapped[str | None] = mapped_column(String(128))  # filled after posting
     # Companion posts (auto-created alongside the feed post)
     story_delay_minutes: Mapped[int | None] = mapped_column(Integer)      # null = disabled; 0 = post immediately after feed
     reel_delay_minutes: Mapped[int | None] = mapped_column(Integer)       # null = disabled; 0 = post immediately after feed
     story_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # set when feed published
     reel_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))   # set when feed published
-    story_status: Mapped[str | None] = mapped_column(String(32))          # pending | processing | posted | failed
+    story_status: Mapped[str | None] = mapped_column(String(32))          # pending | posted | failed | (or verbatim from Pi outpost, unconstrained)
     story_media_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String(128)))  # one per image
-    reel_status: Mapped[str | None] = mapped_column(String(32))           # pending | processing | posted | failed
+    reel_status: Mapped[str | None] = mapped_column(String(32))           # pending | processing | posted | failed | remote_scheduled
     reel_media_id: Mapped[str | None] = mapped_column(String(128))
     companion_time: Mapped[str | None] = mapped_column(String(5))              # "HH:MM" for day+ companion posts (default "18:23")
     reel_video_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # use an existing generated Video instead of slideshow
@@ -201,6 +224,10 @@ class InstagramPostMedia(Base):
     __table_args__ = (
         UniqueConstraint("post_id", "position", name="uq_ig_post_media_position"),
         Index("ix_ig_post_media_post_id", "post_id"),
+        CheckConstraint(
+            "(image_id IS NOT NULL) != (video_id IS NOT NULL)",
+            name="ck_ig_post_media_exactly_one_ref",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -231,6 +258,12 @@ class InstagramPostMedia(Base):
 
 class Video(Base):
     __tablename__ = "videos"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('generating', 'review', 'assembling', 'done', 'failed')",
+            name="ck_videos_status",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -271,6 +304,12 @@ class Video(Base):
 
 class ImprovSession(Base):
     __tablename__ = "improv_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'processing', 'done', 'failed')",
+            name="ck_improv_sessions_status",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -311,6 +350,9 @@ class ImprovSession(Base):
 
 class Song(Base):
     __tablename__ = "songs"
+    __table_args__ = (
+        CheckConstraint("status IN ('generating', 'done', 'failed')", name="ck_songs_status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

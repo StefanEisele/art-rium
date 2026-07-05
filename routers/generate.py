@@ -3,6 +3,7 @@ import json
 import logging
 import random
 import re
+import secrets
 import uuid
 from pathlib import Path
 
@@ -147,7 +148,7 @@ async def enhance_prompts(body: EnhancePromptsRequest):
 def _verify_share_token(token: str = "") -> None:
     """Public-share gate: when IMAGE_SHARE_TOKEN is set, the request must
     carry it as ?token=…. When unset (dev mode), the endpoints are open."""
-    if settings.image_share_token and token != settings.image_share_token:
+    if settings.image_share_token and not secrets.compare_digest(token, settings.image_share_token):
         raise HTTPException(status_code=403, detail="Invalid share token")
 
 

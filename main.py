@@ -9,7 +9,14 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from core.auth import AUTH_COOKIE_NAME, AUTH_COOKIE_MAX_AGE, auth_ok
+from core.auth import (
+    AUTH_COOKIE_NAME,
+    AUTH_COOKIE_MAX_AGE,
+    auth_ok,
+    create_session_token,
+    verify_api_key,
+    verify_session_token,
+)
 from core.config import settings
 from core.startup_sweep import sweep_stuck_jobs
 from core.tasks import safe_create_task
@@ -152,7 +159,7 @@ async def gate_frontend(request: Request, call_next):
             redirect = RedirectResponse(target, status_code=303)
             redirect.set_cookie(
                 AUTH_COOKIE_NAME,
-                settings.api_key,
+                create_session_token(),
                 max_age=AUTH_COOKIE_MAX_AGE,
                 httponly=True,
                 secure=request.url.scheme == "https",
@@ -161,17 +168,17 @@ async def gate_frontend(request: Request, call_next):
             return redirect
 
         response = await call_next(request)
-        # Promote a freshly-supplied header key to a cookie too (handy when an
-        # external tool calls the API with X-API-Key from a browser context).
+        # Promote a freshly-supplied header key to a session cookie too (handy
+        # when an external tool calls the API with X-API-Key from a browser
+        # context). Skip if a valid session already exists, so we don't churn
+        # a fresh token (and reset its max-age) on every single request.
         header_key = request.headers.get("X-API-Key")
-        if (
-            settings.api_key
-            and header_key == settings.api_key
-            and request.cookies.get(AUTH_COOKIE_NAME) != header_key
+        if verify_api_key(header_key) and not verify_session_token(
+            request.cookies.get(AUTH_COOKIE_NAME)
         ):
             response.set_cookie(
                 AUTH_COOKIE_NAME,
-                header_key,
+                create_session_token(),
                 max_age=AUTH_COOKIE_MAX_AGE,
                 httponly=True,
                 secure=request.url.scheme == "https",

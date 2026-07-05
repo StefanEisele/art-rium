@@ -134,9 +134,12 @@ const ArtRium = (() => {
    *   - `reconnect()` — close the current socket so it reconnects immediately
    *   - `stop()`      — close permanently (no auto-reconnect)
    *
+   * Auth for the WS handshake rides the session cookie set at login (browsers
+   * attach cookies to the handshake request same as any same-origin fetch) —
+   * no API key needs to travel in the URL's query string.
+   *
    * @param {object}   opts
    * @param {string}   opts.clientId      - WS path segment
-   * @param {function} opts.getApiKey     - called on every connect; returns current API key
    * @param {function} opts.onMessage     - called with the parsed JSON message object
    * @param {function} [opts.onConnecting]   - called just before each connect attempt
    * @param {function} [opts.onConnected]    - called on ws.onopen
@@ -144,19 +147,17 @@ const ArtRium = (() => {
    * @param {function} [opts.on4001]         - called when server closes with code 4001 (auth failure)
    */
   const connectWs = ({
-    clientId, getApiKey, onMessage,
+    clientId, onMessage,
     onConnecting, onConnected, onDisconnected, on4001,
   }) => {
     let ws;
     let stopped = false;
 
     const connect = () => {
-      const apiKey = getApiKey();
       const proto  = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const key    = apiKey ? `?api_key=${encodeURIComponent(apiKey)}` : '';
 
       onConnecting?.();
-      ws = new WebSocket(`${proto}//${location.host}/ws/${clientId}${key}`);
+      ws = new WebSocket(`${proto}//${location.host}/ws/${clientId}`);
 
       ws.onopen  = () => { onConnected?.(); };
       ws.onerror = () => ws.close();

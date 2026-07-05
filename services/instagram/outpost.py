@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import traceback
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -162,16 +163,17 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
         await _record_failure(post_id, f"Image re-encode failed: {exc}")
         return
 
-    # ── Read carousel video bytes (transcoded to H.264 if needed) ─────────
+    # ── Resolve carousel video paths (transcoded to H.264 if needed) ──────
     # Meta rejects HEVC/10-bit with error 2207082. ensure_ig_compatible
     # returns the source unchanged when it's already H.264/yuv420p,
-    # otherwise produces a cached `<stem>_ig.mp4` sibling.
-    video_bytes_list: list[tuple[bytes, str]] = []
+    # otherwise produces a cached `<stem>_ig.mp4` sibling. Streamed from
+    # disk at upload time below rather than read fully into RAM here — a
+    # 4-video carousel + reel can be several hundred MB.
+    video_paths: list[Path] = []
     try:
         for ref in video_refs:
             src = settings.storage_dir / ref.filepath
-            ig_path = await ensure_ig_compatible(src)
-            video_bytes_list.append((ig_path.read_bytes(), ig_path.name))
+            video_paths.append(await ensure_ig_compatible(src))
     except Exception as exc:
         await _record_failure(post_id, f"Video read failed: {exc}")
         return
@@ -204,16 +206,6 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
             await _record_failure(post_id, f"Slideshow render failed: {exc}")
             return
 
-    # ── Multipart upload to /enqueue ──────────────────────────────────────
-    files: list[tuple[str, tuple[str, bytes, str]]] = [
-        ("images", (name, jpg, "image/jpeg")) for jpg, name in encoded_images
-    ]
-    for vid_bytes, vid_name in video_bytes_list:
-        files.append(("videos", (vid_name, vid_bytes, "video/mp4")))
-    if reel_path is not None:
-        with open(reel_path, "rb") as f:
-            files.append(("reel_mp4", (reel_path.name, f.read(), "video/mp4")))
-
     data = {"caption": caption, "scheduled_at": _iso(scheduled_at)}
     if reel_publish_at is not None:
         data["reel_publish_at"] = _iso(reel_publish_at)
@@ -234,10 +226,25 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
                 vid_idx += 1
         data["media_order"] = _json.dumps(order)
 
-    result = await _post_to_outpost(
-        post_id, "/enqueue",
-        data=data, files=files, error_label="Outpost dispatch failed",
-    )
+    # ── Multipart upload to /enqueue ──────────────────────────────────────
+    # Videos/reel are opened as file handles (not read into bytes) so httpx
+    # streams the multipart body from disk instead of holding every clip
+    # resident in RAM at once.
+    with ExitStack() as stack:
+        files: list[tuple[str, tuple[str, object, str]]] = [
+            ("images", (name, jpg, "image/jpeg")) for jpg, name in encoded_images
+        ]
+        for vid_path in video_paths:
+            fh = stack.enter_context(open(vid_path, "rb"))
+            files.append(("videos", (vid_path.name, fh, "video/mp4")))
+        if reel_path is not None:
+            fh = stack.enter_context(open(reel_path, "rb"))
+            files.append(("reel_mp4", (reel_path.name, fh, "video/mp4")))
+
+        result = await _post_to_outpost(
+            post_id, "/enqueue",
+            data=data, files=files, error_label="Outpost dispatch failed",
+        )
     if result is None:
         return
     outpost_id, body = result
@@ -302,18 +309,19 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
         return
 
     # ── Multipart upload to /enqueue-reel ──────────────────────────────────
-    with open(reel_path, "rb") as f:
-        reel_bytes = f.read()
+    # Streamed from disk (not read into bytes) so httpx doesn't hold the
+    # whole concatenated reel resident in RAM.
     data = {"caption": caption, "scheduled_at": _iso(scheduled_at)}
     if story_publish_at is not None:
         data["story_publish_at"] = _iso(story_publish_at)
 
-    result = await _post_to_outpost(
-        post_id, "/enqueue-reel",
-        data=data,
-        files=[("reel_mp4", (reel_path.name, reel_bytes, "video/mp4"))],
-        error_label="Outpost reel dispatch failed",
-    )
+    with open(reel_path, "rb") as fh:
+        result = await _post_to_outpost(
+            post_id, "/enqueue-reel",
+            data=data,
+            files=[("reel_mp4", (reel_path.name, fh, "video/mp4"))],
+            error_label="Outpost reel dispatch failed",
+        )
     if result is None:
         return
     outpost_id, body = result

@@ -35,6 +35,7 @@ from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import InstagramPost
 from core.scheduling import companion_at
+from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
     REEL_POLL_TIMEOUT,
@@ -166,11 +167,13 @@ async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
         if not media:
             logger.warning("publish_feed %s has no media items", post_id)
             return None
+        story = find_companion(post, "story")
+        reel = find_companion(post, "reel")
         return _Snapshot(
             media=media,
             caption=post.caption or "",
-            story_delay=post.story_delay_minutes,
-            reel_delay=post.reel_delay_minutes,
+            story_delay=story.delay_minutes if story else None,
+            reel_delay=reel.delay_minutes if reel else None,
             companion_time=post.companion_time,
             scheduled_at=post.scheduled_at,
             feed_creation_id=post.feed_creation_id,
@@ -296,8 +299,9 @@ async def _finalize_post(
             post.updated_at         = now
 
             if snap.reel_delay is not None:
-                post.reel_status       = "pending"
-                post.reel_scheduled_at = companion_at(now, snap.reel_delay, snap.companion_time)
+                reel = get_or_create_companion(post, "reel")
+                reel.status = "pending"
+                reel.scheduled_at = companion_at(now, snap.reel_delay, snap.companion_time)
 
             await db.commit()
             logger.info("publish_feed %s → posted (media_id=%s)", post_id, media_id)

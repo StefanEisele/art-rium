@@ -149,16 +149,6 @@ class InstagramPost(Base):
             "status IN ('scheduled', 'posted', 'cancelled', 'failed')",
             name="ck_instagram_posts_status",
         ),
-        # NOT constrained: story_status, outpost_status, outpost_reel_status.
-        # All three get written verbatim from the Pi outpost's own /status
-        # response (services/instagram/outpost.py::_apply_remote_state) — a
-        # vocabulary this repo doesn't own, so a CHECK here could start
-        # rejecting writes the moment the Pi side adds a new status string.
-        CheckConstraint(
-            "reel_status IS NULL OR reel_status IN "
-            "('pending', 'processing', 'posted', 'failed', 'remote_scheduled')",
-            name="ck_instagram_posts_reel_status",
-        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -180,26 +170,16 @@ class InstagramPost(Base):
         String(32), nullable=False, default="scheduled", index=True
     )                                                               # scheduled | posted | cancelled | failed
     instagram_media_id: Mapped[str | None] = mapped_column(String(128))  # filled after posting
-    # Companion posts (auto-created alongside the feed post)
-    story_delay_minutes: Mapped[int | None] = mapped_column(Integer)      # null = disabled; 0 = post immediately after feed
-    reel_delay_minutes: Mapped[int | None] = mapped_column(Integer)       # null = disabled; 0 = post immediately after feed
-    story_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # set when feed published
-    reel_scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))   # set when feed published
-    story_status: Mapped[str | None] = mapped_column(String(32))          # pending | posted | failed | (or verbatim from Pi outpost, unconstrained)
-    story_media_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String(128)))  # one per image
-    reel_status: Mapped[str | None] = mapped_column(String(32))           # pending | processing | posted | failed | remote_scheduled
-    reel_media_id: Mapped[str | None] = mapped_column(String(128))
+    # Story/reel companion state lives in PostCompanion (one row per kind) —
+    # see below. companion_time is the one knob shared by both companions'
+    # timing math, so it stays here rather than being duplicated per-row.
     companion_time: Mapped[str | None] = mapped_column(String(5))              # "HH:MM" for day+ companion posts (default "18:23")
-    reel_video_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # use an existing generated Video instead of slideshow
     # Instagram-side scheduled containers — once set, the post will publish without us
     feed_creation_id: Mapped[str | None] = mapped_column(String(128))
-    reel_creation_id: Mapped[str | None] = mapped_column(String(128))
-    reel_video_filename: Mapped[str | None] = mapped_column(String(512))   # slideshow MP4 in storage/reels (kept until reel publishes)
     # Pi posting outpost (cloud-scheduled posts go through here instead of the local scheduler)
     dispatch_target: Mapped[str] = mapped_column(String(16), nullable=False, default="local")  # local | outpost
     outpost_id: Mapped[str | None] = mapped_column(String(64))           # Pi-side post UUID (returned by /enqueue)
     outpost_status: Mapped[str | None] = mapped_column(String(32))       # mirrors Pi: queued|publishing|posted|failed|cancelled
-    outpost_reel_status: Mapped[str | None] = mapped_column(String(32))  # mirrors Pi reel_status (when reel uploaded)
     outpost_dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)                              # last failure message
     created_at: Mapped[datetime] = mapped_column(
@@ -215,6 +195,66 @@ class InstagramPost(Base):
         order_by="InstagramPostMedia.position",
         lazy="selectin",
     )
+    companions: Mapped[list["PostCompanion"]] = relationship(
+        back_populates="post",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+
+class PostCompanion(Base):
+    """One companion (story or reel) attached to a feed InstagramPost.
+
+    Replaces the old story_*/reel_*/outpost_reel_status flat columns that
+    used to live on InstagramPost — one row per companion kind, so a future
+    companion type is a new `kind` value, not new parent-table columns."""
+    __tablename__ = "post_companions"
+    __table_args__ = (
+        UniqueConstraint("post_id", "kind", name="uq_post_companions_post_kind"),
+        Index("ix_post_companions_post_id", "post_id"),
+        CheckConstraint("kind IN ('story', 'reel')", name="ck_post_companions_kind"),
+        # NOT constrained the same way the vocabulary comment on the old
+        # reel_status column warned about: `status` here can also arrive
+        # verbatim from the Pi outpost's /status response for some paths, so
+        # this CHECK covers the LOCAL vocabulary only — same trade-off as
+        # instagram_posts.story_status/outpost_status before this migration.
+        CheckConstraint(
+            "status IS NULL OR status IN "
+            "('pending', 'processing', 'posted', 'failed', 'remote_scheduled')",
+            name="ck_post_companions_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    post_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("instagram_posts.id", ondelete="CASCADE"), nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)  # 'story' | 'reel'
+
+    delay_minutes: Mapped[int | None] = mapped_column(Integer)      # null = disabled; 0 = immediately after feed
+    scheduled_at:  Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # planned publish time, or backfilled once observed posted
+    status:        Mapped[str | None] = mapped_column(String(32))   # pending | processing | posted | failed | remote_scheduled
+    outpost_status: Mapped[str | None] = mapped_column(String(32))  # mirrors Pi reel_status verbatim; reel only today (was outpost_reel_status)
+
+    # Reel-only fields (NULL for kind='story')
+    creation_id:    Mapped[str | None] = mapped_column(String(128))          # Instagram-side scheduled container id
+    media_id:       Mapped[str | None] = mapped_column(String(128))          # published reel media id
+    video_id:       Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))  # use an existing generated Video instead of slideshow
+    video_filename: Mapped[str | None] = mapped_column(String(512))          # slideshow MP4 in storage/reels (kept until reel publishes)
+
+    # Story-only field (NULL for kind='reel')
+    media_ids: Mapped[list[str] | None] = mapped_column(ARRAY(String(128)))  # one per image (story only)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+    post: Mapped["InstagramPost"] = relationship(back_populates="companions")
 
 
 class InstagramPostMedia(Base):

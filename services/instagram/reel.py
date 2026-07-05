@@ -26,6 +26,7 @@ from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import InstagramPost, Video
 from core.scheduling import companion_at
+from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
     REEL_POLL_TIMEOUT,
@@ -46,9 +47,10 @@ ScheduleStatus = Literal["remote_scheduled", "failed", "skipped"]
 
 def reel_publish_time(post: InstagramPost) -> datetime | None:
     """When the reel companion should publish, based on the feed schedule + delay."""
-    if post.reel_delay_minutes is None:
+    reel = find_companion(post, "reel")
+    if not reel or reel.delay_minutes is None:
         return None
-    return companion_at(post.scheduled_at, post.reel_delay_minutes, post.companion_time)
+    return companion_at(post.scheduled_at, reel.delay_minutes, post.companion_time)
 
 
 async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]:
@@ -65,10 +67,11 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
         post = await db.get(InstagramPost, post_id)
         if not post or post.status != "scheduled":
             return "skipped", None
-        if post.reel_delay_minutes is None:
+        reel = find_companion(post, "reel")
+        if not reel or reel.delay_minutes is None:
             return "skipped", None
-        if post.reel_creation_id:
-            return "skipped", post.reel_creation_id
+        if reel.creation_id:
+            return "skipped", reel.creation_id
 
         publish_at = reel_publish_time(post)
         lead = (publish_at - datetime.now(timezone.utc)).total_seconds()
@@ -83,8 +86,8 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
             for ref in media_refs if ref.kind == "image"
         ]
         caption = post.caption or ""
-        reel_video_id = post.reel_video_id
-        existing_filename = post.reel_video_filename
+        reel_video_id = reel.video_id
+        existing_filename = reel.video_filename
 
     video_path, video_filename, kind = await _resolve_video(
         post_id, image_paths, reel_video_id, existing_filename,
@@ -120,21 +123,22 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
         if not post:
             return "skipped", None
         now = datetime.now(timezone.utc)
+        reel = get_or_create_companion(post, "reel")
         if creation_id and not api_error:
-            post.reel_creation_id    = creation_id
-            post.reel_status         = "remote_scheduled"
-            post.reel_scheduled_at   = publish_at
-            post.reel_video_filename = video_filename if kind == "reel" else None
-            post.error               = None
-            post.updated_at          = now
+            reel.creation_id    = creation_id
+            reel.status         = "remote_scheduled"
+            reel.scheduled_at   = publish_at
+            reel.video_filename = video_filename if kind == "reel" else None
+            post.error          = None
+            post.updated_at     = now
             await db.commit()
             logger.info("schedule_reel %s → remote_scheduled (creation_id=%s, publish_at=%s)",
                         post_id, creation_id, publish_at.isoformat())
             return "remote_scheduled", creation_id
 
-        post.reel_status = "failed"
-        post.error       = api_error or "Unknown error"
-        post.updated_at  = now
+        reel.status     = "failed"
+        post.error      = api_error or "Unknown error"
+        post.updated_at = now
         await db.commit()
         return "failed", None
 

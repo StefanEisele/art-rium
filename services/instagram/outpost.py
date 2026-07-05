@@ -29,6 +29,7 @@ from core.db import AsyncSessionLocal
 from core.imaging import prepare_for_upload
 from core.models import InstagramPost, Video
 from core.scheduling import companion_at
+from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.ig_video import ensure_ig_compatible
 from services.instagram.media import load_media_refs
 from services.instagram.reel_concat import concat_reel_videos
@@ -124,15 +125,17 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
 
         caption = post.caption or ""
         scheduled_at = post.scheduled_at
-        reel_video_id = post.reel_video_id
+        reel_companion = find_companion(post, "reel")
+        story_companion = find_companion(post, "story")
+        reel_video_id = reel_companion.video_id if reel_companion else None
         reel_publish_at = (
-            companion_at(post.scheduled_at, post.reel_delay_minutes, post.companion_time)
-            if post.reel_delay_minutes is not None
+            companion_at(post.scheduled_at, reel_companion.delay_minutes, post.companion_time)
+            if reel_companion and reel_companion.delay_minutes is not None
             else None
         )
         story_publish_at = (
-            companion_at(post.scheduled_at, post.story_delay_minutes, post.companion_time)
-            if post.story_delay_minutes is not None
+            companion_at(post.scheduled_at, story_companion.delay_minutes, post.companion_time)
+            if story_companion and story_companion.delay_minutes is not None
             else None
         )
 
@@ -289,9 +292,10 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
 
         caption = post.caption or ""
         scheduled_at = post.scheduled_at
+        story_companion = find_companion(post, "story")
         story_publish_at = (
-            companion_at(post.scheduled_at, post.story_delay_minutes, post.companion_time)
-            if post.story_delay_minutes is not None
+            companion_at(post.scheduled_at, story_companion.delay_minutes, post.companion_time)
+            if story_companion and story_companion.delay_minutes is not None
             else None
         )
         source_paths = [settings.storage_dir / v.filepath for v in ordered]
@@ -367,14 +371,16 @@ async def sync_outpost_status() -> None:
         )
         in_flight: list[InstagramPost] = []
         for post in result.scalars().all():
+            reel = find_companion(post, "reel")
+            story = find_companion(post, "story")
             feed_done = (post.outpost_status or "") in terminal_feed
             reel_done = (
-                post.outpost_reel_status is None
-                or post.outpost_reel_status in terminal_reel
+                not reel or reel.outpost_status is None
+                or reel.outpost_status in terminal_reel
             )
             story_done = (
-                post.story_status is None
-                or post.story_status in terminal_story
+                not story or story.status is None
+                or story.status in terminal_story
             )
             if not (feed_done and reel_done and story_done):
                 in_flight.append(post)
@@ -413,8 +419,10 @@ async def _apply_remote_state(post_id: uuid.UUID, remote: dict) -> None:
             changed = True
 
         remote_reel = remote.get("reel_status")
-        if remote_reel != post.outpost_reel_status:
-            post.outpost_reel_status = remote_reel
+        reel = find_companion(post, "reel")
+        if remote_reel != (reel.outpost_status if reel else None):
+            reel = get_or_create_companion(post, "reel")
+            reel.outpost_status = remote_reel
             changed = True
 
         # Mirror Instagram-side feed publication into the canonical fields.
@@ -437,38 +445,47 @@ async def _apply_remote_state(post_id: uuid.UUID, remote: dict) -> None:
 
         # Reel companion mirror.
         if remote_reel == "posted":
+            reel = get_or_create_companion(post, "reel")
             reel_media = remote.get("reel_media_id")
-            if reel_media and post.reel_media_id != reel_media:
-                post.reel_media_id = reel_media
+            if reel_media and reel.media_id != reel_media:
+                reel.media_id = reel_media
                 changed = True
-            if post.reel_status != "posted":
-                post.reel_status = "posted"
-                if not post.reel_scheduled_at:
-                    post.reel_scheduled_at = now
+            if reel.status != "posted":
+                reel.status = "posted"
+                if not reel.scheduled_at:
+                    reel.scheduled_at = now
                 changed = True
-        elif remote_reel == "failed" and post.reel_status != "failed":
-            post.reel_status = "failed"
-            changed = True
+        elif remote_reel == "failed":
+            reel = find_companion(post, "reel")
+            if not reel or reel.status != "failed":
+                reel = get_or_create_companion(post, "reel")
+                reel.status = "failed"
+                changed = True
 
         # Story companion mirror.
         remote_story = remote.get("story_status")
-        if remote_story and remote_story != post.story_status:
-            post.story_status = remote_story
+        story = find_companion(post, "story")
+        if remote_story and remote_story != (story.status if story else None):
+            story = get_or_create_companion(post, "story")
+            story.status = remote_story
             changed = True
         remote_story_media = remote.get("story_media_ids")
-        if remote_story_media and post.story_media_ids != remote_story_media:
-            post.story_media_ids = remote_story_media
+        if remote_story_media and remote_story_media != (story.media_ids if story else None):
+            story = get_or_create_companion(post, "story")
+            story.media_ids = remote_story_media
             changed = True
-        if remote_story == "posted" and not post.story_scheduled_at:
-            post.story_scheduled_at = now
+        if remote_story == "posted" and not (story.scheduled_at if story else None):
+            story = get_or_create_companion(post, "story")
+            story.scheduled_at = now
             changed = True
 
         if changed:
             post.updated_at = now
             await db.commit()
+            reel = find_companion(post, "reel")
             logger.info(
                 "outpost sync %s → status=%s reel=%s media=%s",
-                post_id, post.status, post.reel_status, post.instagram_media_id,
+                post_id, post.status, reel.status if reel else None, post.instagram_media_id,
             )
 
 
@@ -592,12 +609,19 @@ async def _finalize_outpost_dispatch(
             return
         fresh.outpost_id          = outpost_id
         fresh.outpost_status      = body.get("status", "queued")
-        fresh.outpost_reel_status = "pending" if has_reel else None
+        if has_reel:
+            get_or_create_companion(fresh, "reel").outpost_status = "pending"
+        else:
+            existing_reel = find_companion(fresh, "reel")
+            if existing_reel:
+                existing_reel.outpost_status = None
         if reel_filename is not None:
-            fresh.reel_video_filename = reel_filename
-        if story_publish_at is not None and not fresh.story_status:
-            fresh.story_status       = "pending"
-            fresh.story_scheduled_at = story_publish_at
+            get_or_create_companion(fresh, "reel").video_filename = reel_filename
+        existing_story = find_companion(fresh, "story")
+        if story_publish_at is not None and not (existing_story.status if existing_story else None):
+            story = get_or_create_companion(fresh, "story")
+            story.status       = "pending"
+            story.scheduled_at = story_publish_at
         fresh.outpost_dispatched_at = now
         fresh.error                 = None
         fresh.updated_at            = now

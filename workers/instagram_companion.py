@@ -20,6 +20,7 @@ import httpx
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import InstagramPost, Video
+from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
     REEL_POLL_TIMEOUT,
@@ -75,9 +76,10 @@ async def publish_stories(post_id: uuid.UUID) -> None:
     async with AsyncSessionLocal() as db:
         post = await db.get(InstagramPost, post_id)
         if post:
-            post.story_status    = status
-            post.story_media_ids = media_ids or None
-            post.updated_at      = datetime.now(timezone.utc)
+            story = get_or_create_companion(post, "story")
+            story.status     = status
+            story.media_ids  = media_ids or None
+            post.updated_at  = datetime.now(timezone.utc)
             await db.commit()
 
 
@@ -97,6 +99,8 @@ async def publish_reel(post_id: uuid.UUID) -> None:
         # mixed feed post are skipped here — they're already in the carousel.
         image_refs = [r for r in await load_media_refs(post, db) if r.kind == "image"]
         caption = post.caption or ""
+        reel_companion = find_companion(post, "reel")
+        reel_video_id = reel_companion.video_id if reel_companion else None
 
     video_path: Path | None = None
     video_is_temp = True  # False when reusing an existing generated video
@@ -104,12 +108,12 @@ async def publish_reel(post_id: uuid.UUID) -> None:
     status = "failed"
 
     try:
-        if post.reel_video_id:
+        if reel_video_id:
             # ── Use an existing generated video ───────────────────────────────
             async with AsyncSessionLocal() as db2:
-                vid = await db2.get(Video, post.reel_video_id)
+                vid = await db2.get(Video, reel_video_id)
             if not vid or vid.status != "done" or not vid.filepath:
-                raise ValueError(f"Referenced video {post.reel_video_id} is not ready")
+                raise ValueError(f"Referenced video {reel_video_id} is not ready")
             video_path = await ensure_ig_compatible(settings.storage_dir / vid.filepath)
             video_is_temp = False
             logger.info("Reel: using existing video %s for post %s", vid.filename, post_id)
@@ -172,9 +176,10 @@ async def publish_reel(post_id: uuid.UUID) -> None:
     async with AsyncSessionLocal() as db:
         post = await db.get(InstagramPost, post_id)
         if post:
-            post.reel_status   = status
-            post.reel_media_id = reel_media_id
-            post.updated_at    = datetime.now(timezone.utc)
+            reel = get_or_create_companion(post, "reel")
+            reel.status      = status
+            reel.media_id    = reel_media_id
+            post.updated_at  = datetime.now(timezone.utc)
             await db.commit()
 
 

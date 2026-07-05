@@ -22,6 +22,7 @@ from core.db import get_db
 from core.models import InstagramPost, Image, Video
 from core.scheduling import companion_at
 from core.tasks import safe_create_task
+from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.graph import missing_config
 from services.instagram.media import replace_media_items
 from services.instagram.publisher import publish_feed, schedule_feed
@@ -140,6 +141,8 @@ def _serialize(
     image_ids = _image_ids_in_order(post)
     primary_id = image_ids[0] if image_ids else None
     primary = (images or {}).get(primary_id) if primary_id else None
+    story = find_companion(post, "story")
+    reel = find_companion(post, "reel")
     d = {
         "id": str(post.id),
         "kind": post.kind,
@@ -151,23 +154,23 @@ def _serialize(
         "scheduled_at": post.scheduled_at.isoformat(),
         "status": post.status,
         "instagram_media_id": post.instagram_media_id,
-        "story_delay_minutes":  post.story_delay_minutes,
-        "reel_delay_minutes":   post.reel_delay_minutes,
+        "story_delay_minutes":  story.delay_minutes if story else None,
+        "reel_delay_minutes":   reel.delay_minutes if reel else None,
         "companion_time":       post.companion_time,
-        "story_scheduled_at":   post.story_scheduled_at.isoformat() if post.story_scheduled_at else None,
-        "reel_scheduled_at":    post.reel_scheduled_at.isoformat() if post.reel_scheduled_at else None,
-        "story_status":    post.story_status,
-        "story_media_ids": post.story_media_ids,
-        "reel_status":     post.reel_status,
-        "reel_media_id":   post.reel_media_id,
-        "reel_video_id":   str(post.reel_video_id) if post.reel_video_id else None,
+        "story_scheduled_at":   story.scheduled_at.isoformat() if story and story.scheduled_at else None,
+        "reel_scheduled_at":    reel.scheduled_at.isoformat() if reel and reel.scheduled_at else None,
+        "story_status":    story.status if story else None,
+        "story_media_ids": story.media_ids if story else None,
+        "reel_status":     reel.status if reel else None,
+        "reel_media_id":   reel.media_id if reel else None,
+        "reel_video_id":   str(reel.video_id) if reel and reel.video_id else None,
         "feed_creation_id": post.feed_creation_id,
-        "reel_creation_id": post.reel_creation_id,
+        "reel_creation_id": reel.creation_id if reel else None,
         "remote_scheduled": bool(post.feed_creation_id),
         "dispatch_target":       post.dispatch_target,
         "outpost_id":            post.outpost_id,
         "outpost_status":        post.outpost_status,
-        "outpost_reel_status":   post.outpost_reel_status,
+        "outpost_reel_status":   reel.outpost_status if reel else None,
         "outpost_dispatched_at": post.outpost_dispatched_at.isoformat() if post.outpost_dispatched_at else None,
         "error":           post.error,
         "created_at": post.created_at.isoformat(),
@@ -232,8 +235,9 @@ def _serialize(
         ]
         # Companion reel video (kind='feed' with reel_video_id) — separate
         # field so the frontend can decide whether to badge the feed post.
-        if post.reel_video_id and post.reel_video_id in videos:
-            cv = videos[post.reel_video_id]
+        reel_companion = find_companion(post, "reel")
+        if reel_companion and reel_companion.video_id and reel_companion.video_id in videos:
+            cv = videos[reel_companion.video_id]
             d["reel_video"] = {
                 "id": str(cv.id),
                 "filename": cv.filename,
@@ -267,8 +271,9 @@ async def list_posts(
                 video_ids.add(m.video_id)
         if p.reel_video_ids:
             video_ids.update(p.reel_video_ids)
-        if p.reel_video_id:
-            video_ids.add(p.reel_video_id)
+        reel = find_companion(p, "reel")
+        if reel and reel.video_id:
+            video_ids.add(reel.video_id)
 
     images: dict[uuid.UUID, Image] = {}
     if image_ids:
@@ -365,15 +370,18 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
         caption=body.caption,
         scheduled_at=scheduled_at,
         status="scheduled",
-        story_delay_minutes=body.story_delay_minutes,
-        reel_delay_minutes=body.reel_delay_minutes if kind == "feed" else None,
         companion_time=body.companion_time,
-        reel_video_id=body.reel_video_id if kind == "feed" else None,
         dispatch_target=dispatch_target,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
+    if body.story_delay_minutes is not None:
+        get_or_create_companion(post, "story").delay_minutes = body.story_delay_minutes
     if kind == "feed":
+        if body.reel_delay_minutes is not None:
+            get_or_create_companion(post, "reel").delay_minutes = body.reel_delay_minutes
+        if body.reel_video_id is not None:
+            get_or_create_companion(post, "reel").video_id = body.reel_video_id
         await replace_media_items(post, media_tuples, db)
     db.add(post)
     await db.commit()
@@ -414,8 +422,9 @@ async def _load_media_for_post(
     video_ids: set[uuid.UUID] = set(_video_ids_in_carousel(post))
     if post.reel_video_ids:
         video_ids.update(post.reel_video_ids)
-    if post.reel_video_id:
-        video_ids.add(post.reel_video_id)
+    reel = find_companion(post, "reel")
+    if reel and reel.video_id:
+        video_ids.add(reel.video_id)
 
     images: dict[uuid.UUID, Image] = {}
     if image_ids:
@@ -494,29 +503,32 @@ async def update_post(
             await replace_media_items(post, items, db)
             invalidates_remote = True
     if "story_delay_minutes" in body.model_fields_set:
-        post.story_delay_minutes = body.story_delay_minutes
+        get_or_create_companion(post, "story").delay_minutes = body.story_delay_minutes
     if "reel_delay_minutes" in body.model_fields_set:
-        if body.reel_delay_minutes != post.reel_delay_minutes:
+        existing_reel = find_companion(post, "reel")
+        if body.reel_delay_minutes != (existing_reel.delay_minutes if existing_reel else None):
             invalidates_remote = True
-        post.reel_delay_minutes = body.reel_delay_minutes
+        get_or_create_companion(post, "reel").delay_minutes = body.reel_delay_minutes
     if "companion_time" in body.model_fields_set:
         if body.companion_time != post.companion_time:
             invalidates_remote = True
         post.companion_time = body.companion_time
     if "reel_video_id" in body.model_fields_set:
-        if body.reel_video_id != post.reel_video_id:
+        existing_reel = find_companion(post, "reel")
+        if body.reel_video_id != (existing_reel.video_id if existing_reel else None):
             invalidates_remote = True
-        post.reel_video_id = body.reel_video_id
+        get_or_create_companion(post, "reel").video_id = body.reel_video_id
 
     creation_ids_to_drop: list[str] = []
     if invalidates_remote and post.status == "scheduled":
         if post.feed_creation_id:
             creation_ids_to_drop.append(post.feed_creation_id)
             post.feed_creation_id = None
-        if post.reel_creation_id:
-            creation_ids_to_drop.append(post.reel_creation_id)
-            post.reel_creation_id = None
-            post.reel_status = None
+        reel = find_companion(post, "reel")
+        if reel and reel.creation_id:
+            creation_ids_to_drop.append(reel.creation_id)
+            reel.creation_id = None
+            reel.status = None
 
     post.updated_at = datetime.now(timezone.utc)
     await db.commit()
@@ -535,8 +547,9 @@ async def delete_post(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     post = await db.get(InstagramPost, post_id)
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
-    creation_ids = [c for c in (post.feed_creation_id, post.reel_creation_id) if c]
-    reel_filename = post.reel_video_filename
+    reel = find_companion(post, "reel")
+    creation_ids = [c for c in (post.feed_creation_id, reel.creation_id if reel else None) if c]
+    reel_filename = reel.video_filename if reel else None
     outpost_id = post.outpost_id
     await db.delete(post)
     await db.commit()
@@ -564,6 +577,8 @@ async def _update_outpost_post(
     changes, reel add/remove, source video swap, story delays.
     """
     requested = set(body.model_fields_set) - {"status"}
+    reel = find_companion(post, "reel")
+    story = find_companion(post, "story")
 
     # Forbidden fields are only flagged when the *value* actually changes —
     # the frontend always serialises every field, so presence alone is noise.
@@ -578,7 +593,7 @@ async def _update_outpost_post(
             bad.add("media")
     if "carousel_image_ids" in requested and new_carousel != old_carousel:
         bad.add("carousel_image_ids")
-    if "reel_video_id" in requested and body.reel_video_id != post.reel_video_id:
+    if "reel_video_id" in requested and body.reel_video_id != (reel.video_id if reel else None):
         bad.add("reel_video_id")
     if bad:
         raise HTTPException(
@@ -590,7 +605,7 @@ async def _update_outpost_post(
     # Reel and Story can only be retimed, not added/removed after dispatch
     # (add would need re-upload; remove would orphan an in-flight container).
     if "reel_delay_minutes" in requested:
-        was_set = post.reel_delay_minutes is not None
+        was_set = (reel.delay_minutes if reel else None) is not None
         now_set = body.reel_delay_minutes is not None
         if was_set != now_set:
             verb = "add" if now_set else "remove"
@@ -600,7 +615,7 @@ async def _update_outpost_post(
                         f"cancel and create a new post instead."),
             )
     if "story_delay_minutes" in requested:
-        was_set = post.story_delay_minutes is not None
+        was_set = (story.delay_minutes if story else None) is not None
         now_set = body.story_delay_minutes is not None
         if was_set != now_set:
             verb = "add" if now_set else "remove"
@@ -628,26 +643,28 @@ async def _update_outpost_post(
     if "companion_time" in requested and body.companion_time != post.companion_time:
         post.companion_time = body.companion_time
 
-    if "reel_delay_minutes" in requested and body.reel_delay_minutes != post.reel_delay_minutes:
-        post.reel_delay_minutes = body.reel_delay_minutes
-    if "story_delay_minutes" in requested and body.story_delay_minutes != post.story_delay_minutes:
-        post.story_delay_minutes = body.story_delay_minutes
+    if "reel_delay_minutes" in requested and body.reel_delay_minutes != (reel.delay_minutes if reel else None):
+        reel = get_or_create_companion(post, "reel")
+        reel.delay_minutes = body.reel_delay_minutes
+    if "story_delay_minutes" in requested and body.story_delay_minutes != (story.delay_minutes if story else None):
+        story = get_or_create_companion(post, "story")
+        story.delay_minutes = body.story_delay_minutes
 
     # If a companion exists and any timing input changed, recompute its
     # publish time and push the new value to the Pi.
     reel_timing = {"scheduled_at", "companion_time", "reel_delay_minutes"} & requested
     story_timing = {"scheduled_at", "companion_time", "story_delay_minutes"} & requested
 
-    if post.reel_delay_minutes is not None and reel_timing:
-        new_reel_at = companion_at(post.scheduled_at, post.reel_delay_minutes, post.companion_time)
-        if new_reel_at != post.reel_scheduled_at:
-            post.reel_scheduled_at = new_reel_at
+    if reel and reel.delay_minutes is not None and reel_timing:
+        new_reel_at = companion_at(post.scheduled_at, reel.delay_minutes, post.companion_time)
+        if new_reel_at != reel.scheduled_at:
+            reel.scheduled_at = new_reel_at
             pi_reel_publish_at = new_reel_at
 
-    if post.story_delay_minutes is not None and story_timing:
-        new_story_at = companion_at(post.scheduled_at, post.story_delay_minutes, post.companion_time)
-        if new_story_at != post.story_scheduled_at:
-            post.story_scheduled_at = new_story_at
+    if story and story.delay_minutes is not None and story_timing:
+        new_story_at = companion_at(post.scheduled_at, story.delay_minutes, post.companion_time)
+        if new_story_at != story.scheduled_at:
+            story.scheduled_at = new_story_at
             pi_story_publish_at = new_story_at
 
     if all(v is None for v in (pi_caption, pi_scheduled_at, pi_reel_publish_at, pi_story_publish_at)):

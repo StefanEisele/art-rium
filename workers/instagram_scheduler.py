@@ -25,6 +25,7 @@ from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import InstagramPost
 from core.tasks import safe_create_task
+from services.instagram.companions import find_companion
 from services.instagram.graph import missing_config
 from services.instagram.publisher import publish_feed
 from services.instagram.reel import reel_publish_time
@@ -88,16 +89,26 @@ class InstagramScheduler:
                 select(InstagramPost)
                 .where(InstagramPost.status == "posted")
                 .where(InstagramPost.dispatch_target == "local")
-                .where(InstagramPost.reel_delay_minutes.isnot(None))
-                .where(InstagramPost.reel_creation_id.is_(None))
-                .where(InstagramPost.reel_status.in_(("pending", None, "failed")))
             )
-            candidates = result.scalars().all()
+            # Reel-companion conditions used to be SQL WHERE clauses on flat
+            # columns; now that they live on PostCompanion (eager-loaded via
+            # `companions`), filter in Python — this table is tiny for a
+            # personal tool, so a coarse SQL WHERE + Python filter is simpler
+            # and safer than replicating the old `IN (..., NULL)` semantics
+            # in a JOIN.
+            candidates = [
+                p for p in result.scalars().all()
+                if (reel := find_companion(p, "reel"))
+                and reel.delay_minutes is not None
+                and reel.creation_id is None
+                and reel.status in ("pending", None, "failed")
+            ]
             due_ids: list = []
             for post in candidates:
-                publish_at = post.reel_scheduled_at or reel_publish_time(post)
-                if publish_at and publish_at <= now and post.reel_status != "processing":
-                    post.reel_status = "processing"
+                reel = find_companion(post, "reel")
+                publish_at = reel.scheduled_at or reel_publish_time(post)
+                if publish_at and publish_at <= now and reel.status != "processing":
+                    reel.status = "processing"
                     due_ids.append(post.id)
             if due_ids:
                 await db.commit()

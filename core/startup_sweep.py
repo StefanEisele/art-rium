@@ -14,10 +14,10 @@ genuinely in progress yet. So no age/threshold check is needed here; every
 match is real. Sweep runs once, before the scheduler/listener start, and
 marks each orphan "failed" with an explanatory error message.
 
-InstagramPost.reel_status is the one exception worth calling out: marking
-it "failed" isn't just cosmetic — the scheduler's fallback query selects
-`reel_status IN (pending, NULL, failed)`, so this also re-queues the row
-for its next 60s tick instead of leaving it stuck forever.
+PostCompanion(kind='reel').status is the one exception worth calling out:
+marking it "failed" isn't just cosmetic — the scheduler's fallback query
+selects rows with reel status IN (pending, NULL, failed), so this also
+re-queues the row for its next 60s tick instead of leaving it stuck forever.
 
 outpost_status / outpost_reel_status are deliberately NOT swept here —
 `services.instagram.outpost.sync_outpost_status()` already reconciles
@@ -29,7 +29,7 @@ import logging
 from sqlalchemy import select
 
 from core.db import AsyncSessionLocal
-from core.models import ImprovSession, InstagramPost, Song, Video
+from core.models import ImprovSession, PostCompanion, Song, Video
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +63,12 @@ async def sweep_stuck_jobs() -> None:
             n += 1
 
         result = await db.execute(
-            select(InstagramPost).where(InstagramPost.reel_status == "processing")
+            select(PostCompanion).where(
+                PostCompanion.kind == "reel", PostCompanion.status == "processing"
+            )
         )
-        for post in result.scalars():
-            post.reel_status = "failed"
+        for companion in result.scalars():
+            companion.status = "failed"
             n += 1
 
         if n:

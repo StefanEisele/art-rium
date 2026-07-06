@@ -60,19 +60,6 @@
     }
     textarea:focus, input:focus { border-color: var(--accent); }
 
-    /* ── Style template dropdown ── */
-    .template-select {
-      width: 100%; background: var(--surface); border: 1.5px solid var(--border);
-      border-radius: 10px; color: var(--text-dim); font-size: 14px;
-      padding: 11px 14px; outline: none; font-family: inherit;
-      transition: border-color 0.2s; -webkit-appearance: none; appearance: none;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%238e8e93' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
-      background-repeat: no-repeat;
-      background-position: right 14px center;
-    }
-    .template-select:focus { border-color: var(--accent); }
-    .template-select option { background: var(--surface2); color: var(--text); }
-
     #prompt { min-height: 130px; resize: none; line-height: 1.55; }
 
     .char-count { font-size: 11px; color: var(--text-dim); text-align: right; margin-top: -4px; }
@@ -384,7 +371,6 @@
     <!-- Prompt -->
     <div class="field">
       <label id="prompt-label">Prompt</label>
-      <select id="template-select" class="template-select"></select>
       <textarea id="prompt" placeholder="Describe your image…"
                 maxlength="3000" oninput="onPromptInput()"></textarea>
       <div class="char-count"><span id="char-count">0</span> / <span id="char-limit">3000</span></div>
@@ -508,7 +494,7 @@
 const CONFIG = {
   maxPromptLength: 3000,
   maxIdeaLength:   500,    // shorter limit when running the enhancer
-  enhanceN:        6,      // styles A–F by default; bump to 7 to include the aerial overlay
+  enhanceN:        4,      // all four moodboard-derived styles (A–D)
   maxBatchCount: 10,
   maxBatchMin: 1,
   wsReconnectDelay: 3500,
@@ -538,7 +524,6 @@ const DOM_IDS = {
   batchRow: 'batch-row',
   loraRow: 'lora-row',
   shareInstagramBtn: 'share-instagram-btn',
-  templateSelect: 'template-select',
   modeDirectBtn: 'mode-direct',
   modeEnhanceBtn: 'mode-enhance',
   enhanceReview: 'enhance-review',
@@ -562,54 +547,6 @@ const STORAGE_KEYS = {
   ...ArtRium.STORAGE_KEYS,
   images: 'z_generated_images',
 };
-
-// ═══════════════════════════════════════════════════════════════════════════
-// STYLE TEMPLATES (personal style archive — Z-Image Turbo)
-// ═══════════════════════════════════════════════════════════════════════════
-const PROMPT_TEMPLATES = [
-  {
-    name: "Oil Diffusion Portrait",
-    prompt: `Iron oxide spreading through a mineral blue field — rust as corrosion, not as color. The orange enters the way oxidation spreads across aged steel: slow, irreversible, following the grain of the surface rather than any designed path. The blue is not a background — it is a pressurized environment, dense as deep water, a field the subject exists within rather than in front of. Heavy and lightless. Where the two zones collide, forms erode: surface memory dissolves, structure gives way to chemical process. Portrait format. The image should read like a cross-section of something that has weathered for decades — material fatigue rendered in a single frame. Archival photographic quality, heavy analog grain, no digital smoothing. No watermark, no text overlays, sharp focus, professional quality.`,
-  },
-  {
-    name: "Recursive Identities",
-    prompt: `Raw industrial pigment — acrylic as a physical substance with mass and viscosity, not decoration. Paint ribboning under its own weight, surface tension holding the pour together as a continuous filament before it breaks. Burnt copper oxide bleeding into slate mineral blue, cream white settling into the low points. The freeze-frame captures not motion but physics — the exact moment before surface tension fails and the ribbon separates. Forms dissolve not in motion but in material fatigue — like a surface stressed past its structural threshold. Dramatic raking light from upper left, revealing texture across every plane. Canon 5D Mark IV with 85mm f/1.4 lens, shallow depth of field, foreground detail sharp enough to show material grain. Hyperrealistic photography of an impossible material state, tactile surface rendering. No watermark, no logos, no text overlays, sharp focus, professional quality.`,
-  },
-  {
-    name: "Geometric Portal",
-    prompt: `Heavy structural geometry draped in fabric that carries weight and memory — not decorative, not pristine. The textile shows the marks of load: pulled tight over edges, pooling where gravity wins, the specific drape of something substantial that has been used. The structural anchor points show iron oxide corrosion — rust bleeding down into the fabric from the places where stress is concentrated, orange staining the white material below the load point. Warm amber light reads as thermal rather than atmospheric — heat from within, not ambience. Wide-angle environmental shot. Shot on Sony A7R V with 35mm f/2 lens. Hyperrealistic photography emphasizing material weight and the evidence of endured stress. No watermark, no text overlays, sharp focus, professional quality.`,
-  },
-  {
-    name: "Paint as Connection",
-    prompt: `Paint as matter in gravitational relationship: a single filament of burnt copper oxide pigment falling under its own weight, viscous enough to hold as a continuous thread before the drop forms. The moment of surface contact — where the falling substance meets what receives it. Extreme close-up, macro detail revealing pigment suspended in medium, the grain of the material itself. Mineral blue atmosphere in the background — dim, vertical, pressurized. The image reads as evidence of a physical process rather than a designed composition. Hasselblad medium format with 80mm macro lens, Kodak Portra 400, film grain reinforcing the material weight. No watermark, sharp focus, professional quality.`,
-  },
-  {
-    name: "Rust Thread / Filament",
-    prompt: `A single filament of iron oxide — rust orange under the physics of gravity, thin enough to be transparent at the edges, thick enough to hold its form as a continuous thread. It connects two states: what is above and what is below, the source and what receives it. The surrounding field is mineral blue — water, haze, or atmosphere indistinguishable from each other in density and tone. The filament is the only warm element in a cold field. It reads as both intrusion and tether. Where the thread meets a surface, the contact point is the center of the composition. Photorealistic, natural light, no studio artifice. The image should feel like documentary evidence of something that cannot be documented. Analog grain, no digital smoothing. No watermark, no text overlays, sharp focus, professional quality.`,
-  },
-  {
-    name: "Submerged Field",
-    prompt: `The mineral blue of deep water as total environment — not background but pressure, density, immersion. Rust orange enters from below, rising as a thermal plume or dissolving upward the way iron oxide behaves when sediment is disturbed: branching, biological in shape, driven by convection rather than intention. The air-water boundary is visible above — a threshold, a membrane between states. Light refracts from the surface in caustic patterns, making the blue field luminous at the edges while remaining heavy at depth. The orange substance rises toward the boundary without reaching it. Underwater photographic quality — the specific color desaturation of water at depth, bubbles as material evidence, sediment as texture at the base. No watermark, no text overlays, sharp focus, professional quality.`,
-  },
-  {
-    name: "Membrane + Echo Figure",
-    prompt: `A translucent barrier as material subject — industrial plastic sheeting, gauze, or architectural membrane with its own physical presence: creases, condensation, the slight milkiness of a surface that has been under stress. A figure seen through the membrane, with ghost versions visible at the edges — the same form repeated at lower opacity, slightly offset, as if the transparency of the barrier multiplies rather than clarifies. The structural suspension points of the membrane show iron oxide rust — corrosion at the load-bearing anchor, bleeding downward into the white material below. The environment behind and around everything: dim mineral blue haze. The rust orange exists only at the structural failure point — specific, located, earned by time. Photorealistic, dim diffused interior light. Leica M10 with 35mm lens, Kodak Tri-X pushed to 1600, heavy grain. No watermark, no text overlays, sharp focus, professional quality.`,
-  },
-  {
-    name: "Dystopian Overexposed Portrait",
-    prompt: `High-resolution, cinematic, surreal portrait photography blending hyperrealistic detail with a gritty, filmic, dystopian aesthetic. --SUBJECT PLACEHOLDER--
-
-Lighting is aggressively overexposed and intentionally blown out, with extreme highlights blooming across the frame. Light sources appear oversaturated and uncontrolled, washing parts of the subject in harsh white glare while simultaneously flattening certain details into luminous abstraction. Despite this, fine micro-details remain visible in shadowed regions, creating a tension between clarity and erasure. The lighting suggests an overexposed urban or industrial environment, possibly artificial city illumination or a floodlit exterior space.
-
-The overall image is monochrome, rendered in a restricted grayscale palette ranging from deep charcoal blacks to bright, almost pure whites. This absence of color intensifies the clinical, dystopian mood and emphasizes form, texture, and contrast. The tonal range is extreme, with crushed blacks and clipped highlights contributing to a raw, unforgiving visual style.
-
-The background is heavily out of focus, dissolving into a soft, abstract gradient of blurred light and shadow. It suggests an indistinct urban or architectural environment without providing any readable structures. The shallow depth of field isolates the subject completely, reinforcing a sense of alienation and psychological disconnection from the environment.
-
-A fine layer of film grain overlays the entire image, adding a vintage analog texture reminiscent of degraded film stock or archival photography. Subtle motion blur and sensor noise enhance the impression of instability, as if the image were captured in a fleeting, overexposed moment between reality and collapse.
-
-The overall composition is unsettling, futuristic, and contemplative — merging photographic realism with a dystopian documentary aesthetic. The style combines sci-fi restraint with archival portraiture, evoking themes of anonymity, alienation, and erosion under extreme artificial illumination.`,
-  },
-];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STATE
@@ -992,7 +929,6 @@ const setMode = (mode) => {
   //   enhance → idea text must NOT contain the trigger (Qwen would treat
   //             it as a literal noun); we strip it on entry, re-add on exit.
   const promptEl = $(DOM_IDS.prompt);
-  const tplEl = $(DOM_IDS.templateSelect);
   const trigger = loraRegistry.triggerOf(state.loraName);
 
   if (mode === 'enhance') {
@@ -1000,7 +936,6 @@ const setMode = (mode) => {
     promptEl.placeholder = "e.g. 'iron oxide spreading through deep blue water'";
     promptEl.maxLength = CONFIG.maxIdeaLength;
     setText(DOM_IDS.charLimit, String(CONFIG.maxIdeaLength));
-    tplEl.style.display = 'none';
     if (trigger && promptEl.value.startsWith(trigger)) {
       promptEl.value = promptEl.value.slice(trigger.length).replace(/^[\s,]+/, '');
     }
@@ -1009,7 +944,6 @@ const setMode = (mode) => {
     promptEl.placeholder = 'Describe your image…';
     promptEl.maxLength = CONFIG.maxPromptLength;
     setText(DOM_IDS.charLimit, String(CONFIG.maxPromptLength));
-    tplEl.style.display = '';
     if (trigger && !promptEl.value.startsWith(trigger)) {
       promptEl.value = promptEl.value ? `${trigger} ${promptEl.value}` : trigger;
     }
@@ -1231,31 +1165,6 @@ const buildHeaderButtons = () => {
   }));
 };
 
-const buildTemplateSelect = () => {
-  const sel = $(DOM_IDS.templateSelect);
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.disabled = true;
-  placeholder.selected = true;
-  placeholder.textContent = '— load style template —';
-  sel.appendChild(placeholder);
-
-  PROMPT_TEMPLATES.forEach((tpl, i) => {
-    const opt = document.createElement('option');
-    opt.value = i;
-    opt.textContent = tpl.name;
-    sel.appendChild(opt);
-  });
-
-  sel.addEventListener('change', () => {
-    const idx = parseInt(sel.value);
-    if (isNaN(idx) || !PROMPT_TEMPLATES[idx]) return;
-    $(DOM_IDS.prompt).value = PROMPT_TEMPLATES[idx].prompt;
-    onPromptInput();
-    sel.value = '';
-  });
-};
-
 const buildBatchRow = () => {
   const row = $(DOM_IDS.batchRow);
   for (let i = 1; i <= CONFIG.maxBatchCount; i++) {
@@ -1294,7 +1203,6 @@ const buildLoraButtons = async () => {
 };
 
 window.addEventListener('load', async () => {
-  buildTemplateSelect();
   buildBatchRow();
   buildHeaderButtons();
   await buildLoraButtons();

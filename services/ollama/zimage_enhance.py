@@ -1,7 +1,7 @@
 """
 Z-Image Turbo prompt enhancer — idea -> N styled prompts.
 Backed by prompts/zimage-enhancer.md (system template, with {STYLE_BLOCK}
-placeholder) and prompts/zimage-styles.md (six-style signature library + G).
+placeholder) and prompts/zimage-styles.md (four-style signature library).
 """
 import asyncio
 import logging
@@ -16,9 +16,9 @@ from services.ollama.chat import _read_prompt
 
 logger = logging.getLogger(__name__)
 
-# Deterministic rotation. A..F is the default 6-style set; G is the optional
-# aerial overlay, only chosen if the caller asks for n >= 7 styles.
-_ZIMAGE_STYLE_SECTIONS = ("A", "B", "C", "D", "E", "F", "G")
+# Deterministic rotation across the full four-style set — all equally
+# weighted defaults, no optional/overflow tier.
+_ZIMAGE_STYLE_SECTIONS = ("A", "B", "C", "D")
 
 
 @lru_cache(maxsize=1)
@@ -30,7 +30,7 @@ def _zimage_style_blocks() -> dict[str, str]:
     """
     text = _read_prompt("zimage-styles.md")
     pattern = re.compile(
-        r"^##\s+Style\s+([A-G])\b.*?(?=^##\s+|\Z)",
+        r"^##\s+Style\s+([A-D])\b.*?(?=^##\s+|\Z)",
         re.MULTILINE | re.DOTALL,
     )
     return {m.group(1): m.group(0).strip() for m in pattern.finditer(text)}
@@ -115,16 +115,16 @@ async def _enhance_one_zimage(idea: str, style_letter: str, timeout: float) -> s
 async def enhance_zimage_prompts(
     idea: str,
     *,
-    n: int = 6,
+    n: int = 4,
     timeout: float = 120.0,
 ) -> list[dict[str, str]]:
     """
     Enhance a short user idea into *n* Z-Image Turbo prompts, one per style.
 
-    Iterates through styles A..F (and G for n=7) and dispatches one Qwen
-    call per style. Calls run concurrently — Ollama serialises on its own
-    queue if the model is single-instance, so wall time is roughly
-    n × single_call_latency on shared hardware.
+    Iterates through styles A..D and dispatches one Qwen call per style.
+    Calls run concurrently — Ollama serialises on its own queue if the model
+    is single-instance, so wall time is roughly n × single_call_latency on
+    shared hardware.
 
     Returns a list of {style, name, prompt} dicts in style order. Styles
     that fail (timeout, empty response, Ollama error) are SKIPPED, so the

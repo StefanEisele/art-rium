@@ -59,7 +59,7 @@ class GenerateRequest(BaseModel):
 
 class EnhancePromptsRequest(BaseModel):
     idea: str
-    n: int = 6
+    n: int = 4
 
 
 @router.get("/api/loras", dependencies=[Depends(require_auth)])
@@ -122,14 +122,14 @@ async def generate(req: GenerateRequest, request: Request):
 @router.post("/api/prompts/enhance", dependencies=[Depends(require_auth)])
 async def enhance_prompts(body: EnhancePromptsRequest):
     """Run the local Qwen prompt-enhancer over a short idea and return one
-    prompt per style family (A..F default, +G if n=7). Styles that fail
-    are silently skipped — the response may contain fewer than n entries."""
+    prompt per style family (A..D). Styles that fail are silently skipped —
+    the response may contain fewer than n entries."""
     from services.ollama.zimage_enhance import enhance_zimage_prompts
 
     if not body.idea.strip():
         raise HTTPException(status_code=400, detail="idea is required")
-    if not (1 <= body.n <= 7):
-        raise HTTPException(status_code=400, detail="n must be between 1 and 7")
+    if not (1 <= body.n <= 4):
+        raise HTTPException(status_code=400, detail="n must be between 1 and 4")
 
     try:
         prompts = await enhance_zimage_prompts(body.idea, n=body.n)

@@ -382,7 +382,7 @@ const MODE_CONFIG = {
 };
 
 const $ = id => document.getElementById(id);
-const api = (url, opts={}) => ArtRium.apiFetch(url, opts, state.apiKey);
+const api = ArtRium.makeApiFetch(() => state.apiKey);
 const withAuth = url => ArtRium.withAuth(url, state.apiKey);
 const PICKER_LIMIT = 60;
 const MAX_IMAGES = 6;

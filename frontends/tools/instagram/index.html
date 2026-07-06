@@ -1063,7 +1063,7 @@ const PICKER_LIMIT = 30;
 const MAX_CAROUSEL = 10;
 
 // ── API helpers ───────────────────────────────────────────────────────────────
-const api      = (url, opts = {}) => ArtRium.apiFetch(url, opts, state.apiKey);
+const api      = ArtRium.makeApiFetch(() => state.apiKey);
 const withAuth = (url) => ArtRium.withAuth(url, state.apiKey);
 
 // ── Utility ───────────────────────────────────────────────────────────────────

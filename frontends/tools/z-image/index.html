@@ -652,11 +652,7 @@ const selectButton = (selector, activeBtn) => {
   activeBtn.classList.add('active');
 };
 
-const apiFetch = (url, opts = {}) =>
-  ArtRium.apiFetch(url, opts, state.apiKey, () => {
-    ArtRium.clearApiKey();
-    location.href = '/';
-  });
+const apiFetch = ArtRium.makeApiFetch(() => state.apiKey);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STORAGE HELPERS

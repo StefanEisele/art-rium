@@ -257,7 +257,7 @@
 <script src="/shared/shared.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 <script>
-const { getApiKey, saveApiKey, apiFetch, withAuth, toast } = ArtRium;
+const { getApiKey, saveApiKey, makeApiFetch, withAuth, toast } = ArtRium;
 
 const state = {
   apiKey: getApiKey(),
@@ -270,6 +270,8 @@ const state = {
   pollTimer: null,
   refreshTimer: null,
 };
+
+const apiFetch = makeApiFetch(() => state.apiKey);
 
 const PIP_CORNER_KEY = 'improv_pip_corner_v1';
 const PIP_WIDTH_KEY  = 'improv_pip_width_v1';
@@ -319,7 +321,7 @@ function saveKey() {
 // ── Source video picker ────────────────────────────────────────────────────
 async function loadSourceVideos() {
   try {
-    const r = await apiFetch('/api/video', {}, state.apiKey, () => location.reload());
+    const r = await apiFetch('/api/video');
     const videos = await r.json();
     const grid = document.getElementById('video-grid');
     const ready = videos.filter(v =>
@@ -387,8 +389,7 @@ async function refreshShareLink() {
   });
   try {
     const r = await apiFetch(
-      '/api/improv/share-url/' + state.sourceVideo.id + '?' + params.toString(),
-      {}, state.apiKey, null
+      '/api/improv/share-url/' + state.sourceVideo.id + '?' + params.toString()
     );
     const data = await r.json();
     state.sourceFps = data.fps || 24;
@@ -552,7 +553,7 @@ async function submitSession() {
 async function pollJob() {
   if (!state.activeJobId) return;
   try {
-    const r = await apiFetch('/api/improv/sessions/' + state.activeJobId, {}, state.apiKey, null);
+    const r = await apiFetch('/api/improv/sessions/' + state.activeJobId);
     const s = await r.json();
     document.getElementById('status-msg').textContent =
       s.status === 'queued'     ? 'Queued — waiting to start…'
@@ -619,7 +620,7 @@ function makeMixCard(label, video) {
 // ── Recent sessions ────────────────────────────────────────────────────────
 async function loadRecent() {
   try {
-    const r = await apiFetch('/api/improv/sessions?limit=10', {}, state.apiKey, null);
+    const r = await apiFetch('/api/improv/sessions?limit=10');
     const list = await r.json();
     const box = document.getElementById('recent-list');
     if (!list.length) {

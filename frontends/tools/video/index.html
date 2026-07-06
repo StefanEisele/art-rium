@@ -442,7 +442,7 @@ const state = {
 };
 
 const $ = id => document.getElementById(id);
-const api = (url, opts={}) => ArtRium.apiFetch(url, opts, state.apiKey);
+const api = ArtRium.makeApiFetch(() => state.apiKey);
 const withAuth = url => ArtRium.withAuth(url, state.apiKey);
 const PICKER_LIMIT = 30;
 // i2v_multi and ltx_i2v share the per-image-clip workflow (one clip per image,

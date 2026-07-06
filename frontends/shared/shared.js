@@ -94,6 +94,17 @@ const ArtRium = (() => {
     return JSON.stringify(d);
   };
 
+  /**
+   * Bind apiFetch to a per-page API-key getter, with the standard 401 recovery
+   * (clear the stale key, return to the dashboard's auth panel).
+   * @param {function} getApiKey - returns the current key, e.g. () => state.apiKey
+   */
+  const makeApiFetch = (getApiKey) => (url, opts = {}) =>
+    apiFetch(url, opts, getApiKey(), () => {
+      clearApiKey();
+      location.href = '/';
+    });
+
   // ── Toast notification ─────────────────────────────────────────────────────
 
   let _toastTimer;
@@ -185,7 +196,7 @@ const ArtRium = (() => {
   return {
     STORAGE_KEYS, NODE_LABELS,
     getClientId, getApiKey, saveApiKey, clearApiKey,
-    getAuthHeaders, withAuth, apiFetch,
+    getAuthHeaders, withAuth, apiFetch, makeApiFetch,
     toast, setDot, connectWs,
   };
 

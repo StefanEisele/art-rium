@@ -735,7 +735,7 @@ const state = {
 const $ = id => document.getElementById(id);
 
 const withAuth  = (url) => ArtRium.withAuth(url, state.apiKey);
-const apiFetch  = (url, opts = {}) => ArtRium.apiFetch(url, opts, state.apiKey);
+const apiFetch  = ArtRium.makeApiFetch(() => state.apiKey);
 
 const formatDate = iso => {
   const d = new Date(iso);

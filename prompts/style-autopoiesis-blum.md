@@ -31,6 +31,30 @@ editorial.
 
 ---
 
+## Variant H-b — Blumquist-forward (palette pulled toward blumquist_)
+
+*Same sujet, but the rust/blue hero recedes into a desaturated teal-sage and
+dusty-lavender grade with a pearlescent membrane — closer to blumquist_'s own
+palette and mood than to the Signature Set's rust/blue.*
+
+Studio three-quarter or full-figure view on a 50mm f/1.8, medium-format
+Hasselblad rendering, on-camera flash dragged into a long exposure so a heavy
+ghosted double of the body smears across the frame, thick atmospheric haze and
+fog. A single Baroque-anatomy figure — marble-pale flesh, sculptural bone-white
+drapery — half-dissolves out of a slow viscous swirl of paint, its crown-splash
+rims softened and blurred rather than sharp. A pearlescent soap-bubble membrane
+sheathes the body and swallows the face entirely, iridescence catching faint
+rainbow light; the head is lost to motion blur and the membrane, identity
+erased. Palette heavily desaturated and analog: petrol teal and sage green
+shadow, dusty pink and lavender midtones, muted greyed rust as a single quiet
+accent rather than the hero, milky filmic highlights, deep shadow falloff.
+Texture: pearlescent film, wet satin sheen, soft paint marbling, particulate
+haze, hyperreal skin pores dissolving into blur, Cinestill grain and halation.
+Mood: hushed, sacral, uncanny, melancholic, timeless, psychedelic. Anchors:
+Paolo Roversi long-exposure editorial, Alberto Seveso ink figuration.
+
+---
+
 ## Enhancer wiring
 
 Two ways to use it:
@@ -57,9 +81,12 @@ Two ways to use it:
 
 ## Notes
 
-- Rust orange + dim blue stays the unifying palette, consistent with the rest of
-  the Signature Set — the infusion is in the *finish* (analog flash, haze, muted
-  grade, iridescence, dissolved face), not a palette swap.
+- In the main block, rust orange + dim blue stays the unifying palette,
+  consistent with the rest of the Signature Set — the infusion is in the *finish*
+  (analog flash, haze, muted grade, iridescence, dissolved face), not a palette
+  swap. Variant H-b deliberately breaks that palette toward blumquist_'s teal-
+  sage / dusty-lavender; use it as a standalone STYLE_BLOCK rather than in the
+  rust/blue rotation, since it will read as an outlier next to A–G.
 - Because Z-Image Turbo collapses contradictory style cues, do not combine this
   with Style C or F in the same prompt — they overlap and will fight. Rotate
   between them instead.

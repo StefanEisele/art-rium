@@ -1,15 +1,26 @@
 """
-Key-frame video generation — two workflow types:
+Key-frame video generation — three workflow types, all sharing the same
+per-segment "generate → review → assemble" pipeline:
 
-  i2v_multi  Each image is animated independently (WanImageToVideo), clips concatenated.
+  i2v_multi  Each image is animated independently (WanImageToVideo).
+             Supports 1–10 images with per-image prompts and frame counts.
+
+  ltx_i2v    Each image is animated independently via LTX-2.3 (native audio).
              Supports 1–6 images with per-image prompts and frame counts.
 
-  flf2v      Images are used as first/last key frames (WanFirstLastFrameToVideo).
-             Requires 2–3 images with a shared prompt.
+  flf2v      Each adjacent pair of key frames becomes its own independent
+             transition clip (WanFirstLastFrameToVideo) — the same
+             per-segment pattern as i2v_multi, but per PAIR. Supports
+             2–20 images (1–19 transitions), each with its own prompt and
+             frame count. Prompts can be auto-suggested in one VLM call via
+             POST /api/video/suggest-transitions.
 
 POST /api/video/generate            → enqueue job, return {video_id}
+POST /api/video/suggest-transitions → VLM-suggested per-transition prompts (flf2v)
 GET  /api/video/jobs/{id}           → poll status
 GET  /api/video/jobs/{id}/progress  → lightweight progress (ComfyUI queue + phase)
+GET  /api/video/jobs/{id}/segments  → per-segment review list (multi-clip jobs)
+POST /api/video/jobs/{id}/assemble  → concatenate chosen segments
 GET  /api/video/thumb/{id}          → first-frame JPEG thumbnail
 GET  /api/video/file/{fname}        → serve MP4
 GET  /api/videos                    → list all videos
@@ -34,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
+from core.imaging import prepare_jpg_for_web
 from core.models import Image, Song, Video
 from core.tasks import safe_create_task
 from core.video_thumb import make_video_thumbnail
@@ -44,6 +56,7 @@ from services.comfy.client import (
     queue_info,
     upload_image,
 )
+from services.ollama.analysis import generate_transition_prompts
 from services.video.soundtrack import mux_soundtrack
 
 logger = logging.getLogger(__name__)
@@ -86,22 +99,21 @@ _LTX_SIGMAS_HI = "0.85, 0.7250, 0.4219, 0.0"
 
 POLL_INTERVAL = 15    # seconds between ComfyUI history polls
 POLL_TIMEOUT  = 1800  # 30 minutes max
-SAVE_NODE_ID  = "save"
 
 # ── Pydantic ──────────────────────────────────────────────────────────────────
 
 class GenerateVideoRequest(BaseModel):
     image_ids: list[uuid.UUID]
-    workflow: str = "i2v_multi"    # "i2v_multi" | "flf2v"
+    workflow: str = "i2v_multi"    # "i2v_multi" | "ltx_i2v" | "flf2v"
     width:  int = 1088
     height: int = 1088
-    frame_count: int = 25          # flf2v: frames per transition; i2v_multi: per-image fallback
+    frame_count: int = 25          # fallback frame count when prompts/frame_counts arrays are absent
     fps:    int = 24
-    prompt: str = ""               # flf2v: shared prompt; i2v_multi: per-image fallback
-    prompts: list[str] = []        # i2v_multi: per-image prompts (one per image_id)
-    frame_counts: list[int] = []   # i2v_multi: per-image frame counts (one per image_id)
-    rife_multiplier: int = 3       # i2v_multi: RIFE VFI frame interpolation factor (2/3/4)
-    pingpong: bool = False         # i2v_multi: VHS_VideoCombine pingpong (boomerang) flag
+    prompt: str = ""               # fallback prompt when `prompts` is absent/mismatched length
+    prompts: list[str] = []        # i2v_multi/ltx_i2v: one per image; flf2v: one per transition (n-1)
+    frame_counts: list[int] = []   # i2v_multi/ltx_i2v: one per image; flf2v: one per transition (n-1)
+    rife_multiplier: int = 3       # i2v_multi/flf2v: RIFE VFI frame interpolation factor (2/3/4); unused by ltx_i2v
+    pingpong: bool = False         # i2v_multi: VHS_VideoCombine pingpong (boomerang) flag; unused by flf2v
 
 
 class AssembleRequest(BaseModel):
@@ -168,51 +180,41 @@ def _transition_nodes(
     return nodes, p + "decode"
 
 
-def _build_flf2v_workflow(
-    comfy_filenames: list[str],
-    width: int, height: int, frame_count: int, fps: int,
-    prompt: str, vid_prefix: str,
-) -> dict:
-    """FLF2V: transitions between key frames → ImageBatch chain → RIFE ×3 → VHS h265."""
-    n_img = len(comfy_filenames)
-    wf: dict = {}
+def _build_flf2v_single_workflow(
+    start_fname: str,
+    end_fname: str,
+    prompt: str,
+    frame_count: int,
+    width: int, height: int, fps: int,
+    vid_prefix: str,
+    rife_multiplier: int,
+) -> tuple[dict, str]:
+    """Single key-frame transition with its own VHS save.
 
-    img_ids: list[str] = []
-    for i, fname in enumerate(comfy_filenames):
-        nid = f"img{i + 1}"
-        wf[nid] = {"class_type": "LoadImage", "inputs": {"image": fname, "upload": "image"}}
-        img_ids.append(nid)
+    One ComfyUI submission per transition keeps the VRAM peak independent of
+    how many key frames the user picked — mirrors _build_i2v_single_workflow.
+    Appends the raw end key frame before RIFE so the clip lands crisply on
+    the exact chosen photo rather than a diffusion-approximated frame.
+    """
+    wf: dict = {
+        "img_start": {"class_type": "LoadImage", "inputs": {"image": start_fname, "upload": "image"}},
+        "img_end":   {"class_type": "LoadImage", "inputs": {"image": end_fname,   "upload": "image"}},
+    }
+    nodes, decode_id = _transition_nodes(
+        0, "img_start", "img_end", width, height, frame_count, prompt,
+        random.randint(0, 2**32 - 1),
+    )
+    wf.update(nodes)
 
-    decode_ids: list[str] = []
-    for t in range(n_img - 1):
-        seed = random.randint(0, 2**32 - 1)
-        nodes, decode_id = _transition_nodes(
-            t + 1, img_ids[t], img_ids[t + 1],
-            width, height, frame_count, prompt, seed,
-        )
-        wf.update(nodes)
-        decode_ids.append(decode_id)
-
-    if len(decode_ids) == 1:
-        all_frames = decode_ids[0]
-    else:
-        wf["batch_mid"] = {"class_type": "ImageBatch", "inputs": {
-            "image1": [decode_ids[0], 0],
-            "image2": [decode_ids[1], 0],
-        }}
-        all_frames = "batch_mid"
-
-    # Append raw end frame so video lands cleanly on the final image
     wf["batch_final"] = {"class_type": "ImageBatch", "inputs": {
-        "image1": [all_frames,  0],
-        "image2": [img_ids[-1], 0],
+        "image1": [decode_id, 0],
+        "image2": ["img_end", 0],
     }}
 
-    # RIFE VFI — 3× frame interpolation
     wf["rife"] = {"class_type": "RIFE VFI", "inputs": {
         "ckpt_name":                  _RIFE_CKPT,
         "clear_cache_after_n_frames": 10,
-        "multiplier":                 3,
+        "multiplier":                 rife_multiplier,
         "fast_mode":                  True,
         "ensemble":                   True,
         "scale_factor":               1,
@@ -222,7 +224,8 @@ def _build_flf2v_workflow(
         "frames":                     ["batch_final", 0],
     }}
 
-    wf[SAVE_NODE_ID] = {"class_type": "VHS_VideoCombine", "inputs": {
+    save_id = "flf2v_save"
+    wf[save_id] = {"class_type": "VHS_VideoCombine", "inputs": {
         "frame_rate":      fps,
         "loop_count":      0,
         "filename_prefix": vid_prefix,
@@ -235,7 +238,7 @@ def _build_flf2v_workflow(
         "images":          ["rife", 0],
     }}
 
-    return wf
+    return wf, save_id
 
 
 # ── i2v_multi workflow builder (independent clips per image) ──────────────────
@@ -520,32 +523,108 @@ def _comfy_save_path(save_out: dict, segment_label: str) -> Path:
     return comfy_src
 
 
-async def _run_flf2v(
+async def _run_flf2v_multi(
     client: httpx.AsyncClient,
     video_id: uuid.UUID,
     comfy_names: list[str],
+    ordered_images: list[Image],
     req: GenerateVideoRequest,
     prefix: str,
     vid_key: str,
-) -> Path:
-    """Submit a single FLF2V workflow, poll, copy result into videos_dir. Returns the dest path."""
-    if len(comfy_names) < 2:
+) -> Path | None:
+    """Generate each key-frame transition as an independent ComfyUI submission,
+    persisting segments as discrete files + meta.json. Mirrors _run_i2v_multi
+    exactly, but over adjacent image PAIRS (n_imgs-1 transitions) instead of
+    single images. For exactly 2 images (1 transition) there's nothing to
+    choose between, so it finalizes directly; otherwise it lands in
+    status=review."""
+    n_imgs = len(comfy_names)
+    if n_imgs < 2:
         raise ValueError("FLF2V requires at least 2 images")
+    n_trans = n_imgs - 1
 
-    _set_progress(vid_key, "submitting", "Submitting workflow to ComfyUI…", 20)
-    wf = _build_flf2v_workflow(
-        comfy_names, req.width, req.height, req.frame_count, req.fps, req.prompt, prefix,
+    prompts_list = req.prompts if len(req.prompts) == n_trans else [req.prompt] * n_trans
+    fc_list = req.frame_counts if len(req.frame_counts) == n_trans else [req.frame_count] * n_trans
+    seg_dir = _segments_dir(video_id)
+    seg_dir.mkdir(parents=True, exist_ok=True)
+    segment_meta: list[dict] = []
+    seg_band_lo, seg_band_hi = 20, 86
+    seg_span = seg_band_hi - seg_band_lo
+
+    for i in range(n_trans):
+        start_fname, end_fname = comfy_names[i], comfy_names[i + 1]
+        p_i, fc_i = prompts_list[i], fc_list[i]
+        seg_prefix  = f"{prefix}_seg{i + 1}"
+        pct_seg_lo  = seg_band_lo + int(seg_span * i           / n_trans)
+        pct_seg_mid = seg_band_lo + int(seg_span * (i + 0.3) / n_trans)
+        pct_seg_hi  = seg_band_lo + int(seg_span * (i + 1)   / n_trans)
+
+        _set_progress(vid_key, "submitting", f"Transition {i + 1}/{n_trans} — submitting to ComfyUI…", pct_seg_lo)
+        wf, save_node = _build_flf2v_single_workflow(
+            start_fname, end_fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
+            req.rife_multiplier,
+        )
+        prompt_id = await _post_workflow_with_retry(client, wf)
+        logger.info("Video job %s transition %d → ComfyUI prompt %s", video_id, i + 1, prompt_id)
+        if i == 0:
+            await _save_comfy_prompt_id(video_id, prompt_id)
+
+        _set_progress(vid_key, "running", f"Transition {i + 1}/{n_trans} — generating frames…", pct_seg_mid)
+        seg_outputs = await poll_history(client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL)
+        seg_src = _comfy_save_path(seg_outputs.get(save_node, {}), f"Transition {i + 1}")
+
+        # Persist segment under a stable name so the review UI + assemble
+        # endpoint can refer to it by index regardless of ComfyUI's output.
+        seg_dest  = seg_dir / f"seg_{i}.mp4"
+        seg_thumb = seg_dir / f"seg_{i}_thumb.jpg"
+        await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
+        await make_video_thumbnail(seg_dest, seg_thumb)
+        segment_meta.append({
+            "index":          i,
+            "filename":       seg_dest.name,
+            "thumb":          seg_thumb.name,
+            "prompt":         p_i,
+            "frame_count":    fc_i,
+            "start_image_id": str(ordered_images[i].id),
+            "end_image_id":   str(ordered_images[i + 1].id),
+        })
+        _set_progress(vid_key, "running", f"Transition {i + 1}/{n_trans} — saved ✓", pct_seg_hi)
+
+        # Before the next transition, force ComfyUI to fully unload models and
+        # free VRAM — same mmap-crash mitigation _run_i2v_multi requires.
+        if i < n_trans - 1:
+            _set_progress(vid_key, "running", f"Freeing GPU memory for transition {i + 2}/{n_trans}…", pct_seg_hi)
+            await free_memory(client)
+            await asyncio.sleep(8)  # let CUDA actually release before the next cold load
+
+    # Sidecar metadata — consumed by /jobs/{id}/segments and _assemble_video.
+    meta = {
+        "video_id":        str(video_id),
+        "workflow":        req.workflow,
+        "width":           req.width,
+        "height":          req.height,
+        "fps":             req.fps,
+        "rife_multiplier": req.rife_multiplier,
+        "pingpong":        False,
+        "segments":        segment_meta,
+    }
+    await asyncio.to_thread(
+        (seg_dir / "meta.json").write_text, json.dumps(meta, indent=2), encoding="utf-8",
     )
-    prompt_id = await post_workflow(client, wf)
-    logger.info("Video job %s → ComfyUI prompt %s", video_id, prompt_id)
-    await _save_comfy_prompt_id(video_id, prompt_id)
 
-    _set_progress(vid_key, "queued", "Waiting in ComfyUI queue…", 25)
-    outputs = await poll_history(client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL)
-    comfy_src = _comfy_save_path(outputs.get(SAVE_NODE_ID, {}), "VHS_VideoCombine output")
+    if n_trans > 1:
+        # Multi-transition: user picks which to merge — caller skips finalize.
+        _set_progress(vid_key, "review", f"{n_trans} transition clips ready — pick which to merge", 88)
+        async with AsyncSessionLocal() as db:
+            video = await db.get(Video, video_id)
+            if video:
+                video.status = "review"
+                await db.commit()
+        return None
 
-    dest = settings.videos_dir / f"{video_id}_{comfy_src.name}"
-    await asyncio.to_thread(shutil.copy2, comfy_src, dest)
+    # 1 transition (2 images): nothing to choose between, copy it into place.
+    dest = settings.videos_dir / f"{video_id}_artrium.mp4"
+    await asyncio.to_thread(shutil.copy2, seg_dir / "seg_0.mp4", dest)
     return dest
 
 
@@ -697,13 +776,15 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
             settings.videos_dir.mkdir(parents=True, exist_ok=True)
 
             if req.workflow == "flf2v":
-                dest = await _run_flf2v(client, video_id, comfy_names, req, prefix, vid_key)
+                dest = await _run_flf2v_multi(
+                    client, video_id, comfy_names, ordered_images, req, prefix, vid_key,
+                )
             else:
                 dest = await _run_i2v_multi(
                     client, video_id, comfy_names, ordered_images, req, prefix, vid_key,
                 )
-                if dest is None:  # multi-segment → review status, caller skips finalize
-                    return
+            if dest is None:  # multi-segment → review status, caller skips finalize
+                return
 
         await _finalize_video_done(video_id, dest, vid_key)
 
@@ -801,14 +882,74 @@ async def _assemble_video(video_id: uuid.UUID, indices: list[int]) -> None:
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+_TRANSITION_MAX_EDGE = 512
+_TRANSITION_JPG_QUALITY = 80
+_TRANSITION_TIMEOUT_FLOOR = 180.0
+_TRANSITION_TIMEOUT_PER_IMAGE = 20.0
+
+
+class SuggestTransitionsRequest(BaseModel):
+    image_ids: list[uuid.UUID]   # in the user's selected playback order
+
+
+@router.post("/suggest-transitions")
+async def suggest_transitions(
+    body: SuggestTransitionsRequest, db: AsyncSession = Depends(get_db),
+):
+    """VLM-suggested per-transition prompts for flf2v — one vision call, N-1
+    prompts back. Purely advisory: nothing is persisted here; the client
+    fills its own per-transition textareas and the user can edit before
+    calling /generate."""
+    n = len(body.image_ids)
+    if n < 2:
+        raise HTTPException(status_code=400, detail="Need at least 2 images to suggest transitions")
+    if n > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 images")
+
+    img_result = await db.execute(select(Image).where(Image.id.in_(body.image_ids)))
+    images_by_id = {img.id: img for img in img_result.scalars().all()}
+    ordered = [images_by_id[iid] for iid in body.image_ids if iid in images_by_id]
+    if len(ordered) != n:
+        raise HTTPException(status_code=404, detail="One or more images not found")
+
+    jpgs: list[bytes] = []
+    for img in ordered:
+        src = settings.storage_dir / img.filepath
+        if not src.exists():
+            raise HTTPException(status_code=404, detail=f"Image file not found on disk: {img.id}")
+        jpg_bytes, _ = await prepare_jpg_for_web(
+            src, max_edge=_TRANSITION_MAX_EDGE, quality=_TRANSITION_JPG_QUALITY,
+        )
+        jpgs.append(jpg_bytes)
+
+    logger.info(
+        "Suggest-transitions: %d images, model=%s, payload=%dKB",
+        n, settings.ollama_titler_model, sum(len(j) for j in jpgs) // 1024,
+    )
+
+    timeout = max(_TRANSITION_TIMEOUT_FLOOR, _TRANSITION_TIMEOUT_PER_IMAGE * n)
+    try:
+        prompts = await generate_transition_prompts(jpgs, timeout=timeout)
+    except Exception as exc:
+        logger.exception("Transition prompt suggestion failed for %d images", n)
+        raise HTTPException(status_code=502, detail=f"Suggestion failed: {exc}")
+
+    return {"prompts": prompts}
+
+
 @router.post("/generate", status_code=202)
 async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(get_db)):
     n = len(body.image_ids)
     if body.workflow == "flf2v":
-        if not (2 <= n <= 3):
-            raise HTTPException(status_code=400, detail="flf2v requires 2 or 3 image IDs")
+        if not (2 <= n <= 20):
+            raise HTTPException(status_code=400, detail="flf2v requires 2–20 image IDs")
         if body.frame_count < 5 or body.frame_count > 81:
             raise HTTPException(status_code=400, detail="frame_count must be 5–81")
+        for fc in body.frame_counts:
+            if not (5 <= fc <= 81):
+                raise HTTPException(status_code=400, detail="frame_counts values must be 5–81")
+        if body.rife_multiplier not in (2, 3, 4):
+            raise HTTPException(status_code=400, detail="rife_multiplier must be 2, 3 or 4")
     elif body.workflow == "ltx_i2v":
         if not (1 <= n <= 6):
             raise HTTPException(status_code=400, detail="ltx_i2v requires 1–6 image IDs")
@@ -824,8 +965,8 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
         if body.rife_multiplier not in (2, 3, 4):
             raise HTTPException(status_code=400, detail="rife_multiplier must be 2, 3 or 4")
 
-    # Summarise per-image prompts for display
-    if body.workflow in ("i2v_multi", "ltx_i2v") and body.prompts:
+    # Summarise per-clip prompts for display
+    if body.workflow in ("i2v_multi", "ltx_i2v", "flf2v") and body.prompts:
         prompt_display = " | ".join(p for p in body.prompts if p) or body.prompt or None
     else:
         prompt_display = body.prompt or None
@@ -905,13 +1046,15 @@ async def list_segments(video_id: uuid.UUID, db: AsyncSession = Depends(get_db))
     segments = []
     for s in meta.get("segments", []):
         segments.append({
-            "index":       s["index"],
-            "filename":    s["filename"],
-            "url":         f"/api/video/segments/{video_id}/{s['filename']}",
-            "thumb_url":   f"/api/video/segments/{video_id}/{s['thumb']}",
-            "prompt":      s.get("prompt", ""),
-            "frame_count": s.get("frame_count"),
-            "image_id":    s.get("image_id"),
+            "index":          s["index"],
+            "filename":       s["filename"],
+            "url":            f"/api/video/segments/{video_id}/{s['filename']}",
+            "thumb_url":      f"/api/video/segments/{video_id}/{s['thumb']}",
+            "prompt":         s.get("prompt", ""),
+            "frame_count":    s.get("frame_count"),
+            "image_id":       s.get("image_id"),
+            "start_image_id": s.get("start_image_id"),
+            "end_image_id":   s.get("end_image_id"),
         })
     return {
         "video_id":        str(video_id),

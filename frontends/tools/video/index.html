@@ -49,11 +49,6 @@
     .res-chip { font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all 0.13s; }
     .res-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
-    /* Shared prompt (flf2v) */
-    textarea#prompt-input { width: 100%; box-sizing: border-box; resize: none; background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); font-size: 14px; padding: 10px 12px; outline: none; font-family: inherit; line-height: 1.5; transition: border-color 0.2s; min-height: 60px; }
-    textarea#prompt-input:focus { border-color: var(--accent); }
-    textarea#prompt-input::placeholder { color: var(--text-dim); }
-
     /* Per-image section (i2v_multi) */
     .per-img-section { display: flex; flex-direction: column; gap: 10px; }
     .per-img-row { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
@@ -61,14 +56,27 @@
     .per-img-header .per-img-num { flex: 1; }
     .paste-btn { flex-shrink: 0; background: var(--surface2); border: 1.5px solid var(--border); border-radius: 8px; color: var(--text-dim); font-size: 12px; font-weight: 700; padding: 5px 10px; cursor: pointer; font-family: inherit; -webkit-user-select: none; user-select: none; }
     .paste-btn:active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
-    .prompt-wrap { position: relative; }
-    .prompt-wrap .paste-btn { position: absolute; top: 8px; right: 8px; }
     .per-img-thumb { width: 44px; height: 44px; border-radius: 8px; object-fit: cover; flex-shrink: 0; }
     .per-img-num { font-size: 13px; font-weight: 700; }
     .per-img-prompt { width: 100%; box-sizing: border-box; resize: none; background: var(--bg); border: 1.5px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; padding: 8px 10px; outline: none; font-family: inherit; line-height: 1.5; transition: border-color 0.2s; min-height: 52px; }
     .per-img-prompt:focus { border-color: var(--accent); }
     .per-img-prompt::placeholder { color: var(--text-dim); }
     .per-img-frames-row { display: flex; align-items: center; gap: 10px; }
+
+    /* Per-transition section (flf2v) */
+    .per-transition-section { display: flex; flex-direction: column; gap: 10px; }
+    .suggest-prompts-btn { align-self: flex-start; background: var(--accent-soft); border: 1.5px solid var(--accent); border-radius: var(--radius-pill); color: var(--accent); font-size: 13px; font-weight: 700; padding: 8px 14px; cursor: pointer; font-family: inherit; }
+    .suggest-prompts-btn:disabled { opacity: 0.4; cursor: default; }
+    .per-transition-row { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .per-transition-header { display: flex; align-items: center; gap: 10px; }
+    .per-transition-thumbs { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+    .per-transition-thumb { width: 40px; height: 40px; border-radius: 8px; object-fit: cover; }
+    .per-transition-arrow { font-size: 14px; color: var(--text-dim); }
+    .per-transition-num { flex: 1; font-size: 13px; font-weight: 700; }
+    .per-transition-prompt { width: 100%; box-sizing: border-box; resize: none; background: var(--bg); border: 1.5px solid var(--border); border-radius: 8px; color: var(--text); font-size: 13px; padding: 8px 10px; outline: none; font-family: inherit; line-height: 1.5; transition: border-color 0.2s; min-height: 52px; }
+    .per-transition-prompt:focus { border-color: var(--accent); }
+    .per-transition-prompt::placeholder { color: var(--text-dim); }
+    .per-transition-frames-row { display: flex; align-items: center; gap: 10px; }
 
     /* Generate button */
     .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius-pill); border: none; background: var(--accent); color: var(--on-accent); font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.13s; }
@@ -368,18 +376,8 @@
         <!-- Per-image section (i2v_multi only) -->
         <div id="per-img-section" class="per-img-section" style="display:none"></div>
 
-        <!-- Frames per transition (flf2v only) -->
-        <div class="field-row" id="shared-frames-row" style="display:none">
-          <span class="field-label">Frames</span>
-          <input class="field-input" type="number" id="frame-count" value="25" min="5" max="81" step="1">
-          <span style="font-size:13px;color:var(--text-dim)">per transition</span>
-        </div>
-
-        <!-- Shared prompt (flf2v only) -->
-        <div class="prompt-wrap" id="prompt-wrap" style="display:none">
-          <textarea id="prompt-input" rows="2" placeholder="Optional motion prompt (e.g. 'slow zoom in, cinematic')"></textarea>
-          <button type="button" class="paste-btn" onclick="pasteInto(this)">📋 Paste</button>
-        </div>
+        <!-- Per-transition section (flf2v only) -->
+        <div id="per-transition-section" class="per-transition-section" style="display:none"></div>
 
         <button class="gen-btn" id="gen-btn" onclick="generate()" disabled>Generate Video</button>
       </div>
@@ -431,8 +429,9 @@ const state = {
   mode: 'i2v_multi',
   selectedImages: [],
   perImageSettings: new Map(),   // imageId → {prompt, frameCount}
+  transitionSettings: new Map(), // "idA__idB" → {prompt, frameCount} — flf2v pairs
   width: 960, height: 960,
-  rifeMultiplier: 3,             // i2v_multi: RIFE VFI interpolation factor (2 | 3 | 4)
+  rifeMultiplier: 3,             // i2v_multi/flf2v: RIFE VFI interpolation factor (2 | 3 | 4)
   pingpong: false,               // i2v_multi: VHS_VideoCombine pingpong flag
   pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
   pickerSelection: new Map(),
@@ -445,11 +444,13 @@ const $ = id => document.getElementById(id);
 const api = ArtRium.makeApiFetch(() => state.apiKey);
 const withAuth = url => ArtRium.withAuth(url, state.apiKey);
 const PICKER_LIMIT = 30;
-// i2v_multi and ltx_i2v share the per-image-clip workflow (one clip per image,
-// per-image prompts, review→merge). flf2v is the odd one out (key frames).
+// All three workflows share the per-clip generate→review→merge pattern.
+// isPerImageMode() only distinguishes the *per-image* prompt UI (i2v_multi/
+// ltx_i2v) from the *per-transition* prompt UI (flf2v) — see
+// renderPerImageSection() / renderPerTransitionSection().
 const isPerImageMode = () => state.mode === 'i2v_multi' || state.mode === 'ltx_i2v';
 const maxImagesForMode = () =>
-  state.mode === 'i2v_multi' ? 10 : state.mode === 'ltx_i2v' ? 6 : 3;
+  state.mode === 'i2v_multi' ? 10 : state.mode === 'ltx_i2v' ? 6 : 20;
 
 // ── Mode ──────────────────────────────────────────────────────────────────────
 function setMode(mode, el) {
@@ -466,13 +467,12 @@ function setMode(mode, el) {
 }
 
 function _updateModeFields() {
-  const perImage = isPerImageMode();
-  // RIFE interpolation + pingpong loop are Wan-i2v specific (LTX has neither).
-  const isWanI2v = state.mode === 'i2v_multi';
-  $('shared-frames-row').style.display = perImage ? 'none' : '';
-  $('prompt-wrap').style.display       = perImage ? 'none' : '';
-  $('rife-row').style.display          = isWanI2v ? '' : 'none';
-  $('pingpong-row').style.display      = isWanI2v ? '' : 'none';
+  // RIFE interpolation is shared by both Wan workflows (i2v_multi + flf2v);
+  // LTX has its own native motion and doesn't use it. Pingpong (boomerang)
+  // stays i2v_multi-only.
+  const usesRife = state.mode === 'i2v_multi' || state.mode === 'flf2v';
+  $('rife-row').style.display     = usesRife ? '' : 'none';
+  $('pingpong-row').style.display = state.mode === 'i2v_multi' ? '' : 'none';
 }
 
 function setRife(mult, el) {
@@ -511,13 +511,15 @@ function renderStrip() {
       : `${n} images — ${n} independent clips; pick which to merge after generation.`;
     $('gen-btn').disabled = n < 1;
   } else {
+    const maxLabel = maxImagesForMode();
     $('img-hint').textContent = n === 0
-      ? 'Select 2–3 key frames. The AI generates transitions between them.'
+      ? `Select 2–${maxLabel} key frames. Each adjacent pair becomes its own transition clip — pick which to merge after generation.`
       : n < 2 ? `${n} selected — add at least one more.`
-      : `${n} key frames · ${n-1} transition${n > 2 ? 's' : ''}.`;
+      : `${n} key frames · ${n-1} transition clip${n > 2 ? 's' : ''} — pick which to merge after generation.`;
     $('gen-btn').disabled = n < 2;
   }
   renderPerImageSection();
+  renderPerTransitionSection();
 }
 
 function removeImage(idx) {
@@ -570,10 +572,93 @@ function _esc(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// ── Per-transition section (flf2v) ────────────────────────────────────────────
+function renderPerTransitionSection() {
+  const sec = $('per-transition-section');
+  if (state.mode !== 'flf2v' || state.selectedImages.length < 2) {
+    sec.style.display = 'none';
+    return;
+  }
+  sec.style.display = '';
+
+  // Snapshot current input values before clearing
+  sec.querySelectorAll('.per-transition-row').forEach(row => {
+    const key = row.dataset.pairKey;
+    if (!key) return;
+    state.transitionSettings.set(key, {
+      prompt:     row.querySelector('.per-transition-prompt')?.value || '',
+      frameCount: parseInt(row.querySelector('.per-transition-frames')?.value) || 25,
+    });
+  });
+
+  const n = state.selectedImages.length;
+  let rowsHtml = '';
+  for (let i = 0; i < n - 1; i++) {
+    const a = state.selectedImages[i], b = state.selectedImages[i + 1];
+    const key = `${a.id}__${b.id}`;
+    const saved = state.transitionSettings.get(key) || {};
+    rowsHtml += `
+      <div class="per-transition-row" data-pair-key="${key}">
+        <div class="per-transition-header">
+          <div class="per-transition-thumbs">
+            <img class="per-transition-thumb" src="${withAuth(a.thumb_url)}" alt="">
+            <span class="per-transition-arrow">→</span>
+            <img class="per-transition-thumb" src="${withAuth(b.thumb_url)}" alt="">
+          </div>
+          <span class="per-transition-num">Transition ${i + 1} → ${i + 2}</span>
+          <button type="button" class="paste-btn" onclick="pasteInto(this)">📋 Paste</button>
+        </div>
+        <textarea class="per-transition-prompt" rows="2" placeholder="Describe the transition (motion, camera, light)…">${_esc(saved.prompt || '')}</textarea>
+        <div class="per-transition-frames-row">
+          <span class="field-label">Frames</span>
+          <input class="field-input per-transition-frames" type="number" value="${saved.frameCount || 25}" min="5" max="81" step="1">
+        </div>
+      </div>`;
+  }
+
+  sec.innerHTML = `
+    <button type="button" class="suggest-prompts-btn" id="suggest-prompts-btn" onclick="suggestTransitionPrompts()">✨ Suggest prompts</button>
+    ${rowsHtml}
+  `;
+}
+
+async function suggestTransitionPrompts() {
+  if (state.selectedImages.length < 2) return;
+  const btn = $('suggest-prompts-btn');
+  const prevText = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Suggesting…';
+  try {
+    const r = await api('/api/video/suggest-transitions', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ image_ids: state.selectedImages.map(i => i.id) }),
+    });
+    const d = await r.json();
+    const prompts = d.prompts || [];
+    const rows = Array.from($('per-transition-section').querySelectorAll('.per-transition-row'));
+    rows.forEach((row, i) => {
+      const ta = row.querySelector('.per-transition-prompt');
+      const fcInput = row.querySelector('.per-transition-frames');
+      if (ta && prompts[i] !== undefined) {
+        ta.value = prompts[i];
+        state.transitionSettings.set(row.dataset.pairKey, {
+          prompt: prompts[i],
+          frameCount: parseInt(fcInput.value) || 25,
+        });
+      }
+    });
+    ArtRium.toast('Prompts suggested ✓');
+  } catch (e) {
+    ArtRium.toast(e.message || 'Failed to suggest prompts', true);
+  } finally {
+    btn.disabled = false; btn.textContent = prevText;
+  }
+}
+
 // One-tap paste into the nearest prompt textarea — saves the long-press /
 // context-menu dance on mobile. Reads the clipboard and drops the text in.
 async function pasteInto(btn) {
-  const ta = btn.closest('.prompt-wrap, .per-img-row')?.querySelector('textarea');
+  const ta = btn.closest('.per-img-row, .per-transition-row')?.querySelector('textarea');
   if (!ta) return;
   try {
     const text = await navigator.clipboard.readText();
@@ -701,14 +786,17 @@ async function generate() {
         pingpong:        state.pingpong,
       };
     } else {
+      const rows = Array.from($('per-transition-section').querySelectorAll('.per-transition-row'));
       body = {
-        image_ids:   state.selectedImages.map(i => i.id),
-        workflow:    'flf2v',
-        width:       state.width,
-        height:      state.height,
-        fps:         parseInt($('fps-select').value) || 24,
-        frame_count: parseInt($('frame-count').value) || 25,
-        prompt:      $('prompt-input').value.trim(),
+        image_ids:       state.selectedImages.map(i => i.id),
+        workflow:        'flf2v',
+        width:           state.width,
+        height:          state.height,
+        fps:             parseInt($('fps-select').value) || 24,
+        frame_count:     25,
+        prompts:         rows.map(r => r.querySelector('.per-transition-prompt').value.trim()),
+        frame_counts:    rows.map(r => parseInt(r.querySelector('.per-transition-frames').value) || 25),
+        rife_multiplier: state.rifeMultiplier,
       };
     }
     const r = await api('/api/video/generate', {
@@ -929,7 +1017,8 @@ function _videoMeta(v) {
   if (v.workflow === 'i2v_multi') {
     return `${n} i2v clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
   }
-  return `${n} frames · ${v.width}×${v.height} · ${v.frame_count}fr · ${v.fps}fps`;
+  const nTrans = typeof n === 'number' ? Math.max(n - 1, 0) : '?';
+  return `${n} key frames · ${nTrans} transition${nTrans === 1 ? '' : 's'} · ${v.width}×${v.height} · ${v.fps}fps`;
 }
 
 // Per-clip prompts are joined with " | " for storage; split them back into
@@ -937,7 +1026,7 @@ function _videoMeta(v) {
 // six long prompts stays compact.
 function _promptCollapse(v) {
   if (!v.prompt) return '';
-  const perClip = v.workflow === 'i2v_multi' || v.workflow === 'ltx_i2v';
+  const perClip = v.workflow === 'i2v_multi' || v.workflow === 'ltx_i2v' || v.workflow === 'flf2v';
   const buckets = perClip ? v.prompt.split(' | ').filter(Boolean) : [v.prompt];
   if (!buckets.length) return '';
   const label = buckets.length > 1 ? `Prompts (${buckets.length})` : 'Prompt';

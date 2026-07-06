@@ -321,13 +321,13 @@ class Video(Base):
     muxed_filename: Mapped[str | None] = mapped_column(String(512))   # in storage/videos/, sibling of `filename`
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
-    frame_count: Mapped[int | None] = mapped_column(Integer)  # frames per transition (length param)
-    n_images: Mapped[int | None] = mapped_column(Integer)     # 2–6 key frames
+    frame_count: Mapped[int | None] = mapped_column(Integer)  # representative/fallback frame count (flf2v: per-transition; i2v_multi/ltx_i2v: per-image)
+    n_images: Mapped[int | None] = mapped_column(Integer)     # total selected images (bounds workflow-dependent: i2v_multi 1–10, ltx_i2v 1–6, flf2v 2–20)
     fps: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="generating", index=True)
     error: Mapped[str | None] = mapped_column(Text)
     comfy_prompt_id: Mapped[str | None] = mapped_column(String(128))
-    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "flf2v"
+    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "ltx_i2v" | "flf2v"
     # YouTube upload (set when pushed via services/youtube/client.py)
     youtube_video_id: Mapped[str | None] = mapped_column(String(32))    # e.g. "dQw4w9WgXcQ"
     youtube_url: Mapped[str | None] = mapped_column(Text)               # canonical watch URL

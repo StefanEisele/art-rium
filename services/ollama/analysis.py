@@ -8,7 +8,7 @@ import logging
 import httpx
 
 from core.config import settings
-from services.ollama.chat import _chat_json
+from services.ollama.chat import _chat_json, _read_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,66 @@ async def generate_video_titles(
         label="generate_video_titles",
     )
     return _clean_titles(parsed, n=n)
+
+
+# ── Transition prompts — Wan2.2 FLF2V key-frame sequence ─────────────────────
+
+
+async def generate_transition_prompts(
+    jpgs: list[bytes],
+    *,
+    timeout: float = 300.0,
+) -> list[str]:
+    """
+    Given N key-frame images in playback order, ask the titler VLM to suggest
+    one Wan2.2 FLF2V transition prompt per adjacent pair (N-1 prompts total)
+    in a single vision call — cheaper than N-1 separate calls (one model
+    load) and gives the model whole-sequence context for coherent motion.
+
+    System prompt lives in prompts/video-transitions.md — tunable without a
+    code change, same convention as prompts/zimage-styles.md.
+
+    Returns exactly len(jpgs)-1 strings, padding with "" or truncating if the
+    model returns the wrong count (logged as a warning either way — the
+    client renders blank textareas for any padded slots).
+
+    Raises RuntimeError if jpgs has fewer than 2 images, on Ollama error, or
+    if the parsed response has no usable "transitions" list.
+    """
+    if len(jpgs) < 2:
+        raise RuntimeError("generate_transition_prompts requires at least 2 images")
+
+    n_trans = len(jpgs) - 1
+    user_text = (
+        f"The {len(jpgs)} images below are key frames for one video, in "
+        f"playback order. Write exactly {n_trans} transition prompt(s), one "
+        f"per adjacent pair (image 1→2, image 2→3, …), following the system "
+        f"instructions.\n\n"
+        f'Return STRICT JSON: {{"transitions": ["prompt 1", "prompt 2", ...]}} '
+        f"with exactly {n_trans} entries, in order."
+    )
+    parsed = await _chat_json(
+        model=settings.ollama_titler_model,
+        system=_read_prompt("video-transitions.md"),
+        user_text=user_text,
+        jpgs=jpgs,
+        options={"temperature": 0.6},
+        keep_alive=_TITLER_KEEP_ALIVE,
+        timeout=timeout,
+        label="generate_transition_prompts",
+    )
+    raw = parsed.get("transitions") or []
+    if not isinstance(raw, list):
+        raise RuntimeError(f"Transition VLM 'transitions' field is not a list: {type(raw).__name__}")
+
+    cleaned = [str(t).strip() for t in raw]
+    if len(cleaned) != n_trans:
+        logger.warning(
+            "generate_transition_prompts: expected %d prompts, got %d — padding/truncating",
+            n_trans, len(cleaned),
+        )
+        cleaned = (cleaned + [""] * n_trans)[:n_trans]
+    return cleaned
 
 
 def _clean_titles(parsed: dict, *, n: int) -> list[str]:

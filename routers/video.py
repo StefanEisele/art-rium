@@ -43,9 +43,11 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth
+from core.comfy import WORKFLOW_NAME as ZIMAGE_WORKFLOW_NAME
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.imaging import prepare_jpg_for_web
+from core.loras import ALLOWED_LORAS, DEFAULT_LORA, LORAS
 from core.models import Image, Song, Video
 from core.tasks import safe_create_task
 from core.video_thumb import make_video_thumbnail
@@ -56,7 +58,14 @@ from services.comfy.client import (
     queue_info,
     upload_image,
 )
+from services.comfy.ingest import ingest_comfy_image
+from services.comfy.zimage import ZIMAGE_SAVE_NODE, build_zimage_workflow
 from services.ollama.analysis import generate_transition_prompts
+from services.ollama.story_frames import (
+    describe_image_for_story,
+    generate_story_frame_prompts,
+)
+from services.ollama.zimage_enhance import get_zimage_style_block
 from services.video.soundtrack import mux_soundtrack
 
 logger = logging.getLogger(__name__)
@@ -890,6 +899,7 @@ _TRANSITION_TIMEOUT_PER_IMAGE = 20.0
 
 class SuggestTransitionsRequest(BaseModel):
     image_ids: list[uuid.UUID]   # in the user's selected playback order
+    context: str = ""            # optional story/narrative context (story-frames flow)
 
 
 @router.post("/suggest-transitions")
@@ -929,12 +939,215 @@ async def suggest_transitions(
 
     timeout = max(_TRANSITION_TIMEOUT_FLOOR, _TRANSITION_TIMEOUT_PER_IMAGE * n)
     try:
-        prompts = await generate_transition_prompts(jpgs, timeout=timeout)
+        prompts = await generate_transition_prompts(jpgs, context=body.context, timeout=timeout)
     except Exception as exc:
         logger.exception("Transition prompt suggestion failed for %d images", n)
         raise HTTPException(status_code=502, detail=f"Suggestion failed: {exc}")
 
     return {"prompts": prompts}
+
+
+# ── Story key-frames (flf2v story mode) ───────────────────────────────────────
+# One source image + a short story → N generated z-Image key frames that stay
+# visually consistent with the source. The result is a plain list of Image
+# rows; the client feeds [source, *frames] into the normal flf2v pipeline.
+
+_STORY_MAX_FRAMES = 19          # source + N must stay within flf2v's 20-image cap
+_STORY_JOBS_KEEP = 20           # in-memory job entries retained (newest first)
+_STORY_POLL_INTERVAL = 2        # z-image turbo renders in seconds, poll tightly
+_STORY_POLL_TIMEOUT = 900       # generous: first frame may pay a cold model load
+
+# job_id → {status, message, pct, story, source_image_id, prompts, frames, error}
+# In-memory like _progress: the generated frames themselves are ingested as
+# Image rows the moment they exist, so a server restart only loses the job
+# bookkeeping, never the images.
+_story_jobs: dict[str, dict] = {}
+
+
+class StoryFramesRequest(BaseModel):
+    image_id: uuid.UUID            # source key frame
+    story: str                     # short narrative to advance across the frames
+    n_frames: int = 4              # additional frames to generate (1–19)
+    beat_seconds: int = 10         # story time between consecutive frames (1–600)
+    style: str | None = None       # z-Image enhancer style letter (A–D); None = derive from source
+    width: int = 1024
+    height: int = 1024
+    lora_name: str = DEFAULT_LORA
+    lora_strength: float = 0.5
+
+
+def _prune_story_jobs() -> None:
+    if len(_story_jobs) <= _STORY_JOBS_KEEP:
+        return
+    for job_id, _ in sorted(
+        _story_jobs.items(), key=lambda kv: kv[1].get("created_at", "")
+    )[: len(_story_jobs) - _STORY_JOBS_KEEP]:
+        _story_jobs.pop(job_id, None)
+
+
+def _story_update(job_id: str, status: str, message: str, pct: int) -> None:
+    job = _story_jobs.get(job_id)
+    if job is not None:
+        job.update(status=status, message=message, pct=pct)
+
+
+async def _run_story_frames(
+    job_id: str,
+    req: StoryFramesRequest,
+    src_filepath: str,
+    src_prompt: str | None,
+    src_seed: int | None,
+) -> None:
+    """Background task: describe source → plan N frame prompts → generate each
+    frame via z-Image Turbo and ingest it as a managed Image row."""
+    n = req.n_frames
+    try:
+        _story_update(job_id, "describing", "Analyzing source image…", 4)
+        jpg_bytes, _ = await prepare_jpg_for_web(
+            settings.storage_dir / src_filepath,
+            max_edge=_TRANSITION_MAX_EDGE, quality=_TRANSITION_JPG_QUALITY,
+        )
+        description = await describe_image_for_story(jpg_bytes)
+
+        _story_update(job_id, "planning", f"Writing {n} frame prompt(s)…", 12)
+        trigger = next(
+            (lora["trigger"] for lora in LORAS if lora["filename"] == req.lora_name), None,
+        )
+        prompts = await generate_story_frame_prompts(
+            story=req.story, n=n,
+            description=description,
+            source_prompt=src_prompt,
+            trigger=trigger,
+            beat_seconds=req.beat_seconds,
+            style_block=get_zimage_style_block(req.style) if req.style else None,
+        )
+        _story_jobs[job_id]["prompts"] = prompts
+
+        # One shared seed for all frames — reusing the source image's seed
+        # (when known) keeps the initial noise identical across the sequence,
+        # which pulls compositions toward the source. Prompts carry the story.
+        seed = src_seed if src_seed is not None and src_seed >= 0 else random.randint(0, 2**32 - 1)
+        batch_id = uuid.uuid4()
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            for i, frame_prompt in enumerate(prompts):
+                _story_update(
+                    job_id, "generating",
+                    f"Frame {i + 1}/{n} — generating…",
+                    18 + int(78 * i / n),
+                )
+                wf = build_zimage_workflow(
+                    frame_prompt, seed, req.width, req.height,
+                    req.lora_name, req.lora_strength,
+                )
+                prompt_id = await _post_workflow_with_retry(client, wf)
+                outputs = await poll_history(
+                    client, prompt_id,
+                    timeout=_STORY_POLL_TIMEOUT, interval=_STORY_POLL_INTERVAL,
+                )
+                images = (outputs.get(ZIMAGE_SAVE_NODE) or {}).get("images") or []
+                if not images:
+                    raise RuntimeError(f"Frame {i + 1}: SaveImage output missing")
+                entry = images[0]
+                rel = entry["filename"]
+                if entry.get("subfolder"):
+                    rel = f"{entry['subfolder']}/{entry['filename']}"
+
+                dest, image_id = await ingest_comfy_image(
+                    rel,
+                    prompt=frame_prompt,
+                    seed=seed,
+                    width=req.width,
+                    height=req.height,
+                    workflow_name=ZIMAGE_WORKFLOW_NAME,
+                    batch_id=batch_id,
+                )
+                if not dest or not image_id:
+                    raise RuntimeError(f"Frame {i + 1}: ingest failed (see server log)")
+
+                _story_jobs[job_id]["frames"].append({
+                    "id":        image_id,
+                    "filename":  dest.name,
+                    "url":       f"/api/image/{dest.name}",
+                    "thumb_url": f"/api/image/{dest.name}/thumb",
+                    "prompt":    frame_prompt,
+                })
+                logger.info("Story job %s: frame %d/%d ingested as %s", job_id, i + 1, n, image_id)
+
+            # Leave ComfyUI clean for the Wan 14B load that typically follows
+            # (same partial-eviction mmap-crash mitigation as the segment loop).
+            await free_memory(client)
+
+        _story_update(job_id, "done", f"{n} story frame(s) ready", 100)
+
+    except Exception as exc:
+        logger.exception("Story frames job %s failed", job_id)
+        msg = str(exc).strip()
+        job = _story_jobs.get(job_id)
+        if job is not None:
+            job.update(
+                status="failed",
+                message="Generation failed",
+                error=(f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__)[:1000],
+            )
+
+
+@router.post("/story-frames", status_code=202)
+async def create_story_frames(body: StoryFramesRequest, db: AsyncSession = Depends(get_db)):
+    """Kick off story key-frame generation. Returns {job_id}; poll
+    GET /api/video/story-frames/{job_id} until status is done/failed."""
+    if not body.story.strip():
+        raise HTTPException(status_code=400, detail="story is required")
+    if not (1 <= body.n_frames <= _STORY_MAX_FRAMES):
+        raise HTTPException(
+            status_code=400,
+            detail=f"n_frames must be 1–{_STORY_MAX_FRAMES} (source + frames ≤ 20 key frames)",
+        )
+    if not (1 <= body.beat_seconds <= 600):
+        raise HTTPException(status_code=400, detail="beat_seconds must be 1–600")
+    if body.style and get_zimage_style_block(body.style) is None:
+        raise HTTPException(status_code=400, detail=f"Unknown style: {body.style}")
+    if body.lora_name not in ALLOWED_LORAS:
+        raise HTTPException(status_code=400, detail=f"Unknown LoRA: {body.lora_name}")
+
+    image = await db.get(Image, body.image_id)
+    if not image:
+        raise HTTPException(status_code=404, detail="Source image not found")
+    if not (settings.storage_dir / image.filepath).exists():
+        raise HTTPException(status_code=404, detail="Source image file missing on disk")
+
+    job_id = str(uuid.uuid4())
+    _story_jobs[job_id] = {
+        "job_id":          job_id,
+        "status":          "describing",
+        "message":         "Queued…",
+        "pct":             1,
+        "story":           body.story.strip(),
+        "source_image_id": str(body.image_id),
+        "n_frames":        body.n_frames,
+        "prompts":         [],
+        "frames":          [],
+        "error":           None,
+        "created_at":      datetime.now(timezone.utc).isoformat(),
+    }
+    _prune_story_jobs()
+
+    safe_create_task(
+        _run_story_frames(job_id, body, image.filepath, image.prompt, image.seed),
+        name=f"story_frames:{job_id}",
+    )
+    logger.info(
+        "Queued story-frames job %s (source=%s, n=%d)", job_id, body.image_id, body.n_frames,
+    )
+    return {"job_id": job_id, "status": "describing"}
+
+
+@router.get("/story-frames/{job_id}")
+async def get_story_frames_job(job_id: str):
+    job = _story_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Story job not found (server restarted?)")
+    return job
 
 
 @router.post("/generate", status_code=202)

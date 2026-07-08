@@ -9,9 +9,7 @@ Responsibilities:
 import asyncio
 import json
 import logging
-import shutil
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +18,7 @@ from fastapi import WebSocket
 
 from core.comfy import WORKFLOW_NAME
 from core.config import settings
-from core.db import AsyncSessionLocal
-from core.models import Image
-from core.thumbnail import make_thumbnail, thumb_rel_path
+from services.comfy.ingest import ingest_comfy_image
 
 logger = logging.getLogger(__name__)
 
@@ -258,56 +254,12 @@ class ComfyListener:
 
         Returns (destination_path, image_id_str) or (None, None) on failure.
         """
-        src = settings.comfyui_output_dir / filename
-        if not src.exists():
-            logger.error(f"Ingest: source file not found: {src}")
-            return None, None
-
-        # Destination: storage/images/YYYY/MM/{uuid}_{original_name}
-        now = datetime.now(timezone.utc)
-        dest_dir = settings.images_dir / now.strftime("%Y/%m")
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        image_id = uuid.uuid4()
-        dest_filename = f"{image_id}_{filename}"
-        dest = dest_dir / dest_filename
-
-        try:
-            await asyncio.to_thread(shutil.copy2, src, dest)
-            logger.info(f"Ingested: {filename} → {dest.relative_to(settings.storage_dir)}")
-        except Exception as e:
-            logger.error(f"Ingest copy failed: {e}")
-            return None, None
-
-        # Relative path stored in DB (portable across machines)
-        rel_path = dest.relative_to(settings.storage_dir)
-
-        # Generate JPEG thumbnail (512 px longest side)
-        thumb_rel = thumb_rel_path(dest_filename)
-        thumb_dest = settings.storage_dir / thumb_rel
-        thumb_ok = await make_thumbnail(dest, thumb_dest)
-
-        try:
-            async with AsyncSessionLocal() as session:
-                record = Image(
-                    id=image_id,
-                    filename=dest_filename,
-                    filepath=str(rel_path),
-                    thumbnail_path=thumb_rel if thumb_ok else None,
-                    prompt=meta.get("prompt_text"),
-                    seed=meta.get("seed"),
-                    width=meta.get("width"),
-                    height=meta.get("height"),
-                    workflow_name=WORKFLOW_NAME,
-                    batch_id=uuid.UUID(meta["batch_id"]) if meta.get("batch_id") else None,
-                    created_at=now,
-                )
-                session.add(record)
-                await session.commit()
-                logger.info(f"DB record created: {image_id}")
-        except Exception as e:
-            logger.error(f"DB insert failed: {e}")
-            # File was copied — don't delete it, just log the failure
-            return dest, str(image_id)
-
-        return dest, str(image_id)
+        return await ingest_comfy_image(
+            filename,
+            prompt=meta.get("prompt_text"),
+            seed=meta.get("seed"),
+            width=meta.get("width"),
+            height=meta.get("height"),
+            workflow_name=WORKFLOW_NAME,
+            batch_id=uuid.UUID(meta["batch_id"]) if meta.get("batch_id") else None,
+        )

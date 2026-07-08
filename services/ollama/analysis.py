@@ -190,6 +190,7 @@ async def generate_video_titles(
 async def generate_transition_prompts(
     jpgs: list[bytes],
     *,
+    context: str = "",
     timeout: float = 300.0,
 ) -> list[str]:
     """
@@ -197,6 +198,11 @@ async def generate_transition_prompts(
     one Wan2.2 FLF2V transition prompt per adjacent pair (N-1 prompts total)
     in a single vision call — cheaper than N-1 separate calls (one model
     load) and gives the model whole-sequence context for coherent motion.
+
+    *context* is optional free text describing what the sequence is about
+    (the story-frames flow passes the user's story here) so the suggested
+    motion follows the intended narrative instead of being guessed from the
+    images alone.
 
     System prompt lives in prompts/video-transitions.md — tunable without a
     code change, same convention as prompts/zimage-styles.md.
@@ -212,11 +218,17 @@ async def generate_transition_prompts(
         raise RuntimeError("generate_transition_prompts requires at least 2 images")
 
     n_trans = len(jpgs) - 1
+    context_block = (
+        f"Story context for the whole sequence (the key frames were generated "
+        f"to tell this story, in order):\n{context.strip()}\n\n"
+        if context.strip() else ""
+    )
     user_text = (
         f"The {len(jpgs)} images below are key frames for one video, in "
         f"playback order. Write exactly {n_trans} transition prompt(s), one "
         f"per adjacent pair (image 1→2, image 2→3, …), following the system "
         f"instructions.\n\n"
+        f"{context_block}"
         f'Return STRICT JSON: {{"transitions": ["prompt 1", "prompt 2", ...]}} '
         f"with exactly {n_trans} entries, in order."
     )

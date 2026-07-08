@@ -78,6 +78,15 @@
     .per-transition-prompt::placeholder { color: var(--text-dim); }
     .per-transition-frames-row { display: flex; align-items: center; gap: 10px; }
 
+    /* Story frames panel (flf2v only) */
+    .story-box { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .story-head { display: flex; align-items: center; gap: 10px; }
+    .story-head .field-label { flex: 1; min-width: 0; }
+    .story-hint { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
+    #story-status { display: flex; flex-direction: column; gap: 8px; }
+    .story-thumbs { display: flex; gap: 6px; flex-wrap: wrap; }
+    .story-thumbs img { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; }
+
     /* Generate button */
     .gen-btn { width: 100%; padding: 14px; border-radius: var(--radius-pill); border: none; background: var(--accent); color: var(--on-accent); font-size: 15px; font-weight: 700; cursor: pointer; font-family: inherit; transition: all 0.13s; }
     .gen-btn:disabled { opacity: 0.4; cursor: default; }
@@ -333,6 +342,45 @@
           <div style="font-size:12px;color:var(--text-dim);margin-top:6px" id="img-hint"></div>
         </div>
 
+        <!-- Story frames (flf2v only) -->
+        <div id="story-section" style="display:none">
+          <div class="story-box">
+            <div class="story-head">
+              <span class="field-label">📖 Story frames</span>
+              <button type="button" class="paste-btn" onclick="pasteInto(this)">📋 Paste</button>
+            </div>
+            <div class="story-hint">
+              Pick exactly <strong>1 source image</strong> above, describe a short story, and
+              N follow-up key frames are generated from it — each one "Beat" seconds of
+              story time apart (like film cuts), kept consistent with the source image's
+              subject and style. They are inserted into the strip and transition prompts
+              are suggested automatically.
+            </div>
+            <textarea id="story-text" class="per-transition-prompt" rows="3"
+                      placeholder="Short story to unfold across the frames…"></textarea>
+            <div class="field-row">
+              <span class="field-label">Frames</span>
+              <input class="field-input" id="story-n" type="number" value="4" min="1" max="19" step="1">
+              <span class="field-label" style="min-width:auto">Beat&nbsp;(s)</span>
+              <input class="field-input" id="story-beat" type="number" value="10" min="1" max="600" step="1">
+            </div>
+            <div class="field-row">
+              <span class="field-label">LoRA</span>
+              <select class="field-select" id="story-lora"></select>
+              <span class="field-label" style="min-width:auto">Style</span>
+              <select class="field-select" id="story-style">
+                <option value="">Source style</option>
+              </select>
+            </div>
+            <button type="button" class="suggest-prompts-btn" id="story-btn" onclick="generateStoryFrames()">✨ Generate story frames</button>
+            <div id="story-status" style="display:none">
+              <div class="progress-track"><div class="progress-fill" id="story-fill" style="width:2%"></div></div>
+              <div><span class="progress-message" id="story-msg"></span></div>
+              <div class="story-thumbs" id="story-thumbs"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- Resolution -->
         <div class="field-row">
           <span class="field-label">Resolution</span>
@@ -438,6 +486,8 @@ const state = {
   videos: [],
   progressIntervals: new Map(),
   segmentSelection: new Map(),   // videoId → Set<segmentIndex> for the review UI
+  storyPollTimer: null,          // interval id while a story-frames job runs
+  storySource: null,             // source image object captured when the job starts
 };
 
 const $ = id => document.getElementById(id);
@@ -473,6 +523,7 @@ function _updateModeFields() {
   const usesRife = state.mode === 'i2v_multi' || state.mode === 'flf2v';
   $('rife-row').style.display     = usesRife ? '' : 'none';
   $('pingpong-row').style.display = state.mode === 'i2v_multi' ? '' : 'none';
+  $('story-section').style.display = state.mode === 'flf2v' ? '' : 'none';
 }
 
 function setRife(mult, el) {
@@ -628,10 +679,17 @@ async function suggestTransitionPrompts() {
   const prevText = btn.textContent;
   btn.disabled = true; btn.textContent = 'Suggesting…';
   try {
+    // When the story panel holds text, pass it as narrative context so the
+    // suggested motion follows the intended story rather than being guessed
+    // from the images alone.
+    const storyContext = ($('story-text')?.value || '').trim();
     const r = await api('/api/video/suggest-transitions', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ image_ids: state.selectedImages.map(i => i.id) }),
+      body: JSON.stringify({
+        image_ids: state.selectedImages.map(i => i.id),
+        context: storyContext,
+      }),
     });
     const d = await r.json();
     const prompts = d.prompts || [];
@@ -658,7 +716,7 @@ async function suggestTransitionPrompts() {
 // One-tap paste into the nearest prompt textarea — saves the long-press /
 // context-menu dance on mobile. Reads the clipboard and drops the text in.
 async function pasteInto(btn) {
-  const ta = btn.closest('.per-img-row, .per-transition-row')?.querySelector('textarea');
+  const ta = btn.closest('.per-img-row, .per-transition-row, .story-box')?.querySelector('textarea');
   if (!ta) return;
   try {
     const text = await navigator.clipboard.readText();
@@ -669,6 +727,142 @@ async function pasteInto(btn) {
   } catch (e) {
     ArtRium.toast('Paste blocked — long-press the field instead', true);
   }
+}
+
+// ── Story frames (flf2v) ──────────────────────────────────────────────────────
+// 1 source image + short story → N generated key frames, inserted into the
+// strip behind the source. The rest is the normal flf2v pipeline.
+
+async function loadStoryLoras() {
+  try {
+    const r = await api('/api/loras');
+    const d = await r.json();
+    $('story-lora').innerHTML = (d.loras || []).map(l =>
+      `<option value="${_esc(l.filename)}"${l.filename === d.default ? ' selected' : ''}>${_esc(l.label)}</option>`
+    ).join('');
+  } catch (_) { /* select stays empty → backend default LoRA is used */ }
+}
+
+async function loadStoryStyles() {
+  try {
+    const r = await api('/api/prompts/styles');
+    const d = await r.json();
+    // Keep the "Source style" (no preset) option in first place.
+    $('story-style').innerHTML = '<option value="">Source style</option>' +
+      (d.styles || []).map(s =>
+        `<option value="${_esc(s.style)}">${_esc(s.style)} — ${_esc(s.name)}</option>`
+      ).join('');
+  } catch (_) { /* select keeps only "Source style" → no preset is sent */ }
+}
+
+async function generateStoryFrames() {
+  if (state.selectedImages.length !== 1) {
+    ArtRium.toast('Select exactly 1 source image first', true);
+    return;
+  }
+  const story = $('story-text').value.trim();
+  if (!story) { ArtRium.toast('Describe a short story first', true); return; }
+  const n = Math.max(1, Math.min(19, parseInt($('story-n').value) || 4));
+  $('story-n').value = n;
+  const beat = Math.max(1, Math.min(600, parseInt($('story-beat').value) || 10));
+  $('story-beat').value = beat;
+
+  const btn = $('story-btn');
+  btn.disabled = true; btn.textContent = 'Generating…';
+  $('story-status').style.display = '';
+  $('story-thumbs').innerHTML = '';
+  $('story-fill').style.width = '2%';
+  $('story-msg').textContent = 'Starting…';
+  state.storySource = state.selectedImages[0];
+
+  try {
+    const body = {
+      image_id: state.storySource.id,
+      story,
+      n_frames: n,
+      beat_seconds: beat,
+      width:  state.width,
+      height: state.height,
+    };
+    const loraName = $('story-lora').value;
+    if (loraName) body.lora_name = loraName;
+    const styleLetter = $('story-style').value;
+    if (styleLetter) body.style = styleLetter;
+    const r = await api('/api/video/story-frames', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    pollStoryJob(d.job_id);
+  } catch (e) {
+    ArtRium.toast(e.message || 'Failed to start story frames', true);
+    _resetStoryButton();
+  }
+}
+
+function _resetStoryButton() {
+  const btn = $('story-btn');
+  btn.disabled = false; btn.textContent = '✨ Generate story frames';
+}
+
+function pollStoryJob(jobId) {
+  if (state.storyPollTimer) clearInterval(state.storyPollTimer);
+  let misses = 0;
+  state.storyPollTimer = setInterval(async () => {
+    let job;
+    try {
+      const r = await api(`/api/video/story-frames/${jobId}`);
+      job = await r.json();
+      misses = 0;
+    } catch (_) {
+      // 404 after a server restart, or a transient network drop. Give up
+      // after a few consecutive misses instead of polling forever.
+      if (++misses >= 5) {
+        clearInterval(state.storyPollTimer); state.storyPollTimer = null;
+        _resetStoryButton();
+        ArtRium.toast('Lost contact with the story job', true);
+      }
+      return;
+    }
+    $('story-fill').style.width = Math.max(2, Math.min(100, Number(job.pct) || 0)) + '%';
+    $('story-msg').textContent = job.message || '';
+    renderStoryThumbs(job.frames || []);
+
+    if (job.status === 'done' || job.status === 'failed') {
+      clearInterval(state.storyPollTimer); state.storyPollTimer = null;
+      _resetStoryButton();
+      if (job.status === 'failed') {
+        $('story-msg').textContent = job.error || 'Generation failed';
+        ArtRium.toast(job.error || 'Story frames failed', true);
+        return;
+      }
+      applyStoryFrames(job);
+    }
+  }, 2500);
+}
+
+function renderStoryThumbs(frames) {
+  $('story-thumbs').innerHTML = frames.map(f =>
+    `<img src="${withAuth(f.thumb_url)}" alt="">`
+  ).join('');
+}
+
+function applyStoryFrames(job) {
+  const frames = job.frames || [];
+  if (!frames.length) { ArtRium.toast('Job finished without frames', true); return; }
+  // Source first, generated frames behind it — story order.
+  const source = state.storySource
+    || state.selectedImages.find(i => i.id === job.source_image_id)
+    || state.selectedImages[0];
+  state.selectedImages = [source, ...frames.map(f => ({
+    id: f.id, filename: f.filename, url: f.url, thumb_url: f.thumb_url,
+  }))];
+  renderStrip();
+  ArtRium.toast(`${frames.length} story frame${frames.length === 1 ? '' : 's'} inserted ✓`);
+  // Auto-fill the per-transition prompts with the story as context. The user
+  // can still edit each one before generating the video.
+  suggestTransitionPrompts();
 }
 
 // ── Image picker ──────────────────────────────────────────────────────────────
@@ -1390,6 +1584,8 @@ function pollSoundtrackMux(videoId) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
   renderStrip();
+  loadStoryLoras();
+  loadStoryStyles();
   await loadVideos();
 });
 </script>

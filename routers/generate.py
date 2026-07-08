@@ -1,5 +1,3 @@
-import copy
-import json
 import logging
 import random
 import re
@@ -21,28 +19,10 @@ from core.db import get_db
 from core.loras import ALLOWED_LORAS, DEFAULT_LORA, LORAS
 from core.models import Image
 from core.thumbnail import make_thumbnail, thumb_rel_path
+from services.comfy.zimage import build_zimage_workflow
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# Workflow template loaded once at import time
-_TEMPLATE = json.loads(
-    (Path(__file__).parent.parent / "workflows" / "z-image_turbo.json").read_text()
-)
-
-
-def _build_workflow(
-    prompt: str, seed: int, width: int, height: int,
-    lora_name: str, lora_strength: float,
-) -> dict:
-    wf = copy.deepcopy(_TEMPLATE)
-    wf["45"]["inputs"]["text"] = prompt
-    wf["44"]["inputs"]["seed"] = seed if seed >= 0 else random.randint(0, 2**32 - 1)
-    wf["41"]["inputs"]["width"] = width
-    wf["41"]["inputs"]["height"] = height
-    wf["51"]["inputs"]["lora_name"] = lora_name
-    wf["51"]["inputs"]["strength_model"] = round(max(0.0, min(1.0, lora_strength)), 3)
-    return wf
 
 
 class GenerateRequest(BaseModel):
@@ -94,7 +74,7 @@ async def generate(req: GenerateRequest, request: Request):
 
     for i, prompt_text in enumerate(prompt_list):
         seed = (req.seed + i) if req.seed >= 0 else random.randint(0, 2**32 - 1)
-        workflow = _build_workflow(prompt_text, seed, req.width, req.height, req.lora_name, req.lora_strength)
+        workflow = build_zimage_workflow(prompt_text, seed, req.width, req.height, req.lora_name, req.lora_strength)
 
         result = await post_prompt(workflow, listener.client_id)
 
@@ -117,6 +97,15 @@ async def generate(req: GenerateRequest, request: Request):
         logger.info(f"Queued [{i+1}/{total}] prompt={prompt_id}")
 
     return {"batch_id": batch_id, "prompt_ids": prompt_ids, "batch_count": total}
+
+
+@router.get("/api/prompts/styles", dependencies=[Depends(require_auth)])
+async def list_prompt_styles():
+    """Return the z-Image enhancer style catalogue (letter + display name) —
+    SSOT is prompts/zimage-styles.md. Used by style pickers (video story mode)."""
+    from services.ollama.zimage_enhance import list_zimage_styles
+
+    return {"styles": list_zimage_styles()}
 
 
 @router.post("/api/prompts/enhance", dependencies=[Depends(require_auth)])

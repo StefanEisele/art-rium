@@ -46,6 +46,21 @@ def _zimage_style_name(letter: str) -> str:
     return f"Style {letter}"
 
 
+def list_zimage_styles() -> list[dict[str, str]]:
+    """Public style catalogue: [{style, name}, ...] in A..D order. Used by
+    GET /api/prompts/styles so pickers render from the markdown SSOT."""
+    return [
+        {"style": letter, "name": _zimage_style_name(letter)}
+        for letter in _ZIMAGE_STYLE_SECTIONS
+        if letter in _zimage_style_blocks()
+    ]
+
+
+def get_zimage_style_block(letter: str) -> str | None:
+    """Full markdown block for one style letter, or None when unknown."""
+    return _zimage_style_blocks().get(letter)
+
+
 async def _enhance_one_zimage(idea: str, style_letter: str, timeout: float) -> str:
     """Single-style enhancement call. Returns the enhanced prompt string."""
     blocks = _zimage_style_blocks()

@@ -1,0 +1,179 @@
+"""
+Unit tests for the story-frames pipeline's pure parts: the shared z-Image
+workflow builder (no ComfyUI) and the frame-prompt LLM wrapper's
+normalization/trigger logic (mocked _chat_json, no Ollama).
+"""
+import pytest
+
+from services.comfy.zimage import ZIMAGE_SAVE_NODE, build_zimage_workflow
+from services.ollama import story_frames as story_module
+from services.ollama.story_frames import (
+    ensure_trigger,
+    generate_story_frame_prompts,
+)
+
+
+class TestBuildZimageWorkflow:
+    def test_prompt_seed_size_and_lora_land_in_the_right_nodes(self):
+        wf = build_zimage_workflow("a rusty gate", 1234, 960, 704, "some_lora.safetensors", 0.7)
+        assert wf["45"]["inputs"]["text"] == "a rusty gate"
+        assert wf["44"]["inputs"]["seed"] == 1234
+        assert wf["41"]["inputs"]["width"] == 960
+        assert wf["41"]["inputs"]["height"] == 704
+        assert wf["51"]["inputs"]["lora_name"] == "some_lora.safetensors"
+        assert wf["51"]["inputs"]["strength_model"] == 0.7
+
+    def test_negative_seed_is_randomized(self):
+        wf = build_zimage_workflow("p", -1, 512, 512, "l.safetensors", 0.5)
+        assert wf["44"]["inputs"]["seed"] >= 0
+
+    def test_lora_strength_is_clamped(self):
+        wf = build_zimage_workflow("p", 1, 512, 512, "l.safetensors", 1.7)
+        assert wf["51"]["inputs"]["strength_model"] == 1.0
+
+    def test_template_is_not_mutated_between_calls(self):
+        build_zimage_workflow("first", 1, 512, 512, "l.safetensors", 0.5)
+        wf2 = build_zimage_workflow("second", 2, 512, 512, "l.safetensors", 0.5)
+        assert wf2["45"]["inputs"]["text"] == "second"
+
+    def test_save_node_exists_in_template(self):
+        wf = build_zimage_workflow("p", 1, 512, 512, "l.safetensors", 0.5)
+        assert wf[ZIMAGE_SAVE_NODE]["class_type"] == "SaveImage"
+
+
+class TestEnsureTrigger:
+    def test_prepends_missing_trigger(self):
+        assert ensure_trigger("a quiet harbor", "art_vision") == "art_vision, a quiet harbor"
+
+    def test_keeps_prompt_when_trigger_present_case_insensitive(self):
+        assert ensure_trigger("Art_Vision, a quiet harbor", "art_vision") == "Art_Vision, a quiet harbor"
+
+    def test_no_trigger_is_a_noop(self):
+        assert ensure_trigger("a quiet harbor", None) == "a quiet harbor"
+
+
+class TestGenerateStoryFramePrompts:
+    async def test_returns_n_prompts_on_exact_match(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            return {"frames": ["frame one", "frame two", "frame three"]}
+        monkeypatch.setattr(story_module, "_chat_json", fake_chat_json)
+
+        result = await generate_story_frame_prompts(
+            story="a door opens", n=3, description="desc",
+        )
+        assert result == ["frame one", "frame two", "frame three"]
+
+    async def test_pads_short_response_by_repeating_last(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            return {"frames": ["only one"]}
+        monkeypatch.setattr(story_module, "_chat_json", fake_chat_json)
+
+        result = await generate_story_frame_prompts(
+            story="a door opens", n=3, description="desc",
+        )
+        assert result == ["only one", "only one", "only one"]
+
+    async def test_truncates_long_response(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            return {"frames": ["a", "b", "c", "d"]}
+        monkeypatch.setattr(story_module, "_chat_json", fake_chat_json)
+
+        result = await generate_story_frame_prompts(
+            story="a door opens", n=2, description="desc",
+        )
+        assert result == ["a", "b"]
+
+    async def test_trigger_is_enforced_on_every_frame(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            return {"frames": ["zidiusArt, with trigger", "forgot the trigger"]}
+        monkeypatch.setattr(story_module, "_chat_json", fake_chat_json)
+
+        result = await generate_story_frame_prompts(
+            story="s", n=2, description="d", trigger="zidiusArt",
+        )
+        assert result[0] == "zidiusArt, with trigger"
+        assert result[1] == "zidiusArt, forgot the trigger"
+
+    async def test_beat_seconds_lands_in_user_text(self, monkeypatch):
+        captured = {}
+        async def fake_chat_json(**kwargs):
+            captured.update(kwargs)
+            return {"frames": ["a", "b"]}
+        monkeypatch.setattr(story_module, "_chat_json", fake_chat_json)
+
+        await generate_story_frame_prompts(
+            story="s", n=2, description="d", beat_seconds=10,
+        )
+        assert "10 seconds" in captured["user_text"]
+
+    async def test_style_block_lands_in_system_prompt(self, monkeypatch):
+        captured = {}
+        async def fake_chat_json(**kwargs):
+            captured.update(kwargs)
+            return {"frames": ["a", "b"]}
+        monkeypatch.setattr(story_module, "_chat_json", fake_chat_json)
+
+        await generate_story_frame_prompts(
+            story="s", n=2, description="d",
+            style_block="## Style A — Test Style\nsome descriptors",
+        )
+        assert "some descriptors" in captured["system"]
+        assert "{STYLE_BLOCK}" not in captured["system"]
+
+    async def test_no_style_block_falls_back_to_source_style(self, monkeypatch):
+        captured = {}
+        async def fake_chat_json(**kwargs):
+            captured.update(kwargs)
+            return {"frames": ["a", "b"]}
+        monkeypatch.setattr(story_module, "_chat_json", fake_chat_json)
+
+        await generate_story_frame_prompts(story="s", n=2, description="d")
+        assert "none — use the source image's own style." in captured["system"]
+        assert "{STYLE_BLOCK}" not in captured["system"]
+
+    async def test_non_list_frames_raises(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            return {"frames": "not a list"}
+        monkeypatch.setattr(story_module, "_chat_json", fake_chat_json)
+
+        with pytest.raises(RuntimeError):
+            await generate_story_frame_prompts(story="s", n=2, description="d")
+
+    async def test_all_empty_frames_raises(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            return {"frames": ["", "   "]}
+        monkeypatch.setattr(story_module, "_chat_json", fake_chat_json)
+
+        with pytest.raises(RuntimeError):
+            await generate_story_frame_prompts(story="s", n=2, description="d")
+
+    async def test_empty_story_raises(self):
+        with pytest.raises(ValueError):
+            await generate_story_frame_prompts(story="   ", n=2, description="d")
+
+    async def test_reads_prompt_file_without_raising(self):
+        # Sanity check the prompts/story-frames.md path/filename is correct
+        # before it ever hits a live Ollama call.
+        from services.ollama.chat import _read_prompt
+        text = _read_prompt("story-frames.md")
+        assert text.strip()
+        assert "{STYLE_BLOCK}" in text
+
+
+class TestZimageStyleCatalogue:
+    def test_lists_styles_with_letter_and_name(self):
+        from services.ollama.zimage_enhance import list_zimage_styles
+        styles = list_zimage_styles()
+        assert styles, "no styles parsed from prompts/zimage-styles.md"
+        for s in styles:
+            assert s["style"] in ("A", "B", "C", "D")
+            assert s["name"].strip()
+
+    def test_get_block_roundtrip_and_unknown_letter(self):
+        from services.ollama.zimage_enhance import (
+            get_zimage_style_block,
+            list_zimage_styles,
+        )
+        first = list_zimage_styles()[0]["style"]
+        assert get_zimage_style_block(first).startswith("## Style")
+        assert get_zimage_style_block("Z") is None

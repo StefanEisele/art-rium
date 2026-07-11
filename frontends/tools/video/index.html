@@ -657,7 +657,7 @@ function renderPerImageSection() {
     if (!id) return;
     state.perImageSettings.set(id, {
       prompt:     row.querySelector('.per-img-prompt')?.value || '',
-      frameCount: parseInt(row.querySelector('.per-img-frames')?.value) || 25,
+      frameCount: parseInt(row.querySelector('.per-img-frames')?.value) || 49,
     });
   });
 
@@ -684,7 +684,7 @@ function renderPerImageSection() {
       <textarea class="per-img-prompt" rows="2" placeholder="Animation prompt for image ${idx + 1}…">${_esc(saved.prompt || '')}</textarea>
       <div class="per-img-frames-row">
         <span class="field-label">Frames</span>
-        <input class="field-input per-img-frames" type="number" value="${saved.frameCount || 25}" min="5" max="81" step="1">
+        <input class="field-input per-img-frames" type="number" value="${saved.frameCount || 49}" min="5" max="81" step="1">
       </div>
     `;
     sec.appendChild(row);
@@ -808,7 +808,7 @@ async function suggestI2vPrompts() {
         ta.value = prompts[i];
         state.perImageSettings.set(row.dataset.imgId, {
           prompt: prompts[i],
-          frameCount: parseInt(fcInput.value) || 25,
+          frameCount: parseInt(fcInput.value) || 49,
         });
       }
     });
@@ -1098,9 +1098,9 @@ async function generate() {
         width:           state.width,
         height:          state.height,
         fps:             parseInt($('fps-select').value) || 24,
-        frame_count:     25,
+        frame_count:     49,
         prompts:         rows.map(r => r.querySelector('.per-img-prompt').value.trim()),
-        frame_counts:    rows.map(r => parseInt(r.querySelector('.per-img-frames').value) || 25),
+        frame_counts:    rows.map(r => parseInt(r.querySelector('.per-img-frames').value) || 49),
         rife_multiplier: state.rifeMultiplier,
         pingpong:        state.pingpong,
       };

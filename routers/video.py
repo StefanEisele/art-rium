@@ -140,7 +140,7 @@ class GenerateVideoRequest(BaseModel):
     workflow: str = "i2v_multi"    # "i2v_multi" | "ltx_i2v" | "flf2v"
     width:  int = 1088
     height: int = 1088
-    frame_count: int = 25          # fallback frame count when prompts/frame_counts arrays are absent
+    frame_count: int = 49          # fallback frame count when prompts/frame_counts arrays are absent
     fps:    int = 24
     prompt: str = ""               # fallback prompt when `prompts` is absent/mismatched length
     prompts: list[str] = []        # i2v_multi/ltx_i2v: one per image; flf2v: one per transition (n-1)

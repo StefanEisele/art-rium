@@ -256,6 +256,100 @@ async def generate_transition_prompts(
     return cleaned
 
 
+# ── i2v animation prompts — surreal per-image motion (Wan2.2 / LTX) ──────────
+
+
+def _extract_animation(parsed: dict) -> str:
+    """Pull the single prompt out of a per-image response, tolerating the
+    model echoing the plural/array shape instead of {"animation": "..."}."""
+    value = parsed.get("animation")
+    if not value:
+        alt = parsed.get("animations")
+        if isinstance(alt, list) and alt:
+            value = alt[0]
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value or "").strip()
+
+
+async def generate_i2v_motion_prompts(
+    jpgs: list[bytes],
+    *,
+    context: str = "",
+    timeout: float = 300.0,
+) -> list[str]:
+    """
+    Given N images (each becomes its own independent i2v clip, in playback
+    order), ask the titler VLM for one surreal Wan2.2-style animation prompt
+    per image — one vision call PER image, unlike generate_transition_prompts.
+
+    Rationale for per-image calls: the small titler VLM (qwen2.5vl:3b)
+    effectively only looks at the first image of a multi-image message and
+    repeats one prompt N times. Serialized single-image calls fix that; the
+    model stays resident between calls (keep_alive), so each extra call costs
+    inference only, no reload. *timeout* applies per call.
+
+    *context* is optional free text about the intended video, folded into
+    every per-image message when present.
+
+    System prompt lives in prompts/video-i2v-motion.md. Returns exactly
+    len(jpgs) strings; an image whose call fails yields "" (logged), so the
+    client just shows an empty textarea for that slot.
+
+    Raises RuntimeError if jpgs is empty or if EVERY per-image call failed.
+    """
+    if not jpgs:
+        raise RuntimeError("generate_i2v_motion_prompts requires at least 1 image")
+
+    n = len(jpgs)
+    context_block = (
+        f"Context for the whole video (what it is about / intended mood):\n"
+        f"{context.strip()}\n\n"
+        if context.strip() else ""
+    )
+
+    prompts: list[str] = []
+    failures = 0
+    for i, jpg in enumerate(jpgs):
+        user_text = (
+            f"This is image {i + 1} of {n} for one video — each image becomes "
+            f"its own independent clip, played in order. Write ONE surreal "
+            f"animation prompt for THIS image, following the system "
+            f"instructions.\n\n"
+            f"{context_block}"
+            f'Return STRICT JSON: {{"animation": "<the prompt>"}}.'
+        )
+        try:
+            parsed = await _chat_json(
+                model=settings.ollama_titler_model,
+                system=_read_prompt("video-i2v-motion.md"),
+                user_text=user_text,
+                jpgs=[jpg],
+                options={"temperature": 0.7},
+                keep_alive=_TITLER_KEEP_ALIVE,
+                timeout=timeout,
+                label=f"generate_i2v_motion_prompts[{i + 1}/{n}]",
+            )
+        except Exception as exc:
+            logger.warning(
+                "generate_i2v_motion_prompts: image %d/%d failed (%s: %s) — leaving slot empty",
+                i + 1, n, type(exc).__name__, exc,
+            )
+            prompts.append("")
+            failures += 1
+            continue
+        prompt = _extract_animation(parsed)
+        if not prompt:
+            logger.warning(
+                "generate_i2v_motion_prompts: image %d/%d returned no usable prompt", i + 1, n,
+            )
+        prompts.append(prompt)
+
+    if failures == n:
+        raise RuntimeError("generate_i2v_motion_prompts: every per-image call failed")
+    return prompts
+
+
 def _clean_titles(parsed: dict, *, n: int) -> list[str]:
     raw = parsed.get("titles") or []
     if not isinstance(raw, list):

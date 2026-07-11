@@ -7,7 +7,10 @@ import pytest
 
 from routers.video import _build_flf2v_single_workflow
 from services.ollama import analysis as analysis_module
-from services.ollama.analysis import generate_transition_prompts
+from services.ollama.analysis import (
+    generate_i2v_motion_prompts,
+    generate_transition_prompts,
+)
 
 
 class TestBuildFlf2vSingleWorkflow:
@@ -25,20 +28,40 @@ class TestBuildFlf2vSingleWorkflow:
         assert wf["img_start"] == {"class_type": "LoadImage", "inputs": {"image": "start.png", "upload": "image"}}
         assert wf["img_end"] == {"class_type": "LoadImage", "inputs": {"image": "end.png", "upload": "image"}}
 
-    def test_batch_final_appends_raw_end_frame_after_decode(self):
+    def test_end_frame_append_is_off_by_default(self):
+        # Default: RIFE reads the diffused frames directly — no raw end photo
+        # appended (that append IS the hard cut when diffusion undershoots).
         wf, _ = _build_flf2v_single_workflow(
             "start.png", "end.png", "prompt", 25, 960, 960, 24, "prefix", 3,
+        )
+        assert "batch_final" not in wf
+        assert wf["rife"]["inputs"]["frames"] == ["t0_decode", 0]
+
+    def test_batch_final_appends_raw_end_frame_when_opted_in(self):
+        wf, _ = _build_flf2v_single_workflow(
+            "start.png", "end.png", "prompt", 25, 960, 960, 24, "prefix", 3,
+            append_end_frame=True,
         )
         batch = wf["batch_final"]
         assert batch["class_type"] == "ImageBatch"
         assert batch["inputs"]["image1"] == ["t0_decode", 0]
         assert batch["inputs"]["image2"] == ["img_end", 0]
+        assert wf["rife"]["inputs"]["frames"] == ["batch_final", 0]
 
-    def test_rife_reads_from_batch_final(self):
+    def test_sampler_lightning_fast_path(self):
+        # Plain Lightning fast path: 4 steps split 2/2, cfg=1 and full-strength
+        # distill LoRA on both experts (the 8-step anti-hard-cut variant was
+        # reverted — too slow in practice).
         wf, _ = _build_flf2v_single_workflow(
             "start.png", "end.png", "prompt", 25, 960, 960, 24, "prefix", 3,
         )
-        assert wf["rife"]["inputs"]["frames"] == ["batch_final", 0]
+        ks_h, ks_l = wf["t0_ks_h"]["inputs"], wf["t0_ks_l"]["inputs"]
+        assert ks_h["steps"] == 4 and ks_l["steps"] == 4
+        assert ks_h["end_at_step"] == 2 and ks_l["start_at_step"] == 2
+        assert ks_h["cfg"] == 1
+        assert ks_l["cfg"] == 1
+        assert wf["t0_lora_h"]["inputs"]["strength_model"] == 1.0
+        assert wf["t0_lora_l"]["inputs"]["strength_model"] == 1
 
     def test_rife_multiplier_is_configurable(self):
         wf, _ = _build_flf2v_single_workflow(
@@ -101,4 +124,58 @@ class TestGenerateTransitionPrompts:
         # before it ever hits a live Ollama call.
         from services.ollama.chat import _read_prompt
         text = _read_prompt("video-transitions.md")
+        assert text.strip()
+
+
+class TestGenerateI2vMotionPrompts:
+    async def test_one_call_per_image_with_single_jpg_each(self, monkeypatch):
+        # The 3B titler VLM only really looks at the first image of a
+        # multi-image message — the wrapper must fan out to one call per image.
+        calls = []
+        async def fake_chat_json(**kwargs):
+            calls.append(kwargs)
+            return {"animation": f"prompt {len(calls)}"}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        result = await generate_i2v_motion_prompts([b"1", b"2", b"3"])
+        assert result == ["prompt 1", "prompt 2", "prompt 3"]
+        assert len(calls) == 3
+        assert all(kw["jpgs"] == [img] for kw, img in zip(calls, [b"1", b"2", b"3"]))
+        assert "image 2 of 3" in calls[1]["user_text"]
+
+    async def test_tolerates_plural_array_response_shape(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            return {"animations": ["from the array shape"]}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        result = await generate_i2v_motion_prompts([b"1"])
+        assert result == ["from the array shape"]
+
+    async def test_failed_image_yields_empty_slot(self, monkeypatch):
+        calls = []
+        async def fake_chat_json(**kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return {"animation": f"prompt {len(calls)}"}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        result = await generate_i2v_motion_prompts([b"1", b"2", b"3"])
+        assert result == ["prompt 1", "", "prompt 3"]
+
+    async def test_all_calls_failing_raises(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            raise RuntimeError("ollama down")
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        with pytest.raises(RuntimeError):
+            await generate_i2v_motion_prompts([b"1", b"2"])
+
+    async def test_empty_image_list_raises(self):
+        with pytest.raises(RuntimeError):
+            await generate_i2v_motion_prompts([])
+
+    async def test_reads_prompt_file_without_raising(self):
+        from services.ollama.chat import _read_prompt
+        text = _read_prompt("video-i2v-motion.md")
         assert text.strip()

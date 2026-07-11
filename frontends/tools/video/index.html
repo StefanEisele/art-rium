@@ -150,13 +150,41 @@
       display: flex; align-items: center; justify-content: center;
       font-size: 14px; color: transparent;
     }
-    .seg-row.selected .seg-check { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-    .seg-assemble-btn {
-      width: 100%; padding: 12px; border-radius: 10px; border: none;
-      background: var(--accent); color: var(--on-accent); font-size: 14px; font-weight: 700;
-      cursor: pointer; font-family: inherit; transition: opacity 0.15s;
+    .seg-row.selected .seg-check { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-size: 12px; font-weight: 700; }
+    .seg-side { display: flex; flex-direction: column; align-items: center; justify-content: space-between; gap: 6px; }
+    .clip-delete-btn {
+      background: none; border: none; cursor: pointer; font-size: 14px;
+      color: var(--text-dim); padding: 2px 4px; border-radius: 6px;
     }
-    .seg-assemble-btn:disabled { opacity: 0.4; cursor: default; }
+    .clip-delete-btn:hover { color: var(--red); }
+
+    /* ── Floating merge bar (cross-job clip selection) ── */
+    #merge-bar {
+      position: fixed; left: 50%; transform: translateX(-50%) translateY(120%);
+      bottom: calc(env(safe-area-inset-bottom) + 12px);
+      width: min(640px, calc(100vw - 24px));
+      background: var(--surface); border: 1.5px solid var(--accent);
+      border-radius: 14px; padding: 10px 14px;
+      display: flex; flex-direction: column; gap: 8px;
+      box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+      transition: transform 0.2s ease; z-index: 90;
+    }
+    #merge-bar.show { transform: translateX(-50%) translateY(0); }
+    #merge-bar .bar-head { display: flex; align-items: center; gap: 10px; }
+    #merge-count { flex: 1; font-size: 13px; font-weight: 700; }
+    #merge-bar .bar-actions { display: flex; align-items: center; gap: 8px; }
+    #merge-bar label { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+    #merge-go-btn {
+      padding: 9px 16px; border-radius: var(--radius-pill); border: none;
+      background: var(--accent); color: var(--on-accent);
+      font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit;
+    }
+    #merge-go-btn:disabled { opacity: 0.4; cursor: default; }
+    #merge-clear-btn {
+      background: none; border: 1.5px solid var(--border); border-radius: var(--radius-pill);
+      color: var(--text-dim); font-size: 13px; font-weight: 600;
+      padding: 8px 14px; cursor: pointer; font-family: inherit;
+    }
 
     /* Thumbnail + video preview */
     .video-preview-wrap { position: relative; width: 100%; border-radius: 10px; overflow: hidden; background: #000; }
@@ -367,7 +395,12 @@
             <div class="field-row">
               <span class="field-label">LoRA</span>
               <select class="field-select" id="story-lora"></select>
-              <span class="field-label" style="min-width:auto">Style</span>
+              <span class="field-label" style="min-width:auto">Strength</span>
+              <input class="field-input" id="story-strength" type="number" min="0" max="1" step="0.05" value="0.5"
+                     title="Defaults to the source image's own LoRA strength for high consistency">
+            </div>
+            <div class="field-row">
+              <span class="field-label">Style</span>
               <select class="field-select" id="story-style">
                 <option value="">Source style</option>
               </select>
@@ -421,6 +454,15 @@
           </label>
         </div>
 
+        <!-- End exactly on keyframe (flf2v only) -->
+        <div class="field-row" id="endkf-row" style="display:none">
+          <span class="field-label">Ending</span>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-dim);">
+            <input type="checkbox" id="endkf-toggle" onchange="state.endOnKeyframe = this.checked" style="width:16px;height:16px;accent-color:var(--accent);">
+            End exactly on key frame (appends the raw photo — can read as a cut)
+          </label>
+        </div>
+
         <!-- Per-image section (i2v_multi only) -->
         <div id="per-img-section" class="per-img-section" style="display:none"></div>
 
@@ -467,6 +509,24 @@
   <div id="song-list"><div style="color:var(--text-dim);padding:20px;text-align:center">Loading…</div></div>
 </div>
 
+<!-- Floating merge bar — appears while clips are selected across stacks -->
+<div id="merge-bar">
+  <div class="bar-head">
+    <span id="merge-count"></span>
+    <button id="merge-clear-btn" type="button" onclick="clearMergeSelection()">Clear</button>
+  </div>
+  <div class="bar-actions">
+    <label>
+      <input type="checkbox" id="merge-delete-toggle"
+             onchange="state.deleteAfterMerge = this.checked"
+             style="width:15px;height:15px;accent-color:var(--accent);">
+      Delete source clips after merge
+    </label>
+    <span style="flex:1"></span>
+    <button id="merge-go-btn" type="button" onclick="mergeSelectedClips()">Merge</button>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script src="/shared/shared.js"></script>
@@ -481,11 +541,14 @@ const state = {
   width: 960, height: 960,
   rifeMultiplier: 3,             // i2v_multi/flf2v: RIFE VFI interpolation factor (2 | 3 | 4)
   pingpong: false,               // i2v_multi: VHS_VideoCombine pingpong flag
+  endOnKeyframe: false,          // flf2v: append raw end key frame (pixel-exact landing, cut risk)
   pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
   pickerSelection: new Map(),
   videos: [],
   progressIntervals: new Map(),
-  segmentSelection: new Map(),   // videoId → Set<segmentIndex> for the review UI
+  clipsByJob: new Map(),         // videoId → [clip, …] (the job's stack, idx order)
+  mergeSelection: new Map(),     // clipId → order number (1-based, cross-job)
+  deleteAfterMerge: false,       // remove source clips once the merge succeeds
   storyPollTimer: null,          // interval id while a story-frames job runs
   storySource: null,             // source image object captured when the job starts
 };
@@ -523,6 +586,7 @@ function _updateModeFields() {
   const usesRife = state.mode === 'i2v_multi' || state.mode === 'flf2v';
   $('rife-row').style.display     = usesRife ? '' : 'none';
   $('pingpong-row').style.display = state.mode === 'i2v_multi' ? '' : 'none';
+  $('endkf-row').style.display    = state.mode === 'flf2v' ? '' : 'none';
   $('story-section').style.display = state.mode === 'flf2v' ? '' : 'none';
 }
 
@@ -557,20 +621,20 @@ function renderStrip() {
   if (isPerImageMode()) {
     const maxLabel = maxImagesForMode();
     $('img-hint').textContent = n === 0
-      ? `Select 1–${maxLabel} images. Each gets its own animation clip — you pick which to merge.`
-      : n === 1 ? '1 image — single clip becomes the video (skips review).'
-      : `${n} images — ${n} independent clips; pick which to merge after generation.`;
+      ? `Select 1–${maxLabel} images. Each becomes its own clip in the library — merge any clips (across jobs) into a video afterwards.`
+      : `${n} image${n === 1 ? '' : 's'} — ${n} independent clip${n === 1 ? '' : 's'} land in the library; merge freely afterwards.`;
     $('gen-btn').disabled = n < 1;
   } else {
     const maxLabel = maxImagesForMode();
     $('img-hint').textContent = n === 0
-      ? `Select 2–${maxLabel} key frames. Each adjacent pair becomes its own transition clip — pick which to merge after generation.`
+      ? `Select 2–${maxLabel} key frames. Each adjacent pair becomes its own transition clip in the library — merge freely afterwards.`
       : n < 2 ? `${n} selected — add at least one more.`
-      : `${n} key frames · ${n-1} transition clip${n > 2 ? 's' : ''} — pick which to merge after generation.`;
+      : `${n} key frames · ${n-1} transition clip${n > 2 ? 's' : ''} — land in the library; merge freely afterwards.`;
     $('gen-btn').disabled = n < 2;
   }
   renderPerImageSection();
   renderPerTransitionSection();
+  syncStoryDefaultsFromSource();
 }
 
 function removeImage(idx) {
@@ -598,6 +662,14 @@ function renderPerImageSection() {
   });
 
   sec.innerHTML = '';
+  // Surreal Wan2.2/LTX animation prompts — one VLM call fills every textarea.
+  const sug = document.createElement('button');
+  sug.type = 'button';
+  sug.className = 'suggest-prompts-btn';
+  sug.id = 'suggest-i2v-btn';
+  sug.textContent = '✨ Suggest prompts';
+  sug.onclick = suggestI2vPrompts;
+  sec.appendChild(sug);
   state.selectedImages.forEach((img, idx) => {
     const saved = state.perImageSettings.get(img.id) || {};
     const row = document.createElement('div');
@@ -638,7 +710,7 @@ function renderPerTransitionSection() {
     if (!key) return;
     state.transitionSettings.set(key, {
       prompt:     row.querySelector('.per-transition-prompt')?.value || '',
-      frameCount: parseInt(row.querySelector('.per-transition-frames')?.value) || 25,
+      frameCount: parseInt(row.querySelector('.per-transition-frames')?.value) || 49,
     });
   });
 
@@ -662,7 +734,7 @@ function renderPerTransitionSection() {
         <textarea class="per-transition-prompt" rows="2" placeholder="Describe the transition (motion, camera, light)…">${_esc(saved.prompt || '')}</textarea>
         <div class="per-transition-frames-row">
           <span class="field-label">Frames</span>
-          <input class="field-input per-transition-frames" type="number" value="${saved.frameCount || 25}" min="5" max="81" step="1">
+          <input class="field-input per-transition-frames" type="number" value="${saved.frameCount || 49}" min="5" max="81" step="1">
         </div>
       </div>`;
   }
@@ -700,6 +772,41 @@ async function suggestTransitionPrompts() {
       if (ta && prompts[i] !== undefined) {
         ta.value = prompts[i];
         state.transitionSettings.set(row.dataset.pairKey, {
+          prompt: prompts[i],
+          frameCount: parseInt(fcInput.value) || 49,
+        });
+      }
+    });
+    ArtRium.toast('Prompts suggested ✓');
+  } catch (e) {
+    ArtRium.toast(e.message || 'Failed to suggest prompts', true);
+  } finally {
+    btn.disabled = false; btn.textContent = prevText;
+  }
+}
+
+async function suggestI2vPrompts() {
+  if (state.selectedImages.length < 1) return;
+  const btn = $('suggest-i2v-btn');
+  const prevText = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Suggesting…';
+  try {
+    const r = await api('/api/video/suggest-i2v', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        image_ids: state.selectedImages.map(i => i.id),
+      }),
+    });
+    const d = await r.json();
+    const prompts = d.prompts || [];
+    const rows = Array.from($('per-img-section').querySelectorAll('.per-img-row'));
+    rows.forEach((row, i) => {
+      const ta = row.querySelector('.per-img-prompt');
+      const fcInput = row.querySelector('.per-img-frames');
+      if (ta && prompts[i] !== undefined) {
+        ta.value = prompts[i];
+        state.perImageSettings.set(row.dataset.imgId, {
           prompt: prompts[i],
           frameCount: parseInt(fcInput.value) || 25,
         });
@@ -755,6 +862,22 @@ async function loadStoryStyles() {
   } catch (_) { /* select keeps only "Source style" → no preset is sent */ }
 }
 
+// Mirrors the selected source image's own LoRA + strength into the story
+// panel so a fresh story sequence defaults to the exact params the source
+// was generated with — same seed reuse already does this on the backend,
+// this closes the loop for LoRA/strength too. Still editable before generating.
+function syncStoryDefaultsFromSource() {
+  if (state.mode !== 'flf2v' || state.selectedImages.length !== 1) return;
+  const src = state.selectedImages[0];
+  const loraSel = $('story-lora');
+  if (src.lora_name && [...loraSel.options].some(o => o.value === src.lora_name)) {
+    loraSel.value = src.lora_name;
+  }
+  if (src.lora_strength !== null && src.lora_strength !== undefined) {
+    $('story-strength').value = src.lora_strength;
+  }
+}
+
 async function generateStoryFrames() {
   if (state.selectedImages.length !== 1) {
     ArtRium.toast('Select exactly 1 source image first', true);
@@ -786,6 +909,8 @@ async function generateStoryFrames() {
     };
     const loraName = $('story-lora').value;
     if (loraName) body.lora_name = loraName;
+    const strengthVal = parseFloat($('story-strength').value);
+    if (!isNaN(strengthVal)) body.lora_strength = Math.max(0, Math.min(1, strengthVal));
     const styleLetter = $('story-style').value;
     if (styleLetter) body.style = styleLetter;
     const r = await api('/api/video/story-frames', {
@@ -987,10 +1112,11 @@ async function generate() {
         width:           state.width,
         height:          state.height,
         fps:             parseInt($('fps-select').value) || 24,
-        frame_count:     25,
+        frame_count:     49,
         prompts:         rows.map(r => r.querySelector('.per-transition-prompt').value.trim()),
-        frame_counts:    rows.map(r => parseInt(r.querySelector('.per-transition-frames').value) || 25),
+        frame_counts:    rows.map(r => parseInt(r.querySelector('.per-transition-frames').value) || 49),
         rife_multiplier: state.rifeMultiplier,
+        end_on_keyframe: state.endOnKeyframe,
       };
     }
     const r = await api('/api/video/generate', {
@@ -1012,11 +1138,7 @@ async function generate() {
 }
 
 // ── Progress polling ──────────────────────────────────────────────────────────
-// Phases that end polling and trigger a card rebuild. `review` is terminal
-// from the polling-loop perspective: it stops polling and switches the card to
-// the segment-selection UI; assembling resumes its own polling after the user
-// confirms.
-const _TERMINAL_PHASES = new Set(['done', 'failed', 'review']);
+const _TERMINAL_PHASES = new Set(['done', 'failed']);
 
 function startProgressPolling(videoId) {
   if (state.progressIntervals.has(videoId)) return;
@@ -1028,11 +1150,15 @@ function startProgressPolling(videoId) {
       if (_TERMINAL_PHASES.has(prog.phase)) {
         clearInterval(intervalId);
         state.progressIntervals.delete(videoId);
-        if (prog.phase === 'done')        ArtRium.toast('Video ready ✓');
-        else if (prog.phase === 'failed') ArtRium.toast('Video generation failed', true);
-        else                              ArtRium.toast('Clips ready — pick which to merge');
+        if (prog.phase === 'done') ArtRium.toast('Ready ✓');
+        else                       ArtRium.toast('Video job failed', true);
+        // Refresh clips first (a finished job's stack, or sources removed by a
+        // delete-after-merge), then rebuild the card. A merge with
+        // delete_sources may also have pruned whole source jobs — reload all.
+        await loadClips();
         const r2 = await api(`/api/video/jobs/${videoId}`);
         updateVideoCard(await r2.json());
+        await loadVideos();
       }
     } catch(_) {}
   }, 4000);
@@ -1042,107 +1168,157 @@ function startProgressPolling(videoId) {
 // Branch on status to wire up whatever the rendered card needs next.
 function _postRenderVideo(v) {
   if (v.status === 'generating' || v.status === 'assembling') startProgressPolling(v.id);
-  else if (v.status === 'review') loadSegments(v.id);
+  else if (_isClipJob(v)) renderClipStack(v.id);
 }
 
-// ── Segment review (Stapel) ───────────────────────────────────────────────────
-async function loadSegments(videoId) {
-  try {
-    const r = await api(`/api/video/jobs/${videoId}/segments`);
-    const data = await r.json();
-    const segs = data.segments || [];
-    // Default selection = all segments included, preserved across re-renders so
-    // the user's checks survive a card rebuild.
-    if (!state.segmentSelection.has(videoId)) {
-      state.segmentSelection.set(videoId, new Set(segs.map(s => s.index)));
-    }
-    renderSegmentList(videoId, segs);
-  } catch(e) {
-    const host = $(`review-${videoId}`);
-    if (host) host.innerHTML = `<div class="error-text">Failed to load clips: ${e.message || e}</div>`;
+// ── Clip stacks + cross-job merge ─────────────────────────────────────────────
+// Every generation job's clips live in the library (state.clipsByJob). Any
+// clips — across jobs and workflows — can be picked into one ordered merge
+// selection; the floating merge bar turns them into a new final video.
+
+// A "clip job" renders as a stack: any non-merge job whose clips exist. Failed
+// jobs keep their already-rendered clips visible (partial stacks are usable).
+function _isClipJob(v) {
+  return v.workflow !== 'merge' && !v.filename &&
+         (state.clipsByJob.get(v.id) || []).length > 0;
+}
+
+async function loadClips() {
+  const r = await api('/api/video/clips');
+  const clips = await r.json();
+  state.clipsByJob = new Map();
+  for (const c of clips) {
+    if (!state.clipsByJob.has(c.video_id)) state.clipsByJob.set(c.video_id, []);
+    state.clipsByJob.get(c.video_id).push(c);
   }
+  // Drop merge selections whose clips vanished (deleted elsewhere / merged away)
+  const known = new Set(clips.map(c => c.id));
+  let changed = false;
+  for (const id of [...state.mergeSelection.keys()]) {
+    if (!known.has(id)) { state.mergeSelection.delete(id); changed = true; }
+  }
+  if (changed) _renumberMergeSelection();
 }
 
-function renderSegmentList(videoId, segs) {
-  const host = $(`review-${videoId}`);
+function renderClipStack(videoId) {
+  const host = $(`stack-${videoId}`);
   if (!host) return;
-  const sel = state.segmentSelection.get(videoId);
-  const total = segs.length;
-  const rows = segs.map(s => `
-    <div class="seg-row ${sel.has(s.index) ? 'selected' : ''}" data-seg-idx="${s.index}"
-         onclick="toggleSegment('${videoId}', ${s.index})">
-      <div class="seg-thumb-wrap" data-seg-idx="${s.index}"
-           onclick="playSegment('${videoId}', ${s.index}, event)">
-        <img src="${withAuth(s.thumb_url)}" alt="">
-        <video src="${withAuth(s.url)}" controls playsinline preload="none"></video>
+  const clips = state.clipsByJob.get(videoId) || [];
+  if (!clips.length) { host.innerHTML = ''; return; }
+  const rows = clips.map(c => {
+    const order = state.mergeSelection.get(c.id);
+    return `
+    <div class="seg-row ${order ? 'selected' : ''}" data-clip-id="${c.id}"
+         onclick="toggleClipSelect('${c.id}')">
+      <div class="seg-thumb-wrap" onclick="playClip(this, event)">
+        <img src="${withAuth(c.thumb_url)}" alt="">
+        <video src="${withAuth(c.url)}" controls playsinline preload="none"></video>
         <div class="seg-play-icon">▶</div>
       </div>
       <div class="seg-info">
-        <div class="seg-title">Clip ${s.index + 1}</div>
-        <div class="seg-meta">${s.frame_count || '?'} frames</div>
+        <div class="seg-title">Clip ${c.idx + 1}${c.has_audio ? ' 🔊' : ''}</div>
+        <div class="seg-meta">${c.frame_count || '?'} frames · ${c.width || '?'}×${c.height || '?'} · ${c.fps || '?'}fps</div>
         <div class="seg-prompt-row">
-          <div class="seg-prompt">${_esc(s.prompt || '— (no prompt)')}</div>
-          ${s.prompt ? `<button class="copy-btn" type="button" onclick="event.stopPropagation(); copyBucket(this)" title="Copy">📋</button>` : ''}
+          <div class="seg-prompt">${_esc(c.prompt || '— (no prompt)')}</div>
+          ${c.prompt ? `<button class="copy-btn" type="button" onclick="event.stopPropagation(); copyBucket(this)" title="Copy">📋</button>` : ''}
         </div>
       </div>
-      <div class="seg-check">✓</div>
-    </div>
-  `).join('');
+      <div class="seg-side">
+        <div class="seg-check">${order || '✓'}</div>
+        <button class="clip-delete-btn" type="button" title="Delete clip"
+                onclick="event.stopPropagation(); deleteClip('${c.id}')">🗑</button>
+      </div>
+    </div>`;
+  }).join('');
   host.innerHTML = `
-    <div class="seg-hint">${total} clip${total === 1 ? '' : 's'} ready — tap a thumbnail to preview, tap the row to toggle inclusion.</div>
+    <div class="seg-hint">${clips.length} clip${clips.length === 1 ? '' : 's'} — tap a thumbnail to preview, tap a row to add it to the merge selection.</div>
     ${rows}
-    <button class="seg-assemble-btn" id="assemble-${videoId}"
-            ${sel.size === 0 ? 'disabled' : ''}
-            onclick="assembleVideo('${videoId}')">
-      Assemble Video (${sel.size}/${total} selected)
-    </button>
   `;
 }
 
-function toggleSegment(videoId, idx) {
-  const sel = state.segmentSelection.get(videoId);
-  if (!sel) return;
-  if (sel.has(idx)) sel.delete(idx);
-  else sel.add(idx);
-  const row = document.querySelector(`#review-${videoId} .seg-row[data-seg-idx="${idx}"]`);
-  if (row) row.classList.toggle('selected', sel.has(idx));
-  const btn = $(`assemble-${videoId}`);
-  if (btn) {
-    const total = document.querySelectorAll(`#review-${videoId} .seg-row`).length;
-    btn.disabled = sel.size === 0;
-    btn.textContent = `Assemble Video (${sel.size}/${total} selected)`;
-  }
-}
-
-function playSegment(videoId, idx, event) {
+function playClip(wrap, event) {
   if (event) event.stopPropagation();
-  const wrap = document.querySelector(`#review-${videoId} .seg-thumb-wrap[data-seg-idx="${idx}"]`);
-  if (!wrap) return;
-  if (wrap.classList.contains('playing')) return;   // already showing native controls; leave clicks to <video>
+  if (wrap.classList.contains('playing')) return;   // native controls own clicks now
   wrap.classList.add('playing');
   const v = wrap.querySelector('video');
   if (v) v.play().catch(() => {});
 }
 
-async function assembleVideo(videoId) {
-  const sel = state.segmentSelection.get(videoId);
-  if (!sel || sel.size === 0) return;
-  const indices = [...sel].sort((a, b) => a - b);
-  const btn = $(`assemble-${videoId}`);
-  if (btn) { btn.disabled = true; btn.textContent = 'Submitting…'; }
+function toggleClipSelect(clipId) {
+  if (state.mergeSelection.has(clipId)) {
+    state.mergeSelection.delete(clipId);
+    _renumberMergeSelection();
+  } else {
+    state.mergeSelection.set(clipId, state.mergeSelection.size + 1);
+  }
+  _refreshClipSelectionUI();
+}
+
+function _renumberMergeSelection() {
+  const sorted = [...state.mergeSelection.entries()].sort((a, b) => a[1] - b[1]);
+  state.mergeSelection = new Map(sorted.map(([id], i) => [id, i + 1]));
+}
+
+function _refreshClipSelectionUI() {
+  document.querySelectorAll('.seg-row[data-clip-id]').forEach(row => {
+    const order = state.mergeSelection.get(row.dataset.clipId);
+    row.classList.toggle('selected', order !== undefined);
+    const check = row.querySelector('.seg-check');
+    if (check) check.textContent = order !== undefined ? order : '✓';
+  });
+  renderMergeBar();
+}
+
+function renderMergeBar() {
+  const bar = $('merge-bar');
+  const n = state.mergeSelection.size;
+  if (!n) { bar.classList.remove('show'); return; }
+  bar.classList.add('show');
+  $('merge-count').textContent = `${n} clip${n === 1 ? '' : 's'} selected (merge in pick order)`;
+  $('merge-delete-toggle').checked = state.deleteAfterMerge;
+  $('merge-go-btn').disabled = false;
+  $('merge-go-btn').textContent = `Merge ${n} clip${n === 1 ? '' : 's'}`;
+}
+
+function clearMergeSelection() {
+  state.mergeSelection = new Map();
+  _refreshClipSelectionUI();
+}
+
+async function mergeSelectedClips() {
+  const n = state.mergeSelection.size;
+  if (!n) return;
+  const clipIds = [...state.mergeSelection.entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+  const btn = $('merge-go-btn');
+  btn.disabled = true; btn.textContent = 'Submitting…';
   try {
-    await api(`/api/video/jobs/${videoId}/assemble`, {
+    const r = await api('/api/video/merge', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({indices}),
+      body: JSON.stringify({clip_ids: clipIds, delete_sources: state.deleteAfterMerge}),
     });
-    ArtRium.toast(`Assembling from ${indices.length} clip${indices.length === 1 ? '' : 's'}…`);
-    state.segmentSelection.delete(videoId);
-    const r = await api(`/api/video/jobs/${videoId}`);
-    updateVideoCard(await r.json());
+    const d = await r.json();
+    ArtRium.toast(`Merging ${n} clip${n === 1 ? '' : 's'}…`);
+    state.mergeSelection = new Map();
+    renderMergeBar();
+    await loadVideos();
+    startProgressPolling(d.video_id);
   } catch(e) {
-    ArtRium.toast(e.message || 'Failed to assemble', true);
-    if (btn) { btn.disabled = false; btn.textContent = `Assemble Video (${sel.size} selected)`; }
+    ArtRium.toast(e.message || 'Failed to start merge', true);
+    renderMergeBar();
+  }
+}
+
+async function deleteClip(clipId) {
+  if (!confirm('Delete this clip?')) return;
+  try {
+    await api(`/api/video/clips/${clipId}`, {method: 'DELETE'});
+    state.mergeSelection.delete(clipId);
+    _renumberMergeSelection();
+    ArtRium.toast('Clip deleted');
+    await loadVideos();   // the source job may have been pruned entirely
+  } catch(e) {
+    ArtRium.toast(e.message || 'Delete failed', true);
   }
 }
 
@@ -1154,7 +1330,6 @@ const PHASE_STEPS = [
   { key: 'submitting', label: 'Submit'   },
   { key: 'queued',     label: 'Queue'    },
   { key: 'running',    label: 'Generate' },
-  { key: 'review',     label: 'Review'   },
   { key: 'finalizing', label: 'Finalize' },
   { key: 'done',       label: 'Done'     },
 ];
@@ -1185,10 +1360,11 @@ function applyProgress(videoId, prog) {
 // ── Video list ────────────────────────────────────────────────────────────────
 async function loadVideos() {
   try {
-    const r = await api('/api/video');
+    const [r] = await Promise.all([api('/api/video'), loadClips()]);
     state.videos = await r.json();
     renderVideos();
     for (const v of state.videos) _postRenderVideo(v);
+    renderMergeBar();
   } catch(e) {}
 }
 
@@ -1205,6 +1381,9 @@ function renderVideos() {
 
 function _videoMeta(v) {
   const n = v.n_images || '?';
+  if (v.workflow === 'merge') {
+    return `Merged from ${n} clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
+  }
   if (v.workflow === 'ltx_i2v') {
     return `${n} LTX clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps · 🔊`;
   }
@@ -1264,14 +1443,19 @@ function makeVideoCard(v) {
 
   const statusClass = `status-${v.status}`;
   const statusLabel = {
-    generating:'Generating…', review:'Review', assembling:'Assembling…',
+    generating:'Generating…', assembling:'Merging…',
     done:'Done', failed:'Failed',
   }[v.status] || v.status;
   const meta = _videoMeta(v);
   const date = fmtDate(v.created_at);
+  const clipJob = _isClipJob(v);
 
   let body = '';
-  if (v.status === 'done' && v.url) {
+  if (clipJob) {
+    // Generation job → its clip stack (failed jobs keep their partial stack).
+    const err = v.status === 'failed' ? `<div class="error-text">${v.error || 'Unknown error'}</div>` : '';
+    body = `${err}<div class="seg-review" id="stack-${v.id}"></div>`;
+  } else if (v.status === 'done' && v.url) {
     const videoUrl = withAuth(v.url);
     const thumbUrl = v.thumb_url ? withAuth(v.thumb_url) : null;
     const stBadge = v.has_soundtrack ? '<div class="soundtrack-badge">♪</div>' : '';
@@ -1300,11 +1484,6 @@ function makeVideoCard(v) {
         </div>
         <div class="progress-track"><div class="progress-fill" style="width:3%"></div></div>
         <div><span class="progress-message">Starting…</span><span class="progress-pct"></span></div>
-      </div>`;
-  } else if (v.status === 'review') {
-    body = `
-      <div class="seg-review" id="review-${v.id}">
-        <div class="seg-hint">Loading clips…</div>
       </div>`;
   } else if (v.status === 'failed') {
     body = `<div class="error-text">${v.error || 'Unknown error'}</div>`;
@@ -1437,9 +1616,14 @@ async function deleteVideo(id) {
     state.videos = state.videos.filter(v => v.id !== id);
     clearInterval(state.progressIntervals.get(id));
     state.progressIntervals.delete(id);
-    state.segmentSelection.delete(id);
+    // Deleting a job cascades to its clips — drop them from the merge selection.
+    for (const c of state.clipsByJob.get(id) || []) state.mergeSelection.delete(c.id);
+    state.clipsByJob.delete(id);
+    _renumberMergeSelection();
     ArtRium.toast('Deleted');
     renderVideos();
+    for (const v of state.videos) _postRenderVideo(v);
+    renderMergeBar();
   } catch(e) { ArtRium.toast('Delete failed', true); }
 }
 

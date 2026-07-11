@@ -1809,7 +1809,9 @@ function closeVideoPicker() {
 async function loadAllVideos() {
   try {
     const r = await api('/api/video');
-    state.allVideos = (await r.json()).filter(v => v.status === 'done');
+    // Only finished videos with a final file — clip-library generation jobs
+    // (status done, no filename/url) can't be posted directly.
+    state.allVideos = (await r.json()).filter(v => v.status === 'done' && v.filename);
   } catch(_) {}
 }
 

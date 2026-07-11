@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -333,6 +334,39 @@ class Video(Base):
     youtube_url: Mapped[str | None] = mapped_column(Text)               # canonical watch URL
     youtube_privacy: Mapped[str | None] = mapped_column(String(16))     # "public" | "unlisted" | "private"
     youtube_uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+
+
+class VideoClip(Base):
+    """One generated segment clip of a Video job — a first-class library item.
+
+    Every workflow (i2v_multi / ltx_i2v / flf2v) persists each segment it
+    renders as a clip row; the job's clips form its "stack" in the UI. Clips
+    from any number of jobs can then be merged (in any order) into a new
+    Video row with workflow="merge". Files live under
+    storage/videos/segments/{video_id}/.
+    """
+    __tablename__ = "video_clips"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    video_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    idx: Mapped[int] = mapped_column(Integer, nullable=False)          # position within the job
+    filename: Mapped[str] = mapped_column(String(512), nullable=False) # e.g. "seg_0.mp4" (in the job's segments dir)
+    thumb: Mapped[str] = mapped_column(String(512), nullable=False)    # e.g. "seg_0_thumb.jpg"
+    prompt: Mapped[str | None] = mapped_column(Text)
+    frame_count: Mapped[int | None] = mapped_column(Integer)
+    workflow: Mapped[str] = mapped_column(String(32), nullable=False)  # source job workflow
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    fps: Mapped[int | None] = mapped_column(Integer)
+    has_audio: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # ltx_i2v clips carry generated audio
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

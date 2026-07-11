@@ -1,9 +1,10 @@
 """
-Key-frame video generation — three workflow types, all sharing the same
-per-segment "generate → review → assemble" pipeline:
+Key-frame video generation — three workflow types, all producing per-segment
+CLIPS that land in a shared clip library (one "stack" per job):
 
   i2v_multi  Each image is animated independently (WanImageToVideo).
              Supports 1–10 images with per-image prompts and frame counts.
+             Prompts can be auto-suggested via POST /api/video/suggest-i2v.
 
   ltx_i2v    Each image is animated independently via LTX-2.3 (native audio).
              Supports 1–6 images with per-image prompts and frame counts.
@@ -15,19 +16,27 @@ per-segment "generate → review → assemble" pipeline:
              frame count. Prompts can be auto-suggested in one VLM call via
              POST /api/video/suggest-transitions.
 
+A job is "done" when all of its clips are rendered — there is no per-job
+final file anymore. Final videos are created by merging clips (from any
+number of jobs, in any order, mixed workflows allowed) via POST
+/api/video/merge, which normalizes resolution/fps/audio and re-encodes into
+a new Video row with workflow="merge". Sources can optionally be deleted
+after a successful merge.
+
 POST /api/video/generate            → enqueue job, return {video_id}
 POST /api/video/suggest-transitions → VLM-suggested per-transition prompts (flf2v)
+POST /api/video/suggest-i2v         → VLM-suggested surreal per-image prompts (i2v/ltx)
 GET  /api/video/jobs/{id}           → poll status
 GET  /api/video/jobs/{id}/progress  → lightweight progress (ComfyUI queue + phase)
-GET  /api/video/jobs/{id}/segments  → per-segment review list (multi-clip jobs)
-POST /api/video/jobs/{id}/assemble  → concatenate chosen segments
+GET  /api/video/clips               → all library clips (frontend groups by job)
+DELETE /api/video/clips/{clip_id}   → delete one clip (empty source jobs are pruned)
+POST /api/video/merge               → concat chosen clips (cross-job) into a new video
 GET  /api/video/thumb/{id}          → first-frame JPEG thumbnail
 GET  /api/video/file/{fname}        → serve MP4
 GET  /api/videos                    → list all videos
-DELETE /api/video/{id}              → delete
+DELETE /api/video/{id}              → delete a video/job (cascades to its clips)
 """
 import asyncio
-import json
 import logging
 import random
 import shutil
@@ -48,7 +57,7 @@ from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.imaging import prepare_jpg_for_web
 from core.loras import ALLOWED_LORAS, DEFAULT_LORA, LORAS
-from core.models import Image, Song, Video
+from core.models import Image, Song, Video, VideoClip
 from core.tasks import safe_create_task
 from core.video_thumb import make_video_thumbnail
 from services.comfy.client import (
@@ -60,12 +69,16 @@ from services.comfy.client import (
 )
 from services.comfy.ingest import ingest_comfy_image
 from services.comfy.zimage import ZIMAGE_SAVE_NODE, build_zimage_workflow
-from services.ollama.analysis import generate_transition_prompts
+from services.ollama.analysis import (
+    generate_i2v_motion_prompts,
+    generate_transition_prompts,
+)
 from services.ollama.story_frames import (
     describe_image_for_story,
     generate_story_frame_prompts,
 )
 from services.ollama.zimage_enhance import get_zimage_style_block
+from services.video.merge import MergeInput, merge_clips
 from services.video.soundtrack import mux_soundtrack
 
 logger = logging.getLogger(__name__)
@@ -90,6 +103,17 @@ _LORA_HIGH  = "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
 _LORA_LOW   = "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
 _VAE_NAME   = "wan_2.1_vae.safetensors"
 _RIFE_CKPT  = "rife49.pth"
+
+# FLF2V sampler tuning — full-strength 4-step lightx2v distill on both
+# experts, cfg=1 (the plain Lightning fast path). An 8-step asymmetric
+# variant (weakened distill + cfg 3 on the high-noise expert, per
+# https://huggingface.co/lightx2v/Wan2.2-Lightning/discussions/5) improved
+# end-frame adherence but doubled render time per transition — too slow in
+# practice, reverted 2026-07-09.
+_FLF2V_STEPS             = 4     # total steps across both experts
+_FLF2V_SPLIT_STEP        = 2     # high-noise expert covers steps 0..split
+_FLF2V_LORA_HIGH_STRENGTH = 1.0  # distill LoRA at full strength on high-noise
+_FLF2V_CFG_HIGH          = 1     # distilled guidance-free path on high-noise
 
 # ── LTX-2.3 i2v (separate model family, native audio) ─────────────────────────
 # Single checkpoint carries the diffusion model + pixel VAE + audio VAE. The
@@ -123,10 +147,12 @@ class GenerateVideoRequest(BaseModel):
     frame_counts: list[int] = []   # i2v_multi/ltx_i2v: one per image; flf2v: one per transition (n-1)
     rife_multiplier: int = 3       # i2v_multi/flf2v: RIFE VFI frame interpolation factor (2/3/4); unused by ltx_i2v
     pingpong: bool = False         # i2v_multi: VHS_VideoCombine pingpong (boomerang) flag; unused by flf2v
+    end_on_keyframe: bool = False  # flf2v: append the raw end key frame after the diffused clip (pixel-exact landing, but reads as a cut when diffusion undershoots)
 
 
-class AssembleRequest(BaseModel):
-    indices: list[int]             # segment indices to include, in playback order
+class MergeRequest(BaseModel):
+    clip_ids: list[uuid.UUID]      # library clips to concatenate, in playback order (cross-job)
+    delete_sources: bool = False   # delete the source clips (and empty source jobs) after a successful merge
 
 
 # ── FLF2V workflow builder (key-frame transitions) ────────────────────────────
@@ -146,7 +172,7 @@ def _transition_nodes(
         p+"neg":    {"class_type": "CLIPTextEncode",      "inputs": {"clip": [p+"clip", 0], "text": _NEG_PROMPT}},
         p+"vae":    {"class_type": "VAELoader",           "inputs": {"vae_name": _VAE_NAME}},
         p+"unet_h": {"class_type": "UNETLoader",          "inputs": {"unet_name": _UNET_HIGH, "weight_dtype": "default"}},
-        p+"lora_h": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_h", 0], "lora_name": _LORA_HIGH, "strength_model": 1}},
+        p+"lora_h": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_h", 0], "lora_name": _LORA_HIGH, "strength_model": _FLF2V_LORA_HIGH_STRENGTH}},
         p+"samp_h": {"class_type": "ModelSamplingSD3",    "inputs": {"model": [p+"lora_h", 0], "shift": 5}},
         p+"unet_l": {"class_type": "UNETLoader",          "inputs": {"unet_name": _UNET_LOW, "weight_dtype": "default"}},
         p+"lora_l": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_l", 0], "lora_name": _LORA_LOW, "strength_model": 1}},
@@ -163,8 +189,9 @@ def _transition_nodes(
             "model":                     [p+"samp_h", 0],
             "add_noise":                 "enable",
             "noise_seed":                seed,
-            "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple",
-            "start_at_step": 0, "end_at_step": 2,
+            "steps": _FLF2V_STEPS, "cfg": _FLF2V_CFG_HIGH,
+            "sampler_name": "euler", "scheduler": "simple",
+            "start_at_step": 0, "end_at_step": _FLF2V_SPLIT_STEP,
             "return_with_leftover_noise": "enable",
             "positive":     [p+"flf2v", 0],
             "negative":     [p+"flf2v", 1],
@@ -174,8 +201,9 @@ def _transition_nodes(
             "model":                     [p+"samp_l", 0],
             "add_noise":                 "disable",
             "noise_seed":                0,
-            "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple",
-            "start_at_step": 2, "end_at_step": 10000,
+            "steps": _FLF2V_STEPS, "cfg": 1,
+            "sampler_name": "euler", "scheduler": "simple",
+            "start_at_step": _FLF2V_SPLIT_STEP, "end_at_step": 10000,
             "return_with_leftover_noise": "disable",
             "positive":     [p+"flf2v", 0],
             "negative":     [p+"flf2v", 1],
@@ -197,13 +225,18 @@ def _build_flf2v_single_workflow(
     width: int, height: int, fps: int,
     vid_prefix: str,
     rife_multiplier: int,
+    append_end_frame: bool = False,
 ) -> tuple[dict, str]:
     """Single key-frame transition with its own VHS save.
 
     One ComfyUI submission per transition keeps the VRAM peak independent of
     how many key frames the user picked — mirrors _build_i2v_single_workflow.
-    Appends the raw end key frame before RIFE so the clip lands crisply on
-    the exact chosen photo rather than a diffusion-approximated frame.
+
+    append_end_frame=True additionally appends the raw end key frame before
+    RIFE so the clip lands pixel-exact on the chosen photo. Off by default:
+    when the diffusion undershoots the end frame (distill-LoRA weakness), the
+    appended photo IS the perceived hard cut — RIFE only puts multiplier-1
+    interpolated frames (~1/12 s) between the last diffused frame and it.
     """
     wf: dict = {
         "img_start": {"class_type": "LoadImage", "inputs": {"image": start_fname, "upload": "image"}},
@@ -215,10 +248,13 @@ def _build_flf2v_single_workflow(
     )
     wf.update(nodes)
 
-    wf["batch_final"] = {"class_type": "ImageBatch", "inputs": {
-        "image1": [decode_id, 0],
-        "image2": ["img_end", 0],
-    }}
+    rife_input = decode_id
+    if append_end_frame:
+        wf["batch_final"] = {"class_type": "ImageBatch", "inputs": {
+            "image1": [decode_id, 0],
+            "image2": ["img_end", 0],
+        }}
+        rife_input = "batch_final"
 
     wf["rife"] = {"class_type": "RIFE VFI", "inputs": {
         "ckpt_name":                  _RIFE_CKPT,
@@ -230,7 +266,7 @@ def _build_flf2v_single_workflow(
         "dtype":                      "float32",
         "torch_compile":              False,
         "batch_size":                 1,
-        "frames":                     ["batch_final", 0],
+        "frames":                     [rife_input, 0],
     }}
 
     save_id = "flf2v_save"
@@ -438,9 +474,49 @@ def _build_ltx_single_workflow(
 # ── Segment storage helpers ───────────────────────────────────────────────────
 
 def _segments_dir(video_id: uuid.UUID) -> Path:
-    """Per-job directory holding individual segment MP4s, thumbnails and meta.json
-    before the user picks which to assemble."""
+    """Per-job directory holding the job's clip MP4s + thumbnails (the files
+    behind its VideoClip library rows)."""
     return settings.videos_dir / "segments" / str(video_id)
+
+
+async def _persist_clip(
+    video_id: uuid.UUID,
+    idx: int,
+    filename: str,
+    thumb: str,
+    prompt: str,
+    frame_count: int,
+    req: GenerateVideoRequest,
+) -> None:
+    """Insert one VideoClip library row for a freshly rendered segment, so the
+    clip is browsable/mergeable the moment it exists (even if a later segment
+    of the same job fails)."""
+    async with AsyncSessionLocal() as db:
+        db.add(VideoClip(
+            video_id=video_id,
+            idx=idx,
+            filename=filename,
+            thumb=thumb,
+            prompt=prompt or None,
+            frame_count=frame_count,
+            workflow=req.workflow,
+            width=req.width,
+            height=req.height,
+            fps=req.fps,
+            has_audio=(req.workflow == "ltx_i2v"),
+        ))
+        await db.commit()
+
+
+async def _finalize_clip_job(video_id: uuid.UUID, vid_key: str) -> None:
+    """Generation jobs deliver clips, not a final file — mark the job done."""
+    async with AsyncSessionLocal() as db:
+        video = await db.get(Video, video_id)
+        if video:
+            video.status = "done"
+            video.error = None
+            await db.commit()
+    _progress.pop(vid_key, None)
 
 
 # ── Progress / failure helpers (shared by _run_generation + _assemble_video) ──
@@ -540,13 +616,11 @@ async def _run_flf2v_multi(
     req: GenerateVideoRequest,
     prefix: str,
     vid_key: str,
-) -> Path | None:
+) -> None:
     """Generate each key-frame transition as an independent ComfyUI submission,
-    persisting segments as discrete files + meta.json. Mirrors _run_i2v_multi
-    exactly, but over adjacent image PAIRS (n_imgs-1 transitions) instead of
-    single images. For exactly 2 images (1 transition) there's nothing to
-    choose between, so it finalizes directly; otherwise it lands in
-    status=review."""
+    persisting every transition as a VideoClip library row (the job's stack).
+    Mirrors _run_i2v_multi exactly, but over adjacent image PAIRS (n_imgs-1
+    transitions) instead of single images."""
     n_imgs = len(comfy_names)
     if n_imgs < 2:
         raise ValueError("FLF2V requires at least 2 images")
@@ -556,7 +630,6 @@ async def _run_flf2v_multi(
     fc_list = req.frame_counts if len(req.frame_counts) == n_trans else [req.frame_count] * n_trans
     seg_dir = _segments_dir(video_id)
     seg_dir.mkdir(parents=True, exist_ok=True)
-    segment_meta: list[dict] = []
     seg_band_lo, seg_band_hi = 20, 86
     seg_span = seg_band_hi - seg_band_lo
 
@@ -571,7 +644,7 @@ async def _run_flf2v_multi(
         _set_progress(vid_key, "submitting", f"Transition {i + 1}/{n_trans} — submitting to ComfyUI…", pct_seg_lo)
         wf, save_node = _build_flf2v_single_workflow(
             start_fname, end_fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
-            req.rife_multiplier,
+            req.rife_multiplier, append_end_frame=req.end_on_keyframe,
         )
         prompt_id = await _post_workflow_with_retry(client, wf)
         logger.info("Video job %s transition %d → ComfyUI prompt %s", video_id, i + 1, prompt_id)
@@ -582,21 +655,13 @@ async def _run_flf2v_multi(
         seg_outputs = await poll_history(client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL)
         seg_src = _comfy_save_path(seg_outputs.get(save_node, {}), f"Transition {i + 1}")
 
-        # Persist segment under a stable name so the review UI + assemble
-        # endpoint can refer to it by index regardless of ComfyUI's output.
+        # Persist the clip under a stable name and register it in the library
+        # immediately — a crash on a later transition loses nothing.
         seg_dest  = seg_dir / f"seg_{i}.mp4"
         seg_thumb = seg_dir / f"seg_{i}_thumb.jpg"
         await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
         await make_video_thumbnail(seg_dest, seg_thumb)
-        segment_meta.append({
-            "index":          i,
-            "filename":       seg_dest.name,
-            "thumb":          seg_thumb.name,
-            "prompt":         p_i,
-            "frame_count":    fc_i,
-            "start_image_id": str(ordered_images[i].id),
-            "end_image_id":   str(ordered_images[i + 1].id),
-        })
+        await _persist_clip(video_id, i, seg_dest.name, seg_thumb.name, p_i, fc_i, req)
         _set_progress(vid_key, "running", f"Transition {i + 1}/{n_trans} — saved ✓", pct_seg_hi)
 
         # Before the next transition, force ComfyUI to fully unload models and
@@ -606,35 +671,7 @@ async def _run_flf2v_multi(
             await free_memory(client)
             await asyncio.sleep(8)  # let CUDA actually release before the next cold load
 
-    # Sidecar metadata — consumed by /jobs/{id}/segments and _assemble_video.
-    meta = {
-        "video_id":        str(video_id),
-        "workflow":        req.workflow,
-        "width":           req.width,
-        "height":          req.height,
-        "fps":             req.fps,
-        "rife_multiplier": req.rife_multiplier,
-        "pingpong":        False,
-        "segments":        segment_meta,
-    }
-    await asyncio.to_thread(
-        (seg_dir / "meta.json").write_text, json.dumps(meta, indent=2), encoding="utf-8",
-    )
-
-    if n_trans > 1:
-        # Multi-transition: user picks which to merge — caller skips finalize.
-        _set_progress(vid_key, "review", f"{n_trans} transition clips ready — pick which to merge", 88)
-        async with AsyncSessionLocal() as db:
-            video = await db.get(Video, video_id)
-            if video:
-                video.status = "review"
-                await db.commit()
-        return None
-
-    # 1 transition (2 images): nothing to choose between, copy it into place.
-    dest = settings.videos_dir / f"{video_id}_artrium.mp4"
-    await asyncio.to_thread(shutil.copy2, seg_dir / "seg_0.mp4", dest)
-    return dest
+    await _finalize_clip_job(video_id, vid_key)
 
 
 async def _run_i2v_multi(
@@ -645,16 +682,14 @@ async def _run_i2v_multi(
     req: GenerateVideoRequest,
     prefix: str,
     vid_key: str,
-) -> Path | None:
-    """Generate each image as an independent ComfyUI submission, persist segments
-    as discrete files + meta.json. For n==1 returns the assembled mp4 path; for
-    n>1 transitions the row to status=review and returns None (caller skips finalize)."""
+) -> None:
+    """Generate each image as an independent ComfyUI submission, persisting
+    every clip as a VideoClip library row (the job's stack)."""
     n_imgs = len(comfy_names)
     prompts_list = req.prompts if len(req.prompts) == n_imgs else [req.prompt] * n_imgs
     fc_list = req.frame_counts if len(req.frame_counts) == n_imgs else [req.frame_count] * n_imgs
     seg_dir = _segments_dir(video_id)
     seg_dir.mkdir(parents=True, exist_ok=True)
-    segment_meta: list[dict] = []
     seg_band_lo, seg_band_hi = 20, 86
     seg_span = seg_band_hi - seg_band_lo
 
@@ -685,20 +720,13 @@ async def _run_i2v_multi(
         seg_outputs = await poll_history(client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL)
         seg_src = _comfy_save_path(seg_outputs.get(save_node, {}), f"Segment {i + 1}")
 
-        # Persist segment under a stable name so the review UI + assemble
-        # endpoint can refer to it by index regardless of ComfyUI's output.
+        # Persist the clip under a stable name and register it in the library
+        # immediately — a crash on a later segment loses nothing.
         seg_dest  = seg_dir / f"seg_{i}.mp4"
         seg_thumb = seg_dir / f"seg_{i}_thumb.jpg"
         await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
         await make_video_thumbnail(seg_dest, seg_thumb)
-        segment_meta.append({
-            "index":       i,
-            "filename":    seg_dest.name,
-            "thumb":       seg_thumb.name,
-            "prompt":      p_i,
-            "frame_count": fc_i,
-            "image_id":    str(img_obj.id),
-        })
+        await _persist_clip(video_id, i, seg_dest.name, seg_thumb.name, p_i, fc_i, req)
         _set_progress(vid_key, "running", f"Clip {i + 1}/{n_imgs} — saved ✓", pct_seg_hi)
 
         # Before the next segment, force ComfyUI to fully unload models and free VRAM.
@@ -709,35 +737,7 @@ async def _run_i2v_multi(
             await free_memory(client)
             await asyncio.sleep(8)  # let CUDA actually release before the next cold load
 
-    # Sidecar metadata — consumed by /jobs/{id}/segments and _assemble_video.
-    meta = {
-        "video_id":        str(video_id),
-        "workflow":        req.workflow,
-        "width":           req.width,
-        "height":          req.height,
-        "fps":             req.fps,
-        "rife_multiplier": req.rife_multiplier,
-        "pingpong":        req.pingpong,
-        "segments":        segment_meta,
-    }
-    await asyncio.to_thread(
-        (seg_dir / "meta.json").write_text, json.dumps(meta, indent=2), encoding="utf-8",
-    )
-
-    if n_imgs > 1:
-        # Multi-segment: user picks which to merge — caller skips finalize.
-        _set_progress(vid_key, "review", f"{n_imgs} clips ready — pick which to merge", 88)
-        async with AsyncSessionLocal() as db:
-            video = await db.get(Video, video_id)
-            if video:
-                video.status = "review"
-                await db.commit()
-        return None
-
-    # n == 1: nothing to choose between, copy the single segment into place.
-    dest = settings.videos_dir / f"{video_id}_artrium.mp4"
-    await asyncio.to_thread(shutil.copy2, seg_dir / "seg_0.mp4", dest)
-    return dest
+    await _finalize_clip_job(video_id, vid_key)
 
 
 async def _finalize_video_done(video_id: uuid.UUID, dest: Path, vid_key: str) -> None:
@@ -784,109 +784,120 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
             comfy_names = await _upload_images_to_comfy(client, ordered_images, prefix, vid_key)
             settings.videos_dir.mkdir(parents=True, exist_ok=True)
 
+            # Both runners persist their clips as they render and mark the
+            # job done themselves — the clips ARE the deliverable.
             if req.workflow == "flf2v":
-                dest = await _run_flf2v_multi(
+                await _run_flf2v_multi(
                     client, video_id, comfy_names, ordered_images, req, prefix, vid_key,
                 )
             else:
-                dest = await _run_i2v_multi(
+                await _run_i2v_multi(
                     client, video_id, comfy_names, ordered_images, req, prefix, vid_key,
                 )
-            if dest is None:  # multi-segment → review status, caller skips finalize
-                return
-
-        await _finalize_video_done(video_id, dest, vid_key)
 
     except Exception as exc:
         logger.exception("Video generation %s failed", video_id)
         await _finalize_video_failure(video_id, exc, vid_key)
 
 
-async def _assemble_video(video_id: uuid.UUID, indices: list[int]) -> None:
-    """Concatenate selected segments into the final video and mark the job done.
+async def _prune_empty_clip_job(db: AsyncSession, job_id: uuid.UUID) -> None:
+    """Delete a generation-job Video row once its last clip is gone.
 
-    Runs as a background task after the user picks segments in the review UI.
+    Only pure clip jobs are pruned (no final file on the row); anything else —
+    merge results, legacy assembled videos — is left alone. A FK RESTRICT
+    (e.g. an ImprovSession referencing the row) keeps the row instead of
+    failing the caller."""
+    remaining = await db.execute(
+        select(VideoClip.id).where(VideoClip.video_id == job_id).limit(1)
+    )
+    if remaining.first() is not None:
+        return
+    job = await db.get(Video, job_id)
+    if not job or job.filename:
+        return
+    try:
+        await db.delete(job)
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.warning("Could not prune empty clip job %s (still referenced?)", job_id)
+        return
+    shutil.rmtree(_segments_dir(job_id), ignore_errors=True)
+
+
+async def _delete_clips(clip_ids: list[uuid.UUID]) -> None:
+    """Delete clip files + rows, then prune source jobs that end up empty."""
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(VideoClip).where(VideoClip.id.in_(clip_ids)))
+        clips = list(result.scalars().all())
+        job_ids = {c.video_id for c in clips}
+        for c in clips:
+            seg_dir = _segments_dir(c.video_id)
+            (seg_dir / c.filename).unlink(missing_ok=True)
+            (seg_dir / c.thumb).unlink(missing_ok=True)
+            await db.delete(c)
+        await db.commit()
+        for jid in job_ids:
+            await _prune_empty_clip_job(db, jid)
+
+
+async def _run_merge(
+    video_id: uuid.UUID, clip_ids: list[uuid.UUID], delete_sources: bool,
+) -> None:
+    """Concatenate the chosen library clips into the merge Video's final file.
+
+    Runs as a background task. Clips may come from different jobs/workflows;
+    services.video.merge normalizes resolution/fps/audio in one ffmpeg pass.
     Reports progress through the same _progress dict as _run_generation so the
     existing polling endpoint keeps working without any client-side branching.
     """
     vid_key = str(video_id)
 
     try:
-        seg_dir = _segments_dir(video_id)
-        meta_path = seg_dir / "meta.json"
-        if not meta_path.exists():
-            raise FileNotFoundError(f"Segment metadata missing for {video_id}")
-        meta = json.loads(await asyncio.to_thread(meta_path.read_text, encoding="utf-8"))
-        all_segments = meta.get("segments", [])
-        seg_lookup = {s["index"]: s for s in all_segments}
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(VideoClip).where(VideoClip.id.in_(clip_ids)))
+            by_id = {c.id: c for c in result.scalars().all()}
+        clips = [by_id[cid] for cid in clip_ids if cid in by_id]
+        if len(clips) != len(clip_ids):
+            raise ValueError("One or more selected clips no longer exist")
 
-        chosen_files: list[Path] = []
-        for idx in indices:
-            if idx not in seg_lookup:
-                raise ValueError(f"Unknown segment index: {idx}")
-            sf = seg_dir / seg_lookup[idx]["filename"]
-            if not sf.exists():
-                raise FileNotFoundError(f"Segment file missing: {sf}")
-            chosen_files.append(sf)
+        inputs: list[MergeInput] = []
+        for c in clips:
+            f = _segments_dir(c.video_id) / c.filename
+            if not f.exists():
+                raise FileNotFoundError(f"Clip file missing on disk: {f}")
+            inputs.append(MergeInput(path=f, has_audio=c.has_audio))
 
-        fps = int(meta.get("fps", 24))
+        # Normalization target: the first selected clip decides.
+        width  = clips[0].width  or 960
+        height = clips[0].height or 960
+        fps    = clips[0].fps    or 24
         dest = settings.videos_dir / f"{video_id}_artrium.mp4"
 
-        _set_progress(vid_key, "finalizing", f"Concatenating {len(chosen_files)} clip(s)…", 92)
-        if len(chosen_files) == 1:
-            await asyncio.to_thread(shutil.copy2, chosen_files[0], dest)
+        _set_progress(vid_key, "finalizing", f"Merging {len(clips)} clip(s)…", 40)
+        if len(clips) == 1:
+            await asyncio.to_thread(shutil.copy2, inputs[0].path, dest)
         else:
-            # See _run_generation: concat *demuxer* with -c copy is unreliable for HEVC,
-            # re-encode through the concat filter instead.
-            #
-            # LTX segments carry a generated audio stream; concat it too so the
-            # merged video keeps its soundtrack (the AAC re-encode is negligible
-            # next to the x265 video pass). Wan/flf2v segments are silent, so
-            # forcing a=1 there would fail — gate on the workflow.
-            has_audio = meta.get("workflow") == "ltx_i2v"
-            cmd: list[str] = [settings.ffmpeg_path, "-y"]
-            for sf in chosen_files:
-                cmd += ["-i", str(sf)]
-            n = len(chosen_files)
-            if has_audio:
-                filter_inputs = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-                cmd += [
-                    "-filter_complex", f"{filter_inputs}concat=n={n}:v=1:a=1[v][a]",
-                    "-map", "[v]", "-map", "[a]",
-                ]
-            else:
-                filter_inputs = "".join(f"[{i}:v]" for i in range(n))
-                cmd += [
-                    "-filter_complex", f"{filter_inputs}concat=n={n}:v=1:a=0[v]",
-                    "-map", "[v]",
-                ]
-            cmd += [
-                "-c:v",     "libx265",
-                "-preset",  "medium",
-                "-crf",     "22",
-                "-pix_fmt", "yuv420p10le",
-                "-tag:v",   "hvc1",
-                "-r",       str(fps),
-            ]
-            if has_audio:
-                cmd += ["-c:a", "aac", "-b:a", "192k"]
-            cmd += [str(dest)]
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
+            await merge_clips(
+                inputs, dest, width, height, fps, ffmpeg_path=settings.ffmpeg_path,
             )
-            _, stderr_b = await proc.communicate()
-            if proc.returncode != 0:
-                tail = stderr_b.decode(errors="replace")[-1500:]
-                raise RuntimeError(f"ffmpeg concat failed (rc={proc.returncode}): {tail}")
 
         await _finalize_video_done(video_id, dest, vid_key)
-        logger.info("Video %s assembled from %d segment(s)", video_id, len(chosen_files))
+        logger.info("Video %s merged from %d clip(s)", video_id, len(clips))
 
     except Exception as exc:
-        logger.exception("Video assembly %s failed", video_id)
+        logger.exception("Video merge %s failed", video_id)
         await _finalize_video_failure(video_id, exc, vid_key)
+        return
+
+    if delete_sources:
+        # The merge itself succeeded — a cleanup hiccup must not flip the
+        # finished video back to failed, so this runs outside the main try.
+        try:
+            await _delete_clips(clip_ids)
+            logger.info("Merge %s: deleted %d source clip(s)", video_id, len(clip_ids))
+        except Exception:
+            logger.exception("Merge %s: source-clip cleanup failed (video is fine)", video_id)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -900,6 +911,29 @@ _TRANSITION_TIMEOUT_PER_IMAGE = 20.0
 class SuggestTransitionsRequest(BaseModel):
     image_ids: list[uuid.UUID]   # in the user's selected playback order
     context: str = ""            # optional story/narrative context (story-frames flow)
+
+
+async def _load_suggest_jpgs(
+    image_ids: list[uuid.UUID], db: AsyncSession,
+) -> list[bytes]:
+    """Resolve image IDs (order-preserving) and downscale each to a VLM-sized
+    JPEG. Shared by both prompt-suggestion endpoints."""
+    img_result = await db.execute(select(Image).where(Image.id.in_(image_ids)))
+    images_by_id = {img.id: img for img in img_result.scalars().all()}
+    ordered = [images_by_id[iid] for iid in image_ids if iid in images_by_id]
+    if len(ordered) != len(image_ids):
+        raise HTTPException(status_code=404, detail="One or more images not found")
+
+    jpgs: list[bytes] = []
+    for img in ordered:
+        src = settings.storage_dir / img.filepath
+        if not src.exists():
+            raise HTTPException(status_code=404, detail=f"Image file not found on disk: {img.id}")
+        jpg_bytes, _ = await prepare_jpg_for_web(
+            src, max_edge=_TRANSITION_MAX_EDGE, quality=_TRANSITION_JPG_QUALITY,
+        )
+        jpgs.append(jpg_bytes)
+    return jpgs
 
 
 @router.post("/suggest-transitions")
@@ -916,22 +950,7 @@ async def suggest_transitions(
     if n > 20:
         raise HTTPException(status_code=400, detail="Maximum 20 images")
 
-    img_result = await db.execute(select(Image).where(Image.id.in_(body.image_ids)))
-    images_by_id = {img.id: img for img in img_result.scalars().all()}
-    ordered = [images_by_id[iid] for iid in body.image_ids if iid in images_by_id]
-    if len(ordered) != n:
-        raise HTTPException(status_code=404, detail="One or more images not found")
-
-    jpgs: list[bytes] = []
-    for img in ordered:
-        src = settings.storage_dir / img.filepath
-        if not src.exists():
-            raise HTTPException(status_code=404, detail=f"Image file not found on disk: {img.id}")
-        jpg_bytes, _ = await prepare_jpg_for_web(
-            src, max_edge=_TRANSITION_MAX_EDGE, quality=_TRANSITION_JPG_QUALITY,
-        )
-        jpgs.append(jpg_bytes)
-
+    jpgs = await _load_suggest_jpgs(body.image_ids, db)
     logger.info(
         "Suggest-transitions: %d images, model=%s, payload=%dKB",
         n, settings.ollama_titler_model, sum(len(j) for j in jpgs) // 1024,
@@ -942,6 +961,35 @@ async def suggest_transitions(
         prompts = await generate_transition_prompts(jpgs, context=body.context, timeout=timeout)
     except Exception as exc:
         logger.exception("Transition prompt suggestion failed for %d images", n)
+        raise HTTPException(status_code=502, detail=f"Suggestion failed: {exc}")
+
+    return {"prompts": prompts}
+
+
+@router.post("/suggest-i2v")
+async def suggest_i2v(
+    body: SuggestTransitionsRequest, db: AsyncSession = Depends(get_db),
+):
+    """VLM-suggested per-image surreal animation prompts for i2v_multi/ltx_i2v
+    — one vision call, N prompts back (one per image). Advisory only, exactly
+    like /suggest-transitions."""
+    n = len(body.image_ids)
+    if n < 1:
+        raise HTTPException(status_code=400, detail="Need at least 1 image to suggest prompts")
+    if n > 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 images")
+
+    jpgs = await _load_suggest_jpgs(body.image_ids, db)
+    logger.info(
+        "Suggest-i2v: %d images, model=%s, payload=%dKB",
+        n, settings.ollama_titler_model, sum(len(j) for j in jpgs) // 1024,
+    )
+
+    timeout = max(_TRANSITION_TIMEOUT_FLOOR, _TRANSITION_TIMEOUT_PER_IMAGE * n)
+    try:
+        prompts = await generate_i2v_motion_prompts(jpgs, context=body.context, timeout=timeout)
+    except Exception as exc:
+        logger.exception("i2v prompt suggestion failed for %d images", n)
         raise HTTPException(status_code=502, detail=f"Suggestion failed: {exc}")
 
     return {"prompts": prompts}
@@ -972,8 +1020,10 @@ class StoryFramesRequest(BaseModel):
     style: str | None = None       # z-Image enhancer style letter (A–D); None = derive from source
     width: int = 1024
     height: int = 1024
-    lora_name: str = DEFAULT_LORA
-    lora_strength: float = 0.5
+    # None = inherit the source image's own LoRA/strength (high consistency
+    # across the story sequence); an explicit value still overrides it.
+    lora_name: str | None = None
+    lora_strength: float | None = None
 
 
 def _prune_story_jobs() -> None:
@@ -1059,6 +1109,8 @@ async def _run_story_frames(
                     seed=seed,
                     width=req.width,
                     height=req.height,
+                    lora_name=req.lora_name,
+                    lora_strength=req.lora_strength,
                     workflow_name=ZIMAGE_WORKFLOW_NAME,
                     batch_id=batch_id,
                 )
@@ -1107,14 +1159,21 @@ async def create_story_frames(body: StoryFramesRequest, db: AsyncSession = Depen
         raise HTTPException(status_code=400, detail="beat_seconds must be 1–600")
     if body.style and get_zimage_style_block(body.style) is None:
         raise HTTPException(status_code=400, detail=f"Unknown style: {body.style}")
-    if body.lora_name not in ALLOWED_LORAS:
-        raise HTTPException(status_code=400, detail=f"Unknown LoRA: {body.lora_name}")
 
     image = await db.get(Image, body.image_id)
     if not image:
         raise HTTPException(status_code=404, detail="Source image not found")
     if not (settings.storage_dir / image.filepath).exists():
         raise HTTPException(status_code=404, detail="Source image file missing on disk")
+
+    # Default LoRA/strength to the source image's own generation params —
+    # keeps the story sequence visually consistent unless explicitly overridden.
+    if body.lora_name is None:
+        body.lora_name = image.lora_name or DEFAULT_LORA
+    if body.lora_strength is None:
+        body.lora_strength = float(image.lora_strength) if image.lora_strength is not None else 0.5
+    if body.lora_name not in ALLOWED_LORAS:
+        raise HTTPException(status_code=400, detail=f"Unknown LoRA: {body.lora_name}")
 
     job_id = str(uuid.uuid4())
     _story_jobs[job_id] = {
@@ -1218,13 +1277,6 @@ async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
         return {"phase": "done", "message": "Complete", "pct": 100}
     if video.status == "failed":
         return {"phase": "failed", "message": video.error or "Generation failed", "pct": 0}
-    if video.status == "review":
-        prog = _progress.get(str(video_id), {})
-        return {
-            "phase":   "review",
-            "message": prog.get("message", "Clips ready — pick which to merge"),
-            "pct":     prog.get("pct", 88),
-        }
 
     prog = dict(_progress.get(str(video_id), {"phase": "processing", "message": "Processing…", "pct": 30}))
 
@@ -1245,69 +1297,98 @@ async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
     return prog
 
 
-@router.get("/jobs/{video_id}/segments")
-async def list_segments(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    """Return per-segment metadata + URLs for the review UI. 404 if not yet generated."""
-    video = await db.get(Video, video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
-    seg_dir = _segments_dir(video_id)
-    meta_path = seg_dir / "meta.json"
-    if not meta_path.exists():
-        raise HTTPException(status_code=404, detail="No segments available for this video")
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    segments = []
-    for s in meta.get("segments", []):
-        segments.append({
-            "index":          s["index"],
-            "filename":       s["filename"],
-            "url":            f"/api/video/segments/{video_id}/{s['filename']}",
-            "thumb_url":      f"/api/video/segments/{video_id}/{s['thumb']}",
-            "prompt":         s.get("prompt", ""),
-            "frame_count":    s.get("frame_count"),
-            "image_id":       s.get("image_id"),
-            "start_image_id": s.get("start_image_id"),
-            "end_image_id":   s.get("end_image_id"),
-        })
+def _serialize_clip(c: VideoClip) -> dict:
     return {
-        "video_id":        str(video_id),
-        "status":          video.status,
-        "width":           meta.get("width"),
-        "height":          meta.get("height"),
-        "fps":             meta.get("fps"),
-        "rife_multiplier": meta.get("rife_multiplier"),
-        "pingpong":        meta.get("pingpong"),
-        "segments":        segments,
+        "id":          str(c.id),
+        "video_id":    str(c.video_id),
+        "idx":         c.idx,
+        "url":         f"/api/video/segments/{c.video_id}/{c.filename}",
+        "thumb_url":   f"/api/video/segments/{c.video_id}/{c.thumb}",
+        "prompt":      c.prompt,
+        "frame_count": c.frame_count,
+        "workflow":    c.workflow,
+        "width":       c.width,
+        "height":      c.height,
+        "fps":         c.fps,
+        "has_audio":   c.has_audio,
+        "created_at":  c.created_at.isoformat(),
     }
 
 
-@router.post("/jobs/{video_id}/assemble", status_code=202)
-async def assemble_video(
-    video_id: uuid.UUID, body: AssembleRequest, db: AsyncSession = Depends(get_db),
-):
-    """Kick off concat for the chosen segment indices. Only valid in status=review."""
-    video = await db.get(Video, video_id)
-    if not video:
-        raise HTTPException(status_code=404, detail="Video not found")
-    if video.status != "review":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Video is in status '{video.status}' — assemble only valid from 'review'",
-        )
-    if not body.indices:
-        raise HTTPException(status_code=400, detail="No segments selected")
+@router.get("/clips")
+async def list_clips(db: AsyncSession = Depends(get_db)):
+    """All library clips across every job — the client groups them into
+    per-job stacks via video_id (job order comes from GET /api/video)."""
+    result = await db.execute(
+        select(VideoClip).order_by(VideoClip.video_id, VideoClip.idx)
+    )
+    return [_serialize_clip(c) for c in result.scalars().all()]
 
-    video.status = "assembling"
+
+@router.delete("/clips/{clip_id}", status_code=204)
+async def delete_clip(clip_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Delete one clip (file + thumbnail + row). A generation job that loses
+    its last clip is pruned entirely — an empty stack has nothing to show."""
+    clip = await db.get(VideoClip, clip_id)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    job_id = clip.video_id
+    seg_dir = _segments_dir(job_id)
+    (seg_dir / clip.filename).unlink(missing_ok=True)
+    (seg_dir / clip.thumb).unlink(missing_ok=True)
+    await db.delete(clip)
     await db.commit()
+    await _prune_empty_clip_job(db, job_id)
 
-    safe_create_task(_assemble_video(video_id, body.indices), name=f"video_assemble:{video_id}")
-    logger.info("Assembling video %s from segments %s", video_id, body.indices)
-    return {"video_id": str(video_id), "status": "assembling", "n_selected": len(body.indices)}
+
+@router.post("/merge", status_code=202)
+async def merge_videos(body: MergeRequest, db: AsyncSession = Depends(get_db)):
+    """Concatenate the chosen library clips — from any jobs, any workflows, in
+    the given order — into a new final video (workflow='merge'). Resolution,
+    fps and audio are normalized to make mixed selections always mergeable.
+    With delete_sources=true the source clips are removed after success."""
+    if not body.clip_ids:
+        raise HTTPException(status_code=400, detail="No clips selected")
+    if len(body.clip_ids) > 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 clips per merge")
+    if len(set(body.clip_ids)) != len(body.clip_ids):
+        raise HTTPException(status_code=400, detail="Duplicate clip IDs in selection")
+
+    result = await db.execute(select(VideoClip).where(VideoClip.id.in_(body.clip_ids)))
+    by_id = {c.id: c for c in result.scalars().all()}
+    missing = [str(cid) for cid in body.clip_ids if cid not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Clip(s) not found: {', '.join(missing)}")
+    first = by_id[body.clip_ids[0]]
+
+    video = Video(
+        id=uuid.uuid4(),
+        workflow="merge",
+        status="assembling",
+        width=first.width,
+        height=first.height,
+        fps=first.fps,
+        n_images=len(body.clip_ids),   # for merges: number of source clips
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(video)
+    await db.commit()
+    await db.refresh(video)
+
+    safe_create_task(
+        _run_merge(video.id, body.clip_ids, body.delete_sources),
+        name=f"video_merge:{video.id}",
+    )
+    logger.info(
+        "Queued merge %s from %d clip(s), delete_sources=%s",
+        video.id, len(body.clip_ids), body.delete_sources,
+    )
+    return {"video_id": str(video.id), "status": "assembling"}
 
 
 @router.get("/segments/{video_id}/{filename}")
 async def serve_segment(video_id: uuid.UUID, filename: str):
-    """Serve a single segment MP4 or its thumbnail JPEG for the review UI."""
+    """Serve a single clip MP4 or its thumbnail JPEG (clip library files)."""
     safe = Path(filename).name
     p = _segments_dir(video_id) / safe
     if not p.exists():
@@ -1509,7 +1590,7 @@ def _serialize(v: Video) -> dict:
         "soundtrack_song_id": str(v.soundtrack_song_id) if v.soundtrack_song_id else None,
         "muxed_filename":    v.muxed_filename,
         "has_soundtrack":    bool(v.muxed_filename),
-        "thumb_url":         f"/api/video/thumb/{v.id}" if v.status == "done" else None,
+        "thumb_url":         f"/api/video/thumb/{v.id}" if (v.status == "done" and v.filename) else None,
         "image_ids":         [str(i) for i in v.image_ids] if v.image_ids else [],
         "prompt":            v.prompt,
         "title":             v.title,

@@ -18,7 +18,7 @@ from core.auth import (
     verify_session_token,
 )
 from core.config import settings
-from core.startup_sweep import sweep_stuck_jobs
+from core.startup_sweep import backfill_review_clips, sweep_stuck_jobs
 from core.tasks import safe_create_task
 from services.ollama.analysis import warm_titler_model
 from workers.comfy_listener import ComfyListener
@@ -50,6 +50,10 @@ async def lifespan(app: FastAPI):
     # Mark jobs orphaned by the previous process's death as failed before
     # anything else starts polling/dispatching.
     await sweep_stuck_jobs()
+
+    # Adopt legacy status='review' video jobs into the clip library (one-time
+    # per row; no-op once none are left).
+    await backfill_review_clips()
 
     # Start ComfyUI WebSocket listener
     listener = ComfyListener(app.state)

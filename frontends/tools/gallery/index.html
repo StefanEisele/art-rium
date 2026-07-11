@@ -334,6 +334,33 @@
       display: flex; flex-direction: column; gap: 16px;
     }
 
+    /* ── Desktop modal: image+sidebar split instead of stacked full-height ── */
+    @media (min-width: 860px) {
+      .modal-backdrop.open {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 420px;
+        grid-template-rows: auto 1fr;
+        grid-template-areas: "header header" "image body";
+      }
+      .modal-header { grid-area: header; padding: 16px 24px; }
+      .modal-image-wrap {
+        grid-area: image;
+        max-height: none;
+        height: 100%;
+        min-height: 0;
+        padding: 24px;
+      }
+      .modal-image-wrap img { max-height: 100%; }
+      .modal-body {
+        grid-area: body;
+        height: 100%;
+        min-height: 0;
+        padding: 20px 24px;
+        background: var(--surface);
+        border-left: 1px solid var(--border);
+      }
+    }
+
     /* ── Star rating ── */
     .stars-row {
       display: flex; gap: 6px;
@@ -556,6 +583,25 @@
     .vd-btn { flex: 1; padding: 11px; border-radius: 10px; border: none; font-size: 14px; font-weight: 700; cursor: pointer; font-family: inherit; text-align: center; text-decoration: none; }
     .vd-btn.download { background: var(--surface2); color: var(--text); border: 1.5px solid var(--border); }
     .vd-btn.delete { background: rgba(255,69,58,0.1); color: var(--red); border: 1.5px solid rgba(255,69,58,0.2); }
+
+    /* ── Desktop / wide-viewport layout ──
+       Mobile stays untouched below this breakpoint; above it we widen the
+       shell and let the grid use the extra horizontal space. Placed last so
+       it wins the cascade over the equal-specificity mobile rules above. */
+    @media (min-width: 860px) {
+      .app { max-width: 1600px; }
+      header { padding: 18px 28px; }
+      .search-wrap { flex: 0 1 520px; margin: 0 auto; }
+      .filter-bar { padding: 12px 28px; }
+      .count-bar { padding: 8px 28px; }
+      .grid-wrap { padding: 16px 28px 0; }
+      .grid {
+        grid-template-columns: repeat(auto-fill, minmax(160px, 200px));
+        gap: 14px;
+      }
+      .video-detail-sheet { max-width: 760px; }
+      video.vd-player { max-height: min(70vh, 640px); }
+    }
   </style>
 </head>
 <body>

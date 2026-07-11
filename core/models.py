@@ -45,6 +45,8 @@ class Image(Base):
     seed: Mapped[int | None] = mapped_column(BigInteger)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
+    lora_name: Mapped[str | None] = mapped_column(String(256))       # LoRA filename used at generation time
+    lora_strength: Mapped[float | None] = mapped_column(Numeric(4, 3))  # strength_model, 0.000–1.000
     workflow_name: Mapped[str | None] = mapped_column(String(128))
     batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     thumbnail_path: Mapped[str | None] = mapped_column(Text)        # relative to storage_dir, JPEG 512 px

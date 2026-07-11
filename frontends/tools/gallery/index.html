@@ -737,6 +737,16 @@ const $ = id => document.getElementById(id);
 const withAuth  = (url) => ArtRium.withAuth(url, state.apiKey);
 const apiFetch  = ArtRium.makeApiFetch(() => state.apiKey);
 
+// filename → short button label, from GET /api/loras (SSOT: core/loras.py)
+let loraLabelByFilename = {};
+async function loadLoraLabels() {
+  try {
+    const r = await apiFetch('/api/loras');
+    const d = await r.json();
+    loraLabelByFilename = Object.fromEntries((d.loras || []).map(l => [l.filename, l.label]));
+  } catch (_) { /* chips fall back to the raw filename */ }
+}
+
 const formatDate = iso => {
   const d = new Date(iso);
   return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' })
@@ -1043,6 +1053,8 @@ const populateModal = (img) => {
   const chips = [
     img.width && img.height ? `${img.width}×${img.height}` : null,
     img.seed !== null && img.seed !== undefined ? `seed ${img.seed}` : null,
+    img.lora_name ? (loraLabelByFilename[img.lora_name] || img.lora_name) : null,
+    img.lora_strength !== null && img.lora_strength !== undefined ? `strength ${Number(img.lora_strength).toFixed(2)}` : null,
     img.workflow_name || null,
     formatDate(img.created_at),
   ].filter(Boolean);
@@ -1436,6 +1448,7 @@ document.addEventListener('keydown', e => {
 window.addEventListener('load', () => {
   $('search-input').addEventListener('input', onSearchInput);
   fetchImages(true);
+  loadLoraLabels();
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }

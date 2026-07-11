@@ -148,6 +148,8 @@ def _serialize(img: Image) -> dict:
         "seed": img.seed,
         "width": img.width,
         "height": img.height,
+        "lora_name": img.lora_name,
+        "lora_strength": float(img.lora_strength) if img.lora_strength is not None else None,
         "workflow_name": img.workflow_name,
         "batch_id": str(img.batch_id) if img.batch_id else None,
         "tags": img.tags or [],

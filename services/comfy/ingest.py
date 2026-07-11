@@ -28,6 +28,8 @@ async def ingest_comfy_image(
     seed: int | None = None,
     width: int | None = None,
     height: int | None = None,
+    lora_name: str | None = None,
+    lora_strength: float | None = None,
     workflow_name: str | None = None,
     batch_id: uuid.UUID | None = None,
 ) -> tuple[Path | None, str | None]:
@@ -80,6 +82,8 @@ async def ingest_comfy_image(
                 seed=seed,
                 width=width,
                 height=height,
+                lora_name=lora_name,
+                lora_strength=lora_strength,
                 workflow_name=workflow_name,
                 batch_id=batch_id,
                 created_at=now,

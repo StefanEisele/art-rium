@@ -92,6 +92,8 @@ async def generate(req: GenerateRequest, request: Request):
             seed=seed,
             width=req.width,
             height=req.height,
+            lora_name=req.lora_name,
+            lora_strength=req.lora_strength,
         )
         prompt_ids.append(prompt_id)
         logger.info(f"Queued [{i+1}/{total}] prompt={prompt_id}")

@@ -88,7 +88,15 @@ app = FastAPI(title="art-rium", lifespan=lifespan)
 @app.middleware("http")
 async def no_cache_html(request, call_next):
     response = await call_next(request)
-    if response.headers.get("content-type", "").startswith("text/html"):
+    # HTML is always dynamic-ish (per-tool markup changes with every deploy).
+    # /shared/* (shared.css/shared.js) is the cross-cutting contract every
+    # page's markup now depends on — without an explicit header here, both
+    # the browser's heuristic cache AND Cloudflare's default edge cache for
+    # static extensions serve a stale copy for hours after a deploy, causing
+    # new HTML to pair with old CSS/JS and silently breaking layout.
+    is_html = response.headers.get("content-type", "").startswith("text/html")
+    is_shared = request.url.path.startswith("/shared/")
+    if is_html or is_shared:
         response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"

@@ -331,6 +331,20 @@
       font-size: 11px; color: var(--text-dim);
       margin-top: 6px; user-select: none;
     }
+    .prompt-negative {
+      margin-top: 6px; color: var(--text-dim); font-size: 12px;
+    }
+
+    /* ── Model toggle (reuses .mode-toggle look, but 3 buttons not 2) ── */
+    #model-toggle { grid-template-columns: 1fr 1fr 1fr; }
+    #negative-prompt-field { display: none; }
+    #negative-prompt-field.show { display: flex; }
+
+    /* ── LoRA row — 1 (SDXL) to 4 (Z-Image) entries, so wrap instead of a fixed 3-col grid ── */
+    .lora-row { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+
+    /* ── LoRA fields hidden entirely for models with no LoRA in the library (e.g. Ernie Turbo) ── */
+    #lora-field.hidden, #lora-strength-field.hidden { display: none; }
   </style>
 </head>
 <body>
@@ -349,6 +363,13 @@
 
   <main>
 
+    <!-- Model toggle -->
+    <div class="mode-toggle" id="model-toggle">
+      <button type="button" id="model-zimage" class="active" onclick="setModel('zimage')">Z-Image Turbo</button>
+      <button type="button" id="model-sdxl" onclick="setModel('sdxl')">ArtiVision XL</button>
+      <button type="button" id="model-ernie" onclick="setModel('ernie')">Ernie Turbo</button>
+    </div>
+
     <!-- Mode toggle -->
     <div class="mode-toggle" id="mode-toggle">
       <button type="button" id="mode-direct" class="active" onclick="setMode('direct')">Direct</button>
@@ -361,6 +382,13 @@
       <textarea id="prompt" placeholder="Describe your image…"
                 maxlength="3000" oninput="onPromptInput()"></textarea>
       <div class="char-count"><span id="char-count">0</span> / <span id="char-limit">3000</span></div>
+    </div>
+
+    <!-- Negative prompt — SDXL Direct mode only; Z-Image Turbo ignores negatives -->
+    <div class="field" id="negative-prompt-field">
+      <label>Negative Prompt</label>
+      <textarea id="negative-prompt" placeholder="What to avoid — SDXL actually obeys this…"
+                maxlength="1000" style="min-height:70px"></textarea>
     </div>
 
     <!-- Enhance review (prompt cards) — populated after /api/prompts/enhance -->
@@ -421,14 +449,14 @@
         <div class="batch-row" id="batch-row"></div>
       </div>
 
-      <!-- LoRA -->
-      <div class="field">
+      <!-- LoRA — hidden entirely for models with no LoRA in the library -->
+      <div class="field" id="lora-field">
         <label>LoRA Style</label>
         <div class="lora-row" id="lora-row"></div>
       </div>
 
       <!-- LoRA Strength -->
-      <div class="field">
+      <div class="field" id="lora-strength-field">
         <label>LoRA Strength</label>
         <div class="strength-row">
           <input type="range" id="lora-strength" min="0" max="1" step="0.05" value="0.5"
@@ -513,6 +541,13 @@ const DOM_IDS = {
   shareInstagramBtn: 'share-instagram-btn',
   modeDirectBtn: 'mode-direct',
   modeEnhanceBtn: 'mode-enhance',
+  modelZimageBtn: 'model-zimage',
+  modelSdxlBtn: 'model-sdxl',
+  modelErnieBtn: 'model-ernie',
+  loraField: 'lora-field',
+  loraStrengthField: 'lora-strength-field',
+  negativePromptField: 'negative-prompt-field',
+  negativePrompt: 'negative-prompt',
   enhanceReview: 'enhance-review',
   reviewSummary: 'review-summary',
   reviewTitle: 'review-title',
@@ -556,7 +591,12 @@ const state = {
   //                                                'review' (cards visible, button reads "Generate N images")
   mode: 'direct',
   enhancePhase: 'idea',
-  enhancedPrompts: [],  // [{style, name, prompt, selected: true}, ...]
+  enhancedPrompts: [],  // [{style, name, prompt, selected: true}, ...] (+negative_prompt for model='sdxl')
+  // Generator model: 'zimage' (Z-Image Turbo, ignores negative prompts) or
+  // 'sdxl' (ArtiVision XL, active negative prompt + native-res hires-fix).
+  // Drives which LoRA registry /api/loras returns and which enhancer
+  // template /api/prompts/enhance uses.
+  model: 'zimage',
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -794,10 +834,10 @@ const generateDirect = async () => {
   state.batchTotal = state.batchCount;
   state.doneCount = 0;
 
-  await startGenerationRequest({
-    prompt: promptText,
-    batch_count: state.batchCount,
-  });
+  const extra = { prompt: promptText, batch_count: state.batchCount };
+  if (state.model === 'sdxl') extra.negative_prompt = $(DOM_IDS.negativePrompt).value.trim();
+
+  await startGenerationRequest(extra);
 };
 
 // Step 1 of enhance flow: send idea → get 6 stylised prompts back.
@@ -814,7 +854,7 @@ const enhance = async () => {
     const r = await apiFetch('/api/prompts/enhance', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ idea, n: CONFIG.enhanceN }),
+      body: JSON.stringify({ idea, n: CONFIG.enhanceN, model: state.model }),
     });
     const d = await r.json();
     state.enhancedPrompts = (d.prompts || []).map(p => ({ ...p, selected: true }));
@@ -849,9 +889,10 @@ const generateFromPrompts = async () => {
   state.batchTotal = selected.length;
   state.doneCount = 0;
 
-  await startGenerationRequest({
-    prompts: selected.map(p => withTrigger(p.prompt)),
-  });
+  const extra = { prompts: selected.map(p => withTrigger(p.prompt)) };
+  if (state.model === 'sdxl') extra.negative_prompts = selected.map(p => p.negative_prompt || '');
+
+  await startGenerationRequest(extra);
 };
 
 // Shared finalize for both direct + enhance paths.
@@ -870,6 +911,7 @@ const startGenerationRequest = async (extra) => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        model: state.model,
         seed,
         width: state.imgWidth,
         height: state.imgHeight,
@@ -901,6 +943,47 @@ const withTrigger = (prompt) => {
   return `${trigger} ${prompt}`;
 };
 
+// SDXL's negative prompt only makes sense in Direct mode — in Enhance mode
+// each style card carries its own enhancer-produced negative_prompt instead.
+const updateNegativePromptVisibility = () => {
+  $(DOM_IDS.negativePromptField).classList.toggle('show', state.model === 'sdxl' && state.mode === 'direct');
+};
+
+// Switch generator model: refetches the matching LoRA registry, swaps the
+// trigger word at the front of the prompt (Direct mode), and discards any
+// stale enhance-review cards (they were phrased for the previous model).
+const setModel = async (model) => {
+  if (model === state.model) return;
+  const oldTrigger = loraRegistry.triggerOf(state.loraName);
+  state.model = model;
+
+  $(DOM_IDS.modelZimageBtn).classList.toggle('active', model === 'zimage');
+  $(DOM_IDS.modelSdxlBtn).classList.toggle('active', model === 'sdxl');
+  $(DOM_IDS.modelErnieBtn).classList.toggle('active', model === 'ernie');
+  updateNegativePromptVisibility();
+
+  await buildLoraButtons();  // refetches for the new model; resets state.loraName to its default
+
+  if (state.mode === 'direct') {
+    const promptEl = $(DOM_IDS.prompt);
+    const newTrigger = loraRegistry.triggerOf(state.loraName);
+    let text = promptEl.value;
+    if (oldTrigger && text.startsWith(oldTrigger)) {
+      text = text.slice(oldTrigger.length).replace(/^[\s,]+/, '');
+    }
+    promptEl.value = newTrigger ? (text ? `${newTrigger} ${text}` : newTrigger) : text;
+    onPromptInput();
+  }
+
+  if (state.mode === 'enhance' && state.enhancePhase === 'review') {
+    state.enhancePhase = 'idea';
+    state.enhancedPrompts = [];
+    $(DOM_IDS.enhanceReview).classList.remove('show');
+    $(DOM_IDS.promptCards).innerHTML = '';
+    updateGenButton();
+  }
+};
+
 const setMode = (mode) => {
   if (mode === state.mode) return;
   state.mode = mode;
@@ -910,6 +993,7 @@ const setMode = (mode) => {
   // Toggle buttons
   $(DOM_IDS.modeDirectBtn).classList.toggle('active', mode === 'direct');
   $(DOM_IDS.modeEnhanceBtn).classList.toggle('active', mode === 'enhance');
+  updateNegativePromptVisibility();
 
   // Field decorations + trigger handling:
   //   direct  → prompt textarea owns the trigger at position 0
@@ -970,10 +1054,19 @@ const renderEnhanceReview = () => {
     const promptText = document.createElement('div');
     promptText.className = 'prompt-text';
     promptText.textContent = withTrigger(item.prompt);   // show with LoRA trigger prepended
+    body.append(styleName, promptText);
+
+    if (state.model === 'sdxl' && item.negative_prompt) {
+      const negText = document.createElement('div');
+      negText.className = 'prompt-text prompt-negative';
+      negText.textContent = `Negative: ${item.negative_prompt}`;
+      body.append(negText);
+    }
+
     const expand = document.createElement('div');
     expand.className = 'prompt-card-expand';
     expand.textContent = 'tap to expand';
-    body.append(styleName, promptText, expand);
+    body.append(expand);
 
     card.append(cb, body);
 
@@ -1168,7 +1261,7 @@ const buildLoraButtons = async () => {
   row.innerHTML = '';
   let payload;
   try {
-    const res = await fetch(withAuth('/api/loras'), { headers: getAuthHeaders() });
+    const res = await fetch(withAuth(`/api/loras?model=${state.model}`), { headers: getAuthHeaders() });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     payload = await res.json();
   } catch (e) {
@@ -1179,6 +1272,12 @@ const buildLoraButtons = async () => {
 
   loraRegistry.list = payload.loras || [];
   state.loraName = payload.default || (loraRegistry.list[0] && loraRegistry.list[0].filename) || '';
+
+  // Models with no LoRA in the library (e.g. Ernie Turbo) hide both fields
+  // entirely rather than showing an empty row.
+  const hasLoras = loraRegistry.list.length > 0;
+  $(DOM_IDS.loraField).classList.toggle('hidden', !hasLoras);
+  $(DOM_IDS.loraStrengthField).classList.toggle('hidden', !hasLoras);
 
   loraRegistry.list.forEach((l) => {
     const btn = document.createElement('button');

@@ -13,43 +13,77 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth, ws_auth_ok
+from core.comfy import ARTIVISION_WORKFLOW_NAME, ERNIE_WORKFLOW_NAME
+from core.comfy import WORKFLOW_NAME as ZIMAGE_WORKFLOW_NAME
 from core.comfy import post_prompt
 from core.config import settings
 from core.db import get_db
-from core.loras import ALLOWED_LORAS, DEFAULT_LORA, LORAS
+from core.loras import (
+    ALLOWED_LORAS,
+    DEFAULT_LORA,
+    LORAS,
+    SDXL_ALLOWED_LORAS,
+    SDXL_DEFAULT_LORA,
+    SDXL_LORAS,
+)
 from core.models import Image
 from core.thumbnail import make_thumbnail, thumb_rel_path
+from services.comfy.artivision import build_artivision_workflow
+from services.comfy.ernie import build_ernie_workflow
 from services.comfy.zimage import build_zimage_workflow
+
+# Models with no LoRA in the library yet — /api/loras returns an empty
+# catalogue and /api/generate skips LoRA resolution entirely for these.
+_MODELS_WITHOUT_LORAS = {"ernie"}
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 class GenerateRequest(BaseModel):
+    model: str = "zimage"  # "zimage" | "sdxl" | "ernie" — selects the generator backend + workflow
     prompt: str = ""
+    negative_prompt: str = ""  # SDXL only; ignored by Z-Image Turbo (its ConditioningZeroOut ignores negatives)
     prompts: list[str] | None = None  # when set, overrides prompt + batch_count: one submission per item
+    negative_prompts: list[str] | None = None  # parallel to `prompts`, SDXL only — must match its length if set
     seed: int = -1
     width: int = 1024
     height: int = 1024
     client_id: str
     batch_count: int = 1
-    lora_name: str = DEFAULT_LORA
+    lora_name: str = ""  # blank = that model's default (resolved server-side, since the default differs per model)
     lora_strength: float = 0.5
 
 
 class EnhancePromptsRequest(BaseModel):
     idea: str
     n: int = 4
+    model: str = "zimage"  # "zimage" | "sdxl" | "ernie" — selects style-block phrasing + response shape.
+                           # "ernie" deliberately reuses the "zimage" enhancer verbatim (same prose style,
+                           # no negative prompt) — already proven to work well for Ernie Image Turbo too.
+
+
+def _lora_registry(model: str) -> tuple[set[str], str]:
+    if model == "sdxl":
+        return SDXL_ALLOWED_LORAS, SDXL_DEFAULT_LORA
+    return ALLOWED_LORAS, DEFAULT_LORA
 
 
 @router.get("/api/loras", dependencies=[Depends(require_auth)])
-async def list_loras():
-    """Return the LoRA catalogue used by the Z-Image picker (SSOT for the frontend)."""
+async def list_loras(model: str = "zimage"):
+    """Return the LoRA catalogue for the given generator model (SSOT for the frontend)."""
+    if model == "sdxl":
+        return {"loras": SDXL_LORAS, "default": SDXL_DEFAULT_LORA}
+    if model in _MODELS_WITHOUT_LORAS:
+        return {"loras": [], "default": ""}
     return {"loras": LORAS, "default": DEFAULT_LORA}
 
 
 @router.post("/api/generate", dependencies=[Depends(require_auth)])
 async def generate(req: GenerateRequest, request: Request):
+    is_sdxl = req.model == "sdxl"
+    is_ernie = req.model == "ernie"
+
     # Resolve the prompt list — either one-prompt × batch_count (classic mode)
     # or an explicit list of N distinct prompts (enhancer mode).
     if req.prompts:
@@ -58,14 +92,23 @@ async def generate(req: GenerateRequest, request: Request):
             raise HTTPException(status_code=400, detail="prompts list is empty")
         if len(prompt_list) > 10:
             raise HTTPException(status_code=400, detail="At most 10 prompts per batch")
+        if req.negative_prompts and len(req.negative_prompts) != len(prompt_list):
+            raise HTTPException(status_code=400, detail="negative_prompts must match prompts length")
+        negative_list = req.negative_prompts or [""] * len(prompt_list)
     else:
         if not req.prompt.strip():
             raise HTTPException(status_code=400, detail="Prompt is required")
         batch_count = max(1, min(10, req.batch_count))
         prompt_list = [req.prompt] * batch_count
+        negative_list = [req.negative_prompt] * batch_count
 
-    if req.lora_name not in ALLOWED_LORAS:
-        raise HTTPException(status_code=400, detail=f"Unknown LoRA: {req.lora_name}")
+    if req.model in _MODELS_WITHOUT_LORAS:
+        lora_name = None
+    else:
+        allowed_loras, default_lora = _lora_registry(req.model)
+        lora_name = req.lora_name or default_lora
+        if lora_name not in allowed_loras:
+            raise HTTPException(status_code=400, detail=f"Unknown LoRA: {lora_name}")
 
     listener = request.app.state.comfy_listener
     total = len(prompt_list)
@@ -74,7 +117,17 @@ async def generate(req: GenerateRequest, request: Request):
 
     for i, prompt_text in enumerate(prompt_list):
         seed = (req.seed + i) if req.seed >= 0 else random.randint(0, 2**32 - 1)
-        workflow = build_zimage_workflow(prompt_text, seed, req.width, req.height, req.lora_name, req.lora_strength)
+        if is_sdxl:
+            workflow = build_artivision_workflow(
+                prompt_text, negative_list[i], seed, req.width, req.height, lora_name, req.lora_strength,
+            )
+            workflow_name = ARTIVISION_WORKFLOW_NAME
+        elif is_ernie:
+            workflow = build_ernie_workflow(prompt_text, seed, req.width, req.height)
+            workflow_name = ERNIE_WORKFLOW_NAME
+        else:
+            workflow = build_zimage_workflow(prompt_text, seed, req.width, req.height, lora_name, req.lora_strength)
+            workflow_name = ZIMAGE_WORKFLOW_NAME
 
         result = await post_prompt(workflow, listener.client_id)
 
@@ -92,8 +145,9 @@ async def generate(req: GenerateRequest, request: Request):
             seed=seed,
             width=req.width,
             height=req.height,
-            lora_name=req.lora_name,
+            lora_name=lora_name,
             lora_strength=req.lora_strength,
+            workflow_name=workflow_name,
         )
         prompt_ids.append(prompt_id)
         logger.info(f"Queued [{i+1}/{total}] prompt={prompt_id}")
@@ -103,8 +157,9 @@ async def generate(req: GenerateRequest, request: Request):
 
 @router.get("/api/prompts/styles", dependencies=[Depends(require_auth)])
 async def list_prompt_styles():
-    """Return the z-Image enhancer style catalogue (letter + display name) —
-    SSOT is prompts/zimage-styles.md. Used by style pickers (video story mode)."""
+    """Return the enhancer style catalogue (letter + display name) — SSOT is
+    prompts/zimage-styles.md. Shared by both generator models (only the
+    system-prompt phrasing differs) and by style pickers (video story mode)."""
     from services.ollama.zimage_enhance import list_zimage_styles
 
     return {"styles": list_zimage_styles()}
@@ -113,17 +168,21 @@ async def list_prompt_styles():
 @router.post("/api/prompts/enhance", dependencies=[Depends(require_auth)])
 async def enhance_prompts(body: EnhancePromptsRequest):
     """Run the local Qwen prompt-enhancer over a short idea and return one
-    prompt per style family (A..D). Styles that fail are silently skipped —
-    the response may contain fewer than n entries."""
-    from services.ollama.zimage_enhance import enhance_zimage_prompts
-
+    prompt per style family (A..D), phrased for the requested generator model.
+    Styles that fail are silently skipped — the response may contain fewer
+    than n entries. SDXL entries additionally carry a negative_prompt."""
     if not body.idea.strip():
         raise HTTPException(status_code=400, detail="idea is required")
     if not (1 <= body.n <= 4):
         raise HTTPException(status_code=400, detail="n must be between 1 and 4")
 
     try:
-        prompts = await enhance_zimage_prompts(body.idea, n=body.n)
+        if body.model == "sdxl":
+            from services.ollama.sdxl_enhance import enhance_sdxl_prompts
+            prompts = await enhance_sdxl_prompts(body.idea, n=body.n)
+        else:
+            from services.ollama.zimage_enhance import enhance_zimage_prompts
+            prompts = await enhance_zimage_prompts(body.idea, n=body.n)
     except Exception as exc:
         logger.error("enhance_prompts failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=502, detail=f"{type(exc).__name__}: {exc}")

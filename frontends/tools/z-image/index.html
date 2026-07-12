@@ -12,28 +12,15 @@
   <link rel="stylesheet" href="/shared/shared.css">
   <style>
     .app {
-      display: flex;
-      flex-direction: column;
       min-height: 100dvh;
       max-width: 600px;
-      margin: 0 auto;
-      padding-top: env(safe-area-inset-top);
       padding-bottom: env(safe-area-inset-bottom);
     }
 
-    /* ── Header ── */
-    header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 14px 20px;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
+    /* ── Header (delta from shared.css defaults) ── */
+    header { justify-content: space-between; padding: 14px 20px; }
 
     .header-left { display: flex; align-items: center; gap: 10px; }
-
-    header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; }
 
     .status { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text-dim); }
 

@@ -12,26 +12,12 @@
   <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="/shared/shared.css">
   <style>
-    .app {
-      display: flex;
-      flex-direction: column;
-      height: 100dvh;
-      max-width: 700px;
-      margin: 0 auto;
-      padding-top: env(safe-area-inset-top);
-    }
+    .app { height: 100dvh; max-width: 700px; }
 
-    /* ── Header ── */
-    header {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-
-    header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex-shrink: 0; }
+    /* ── Header (delta from shared.css defaults) ── */
+    header { gap: 10px; }
+    /* Fixed-width title next to the flex:1 search bar — cancels shared's header h1 { flex: 1 }. */
+    header h1 { flex: 0 0 auto; }
 
     /* ── Search ── */
     .search-wrap {
@@ -436,11 +422,7 @@
     }
 
     /* ── Tags ── */
-    .section-label {
-      font-size: 10px; font-weight: 700;
-      color: var(--text-dim); text-transform: uppercase;
-      letter-spacing: 0.7px; margin-bottom: 8px;
-    }
+    .section-label { font-size: 10px; letter-spacing: 0.7px; margin-bottom: 8px; }
 
     .tags-wrap {
       display: flex; flex-wrap: wrap; gap: 7px; align-items: center;

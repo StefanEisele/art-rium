@@ -12,22 +12,16 @@
   <link rel="stylesheet" href="/shared/shared.css">
   <style>
     .app {
-      display: flex;
-      flex-direction: column;
       min-height: 100dvh;
       max-width: 600px;
-      margin: 0 auto;
-      padding-top: env(safe-area-inset-top);
       padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
     }
 
-    /* ── Header ── */
+    /* ── Header (delta from shared.css defaults — no divider on the hub page) ── */
     header {
-      display: flex;
-      align-items: center;
       justify-content: space-between;
       padding: 18px 20px 14px;
-      flex-shrink: 0;
+      border-bottom: none;
     }
 
     .header-brand { display: flex; flex-direction: column; gap: 2px; }
@@ -43,15 +37,8 @@
       gap: 28px;
     }
 
-    /* ── Section ── */
-    .section-label {
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--text-dim);
-      text-transform: uppercase;
-      letter-spacing: 0.8px;
-      margin-bottom: 10px;
-    }
+    /* ── Section (delta from shared.css defaults) ── */
+    .section-label { letter-spacing: 0.8px; margin-bottom: 10px; }
 
     /* ── Tool card ── */
     .tools-list { display: flex; flex-direction: column; gap: 10px; }

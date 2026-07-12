@@ -12,24 +12,15 @@
   <link rel="stylesheet" href="/shared/shared.css">
   <style>
     .app {
-      display: flex; flex-direction: column;
       min-height: 100dvh;
       max-width: 700px;
-      margin: 0 auto;
-      padding-top: env(safe-area-inset-top);
       padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
     }
 
-    header {
-      display: flex; align-items: center; gap: 12px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--border);
-    }
     header .back {
       font-size: 22px; color: var(--text-dim); text-decoration: none;
       padding: 4px 8px; line-height: 1;
     }
-    header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; }
 
     main {
       flex: 1;
@@ -98,38 +89,7 @@
     }
     #progress.show { display: flex; }
 
-    .progress-steps {
-      display: flex; gap: 4px; flex-wrap: nowrap; overflow-x: auto;
-      scrollbar-width: none;
-    }
-    .progress-steps::-webkit-scrollbar { display: none; }
-    .step-pill {
-      flex: 1 1 0; min-width: 0;
-      font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
-      padding: 5px 6px; border-radius: 5px;
-      background: var(--surface2); color: var(--text-dim);
-      border: 1.5px solid var(--border);
-      text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-      transition: all 0.2s;
-    }
-    .step-pill.done {
-      background: rgba(50,215,75,0.12); color: var(--green); border-color: rgba(50,215,75,0.25);
-    }
-    .step-pill.active {
-      background: var(--accent); color: var(--on-accent); border-color: var(--accent);
-      animation: step-pulse 1.4s ease-in-out infinite;
-    }
-    @keyframes step-pulse {
-      0%, 100% { opacity: 1; }
-      50%      { opacity: 0.55; }
-    }
-
-    .progress-track { width: 100%; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
-    #progress-bar {
-      height: 100%; border-radius: 3px; width: 0%;
-      background: linear-gradient(90deg, var(--accent), #7dd3fc);
-      transition: width 0.6s ease;
-    }
+    #progress-bar { width: 0%; }
 
     .phase-row {
       display: flex; justify-content: space-between; align-items: center;
@@ -315,7 +275,7 @@
 
       <div id="progress">
         <div class="progress-steps" id="progress-steps"></div>
-        <div class="progress-track"><div id="progress-bar"></div></div>
+        <div class="progress-track"><div id="progress-bar" class="progress-fill"></div></div>
         <div class="phase-row">
           <span id="phase-text">Submitting…</span>
           <span id="phase-pct">0%</span>
@@ -348,6 +308,7 @@ const POLL_INTERVAL_MS = 3000;
 
 let apiKey = ArtRium.getApiKey();
 const apiFetch = ArtRium.makeApiFetch(() => apiKey);
+const escHtml = ArtRium.escHtml;
 
 // In-memory cache of songs (for client-side search). Reloaded on every list fetch.
 let songs = [];
@@ -370,13 +331,6 @@ function fmtDate(iso) {
   const sameDay = d.toDateString() === today.toDateString();
   if (sameDay) return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
   return d.toLocaleDateString([], {month:'short', day:'numeric'});
-}
-
-function escHtml(s) {
-  if (s == null) return '';
-  return String(s)
-    .replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')
-    .replaceAll('"','&quot;').replaceAll("'",'&#39;');
 }
 
 async function api(method, path, body) {

@@ -11,26 +11,10 @@
   <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="/shared/shared.css">
   <style>
-    .app {
-      display: flex;
-      flex-direction: column;
-      height: 100dvh;
-      max-width: 600px;
-      margin: 0 auto;
-      padding-top: env(safe-area-inset-top);
-    }
+    .app { height: 100dvh; max-width: 600px; }
 
-    /* ── Header ── */
-    header {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-
-    header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex: 1; }
+    /* ── Header (delta from shared.css defaults) ── */
+    header { gap: 10px; }
 
     /* ══════════════ VIEWS ══════════════ */
     .view { display: none; flex-direction: column; flex: 1; overflow: hidden; }

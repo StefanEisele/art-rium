@@ -11,30 +11,7 @@
   <link rel="stylesheet" href="/shared/shared.css">
   <style>
     /* ── Layout ── */
-    .app {
-      display: flex;
-      flex-direction: column;
-      height: 100dvh;
-      max-width: 680px;
-      margin: 0 auto;
-      padding-top: env(safe-area-inset-top);
-    }
-
-    /* ── Header ── */
-    header {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-    .back-btn {
-      background: none; border: none; color: var(--accent);
-      font-size: 22px; cursor: pointer; padding: 0 4px 0 0;
-      -webkit-tap-highlight-color: transparent; line-height: 1;
-    }
-    header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex: 1; }
+    .app { height: 100dvh; max-width: 680px; }
 
     /* ── Main scroll area ── */
     main {
@@ -49,10 +26,7 @@
     ───────────────────────────────────────────── */
     #timeline-section { padding: 16px 16px 8px; }
 
-    .section-label {
-      font-size: 11px; font-weight: 700; color: var(--text-dim);
-      text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 12px;
-    }
+    .section-label { letter-spacing: 0.8px; margin-bottom: 12px; }
 
     .timeline-empty {
       text-align: center; padding: 32px 0; color: var(--text-dim); font-size: 14px;
@@ -139,10 +113,7 @@
     }
     .post-title { font-size: 12px; color: var(--text-dim); font-style: italic; }
 
-    .status-badge {
-      font-size: 10px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: 0.5px; padding: 2px 7px; border-radius: 5px;
-    }
+    .status-badge { padding: 2px 7px; }
     .status-scheduled { background: var(--accent-2-soft); color: var(--accent-2); }
     .status-posted    { background: rgba(50,215,75,0.15);  color: var(--green); }
     .status-cancelled { background: var(--surface2); color: var(--text-dim); }
@@ -507,33 +478,12 @@
     .schedule-btn:not(:disabled):active { transform: scale(0.97); }
 
     /* ─────────────────────────────────────────────
-       IMAGE PICKER MODAL
+       IMAGE PICKER MODAL (base in shared.css; deltas only below)
     ───────────────────────────────────────────── */
-    #picker-modal {
-      display: none;
-      /* Above the detail-modal (z=200) so it remains visible when opened
-         from the detail-modal edit flow. */
-      position: fixed; inset: 0; z-index: 300;
-      background: var(--bg);
-      flex-direction: column;
-      padding-top: env(safe-area-inset-top);
-    }
-    #picker-modal.show { display: flex; }
+    /* Above the detail-modal (z=200) so it remains visible when opened
+       from the detail-modal edit flow. */
+    #picker-modal { z-index: 300; }
 
-    .picker-header {
-      display: flex; align-items: center; gap: 12px;
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-    .picker-header h2 { font-size: 17px; font-weight: 700; flex: 1; }
-    .picker-done-btn {
-      background: var(--accent); border: none;
-      color: var(--on-accent); font-size: 14px; font-weight: 700;
-      padding: 7px 16px; border-radius: 8px;
-      cursor: pointer; font-family: inherit;
-      -webkit-tap-highlight-color: transparent;
-    }
     .picker-count-badge {
       background: var(--accent);
       color: var(--on-accent);
@@ -559,54 +509,8 @@
     #picker-search-input:focus { border-color: var(--accent); }
     #picker-search-input::placeholder { color: var(--text-dim); }
 
-    #picker-grid {
-      flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 3px;
-      padding: 3px;
-    }
-
-    .picker-cell {
-      position: relative;
-      height: 0;
-      padding-bottom: 100%;
-      cursor: pointer;
-      overflow: hidden;
-      border-radius: 4px;
-      background: var(--surface2);
-    }
-    .picker-cell img {
-      position: absolute;
-      inset: 0;
-      width: 100%; height: 100%;
-      object-fit: cover;
-      display: block;
-      transition: opacity 0.15s;
-    }
+    .picker-cell img { transition: opacity 0.15s; }
     .picker-cell:active img { opacity: 0.7; }
-
-    /* Selection overlay on picker cell */
-    .picker-cell .sel-overlay {
-      position: absolute; inset: 0;
-      background: rgba(224,122,58,0.35);
-      display: none; align-items: center; justify-content: center;
-      font-size: 28px; color: #fff;
-    }
-    .picker-cell.selected .sel-overlay { display: flex; }
-    .picker-cell.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
-
-    .picker-cell .order-badge {
-      position: absolute;
-      top: 5px; left: 5px;
-      background: var(--accent);
-      color: var(--on-accent);
-      font-size: 11px; font-weight: 700;
-      border-radius: 50%;
-      width: 20px; height: 20px;
-      display: none; align-items: center; justify-content: center;
-    }
-    .picker-cell.selected .order-badge { display: flex; }
 
     /* ─────────────────────────────────────────────
        VIDEO PICKER MODAL
@@ -1068,7 +972,7 @@ const withAuth = (url) => ArtRium.withAuth(url, state.apiKey);
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
-const escHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escHtml = ArtRium.escHtml;
 
 const fmtDate = (iso) => {
   const d = new Date(iso);

@@ -105,6 +105,16 @@ const ArtRium = (() => {
       location.href = '/';
     });
 
+  // ── HTML escaping ──────────────────────────────────────────────────────────
+
+  /** Escape a value for safe interpolation into innerHTML (text and attributes). */
+  const escHtml = (s) => {
+    if (s == null) return '';
+    return String(s)
+      .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+  };
+
   // ── Toast notification ─────────────────────────────────────────────────────
 
   let _toastTimer;
@@ -197,7 +207,7 @@ const ArtRium = (() => {
     STORAGE_KEYS, NODE_LABELS,
     getClientId, getApiKey, saveApiKey, clearApiKey,
     getAuthHeaders, withAuth, apiFetch, makeApiFetch,
-    toast, setDot, connectWs,
+    escHtml, toast, setDot, connectWs,
   };
 
 })();

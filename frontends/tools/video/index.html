@@ -1661,7 +1661,7 @@ async function useSong(songId) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({song_id: songId}),
     });
-    pollSoundtrackMux(videoId);
+    pollSoundtrackMux(videoId, songId);
   } catch (e) {
     state.muxingVideos.delete(videoId);
     if (cached) updateVideoCard(cached);
@@ -1681,15 +1681,17 @@ async function removeSoundtrack(videoId) {
   }
 }
 
-function pollSoundtrackMux(videoId) {
+function pollSoundtrackMux(videoId, songId) {
   // The mux task runs in the background. video.status stays 'done' the whole
-  // time; we know it finished when has_soundtrack flips true or error is set.
+  // time; we know it finished when soundtrack_song_id matches the song we
+  // just requested (has_soundtrack alone can already be true from a
+  // *previous* track when replacing, so it can't signal "this job is done").
   const startedAt = Date.now();
   const interval = setInterval(async () => {
     try {
       const r = await api(`/api/video/jobs/${videoId}`);
       const v = await r.json();
-      if (v.has_soundtrack) {
+      if (v.has_soundtrack && v.soundtrack_song_id === songId) {
         clearInterval(interval);
         state.muxingVideos.delete(videoId);
         updateVideoCard(v);

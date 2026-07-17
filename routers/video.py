@@ -1539,6 +1539,13 @@ async def attach_soundtrack(
     if song.status != "done" or not song.filename:
         raise HTTPException(status_code=409, detail="Song is not ready (status must be 'done')")
 
+    # Clear any stale error from a previous failed attempt — otherwise the
+    # frontend poller can misread it as this attempt failing before the new
+    # mux job has even finished.
+    if video.error is not None:
+        video.error = None
+        await db.commit()
+
     # Optimistic UI signal — the actual write happens in the background task.
     _progress[str(video_id)] = {
         "phase": "muxing",

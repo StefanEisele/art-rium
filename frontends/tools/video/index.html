@@ -78,6 +78,10 @@
     .story-head { display: flex; align-items: center; gap: 10px; }
     .story-head .field-label { flex: 1; min-width: 0; }
     .story-hint { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
+    .story-lora-list { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 160px; }
+    .story-lora-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    .story-lora-item label { flex: 1; display: flex; align-items: center; gap: 6px; cursor: pointer; }
+    .story-lora-item input[type="number"] { width: 60px; }
     #story-status { display: flex; flex-direction: column; gap: 8px; }
     .story-thumbs { display: flex; gap: 6px; flex-wrap: wrap; }
     .story-thumbs img { width: 48px; height: 48px; border-radius: 8px; object-fit: cover; }
@@ -340,12 +344,9 @@
               <span class="field-label" style="min-width:auto">Beat&nbsp;(s)</span>
               <input class="field-input" id="story-beat" type="number" value="10" min="1" max="600" step="1">
             </div>
-            <div class="field-row">
-              <span class="field-label">LoRA</span>
-              <select class="field-select" id="story-lora"></select>
-              <span class="field-label" style="min-width:auto">Strength</span>
-              <input class="field-input" id="story-strength" type="number" min="0" max="1" step="0.05" value="0.5"
-                     title="Defaults to the source image's own LoRA strength for high consistency">
+            <div class="field-row" style="align-items:flex-start" title="Defaults to the source image's own LoRA(s) + strength for high consistency">
+              <span class="field-label">LoRAs</span>
+              <div class="story-lora-list" id="story-lora-list"></div>
             </div>
             <div class="field-row">
               <span class="field-label">Style</span>
@@ -788,14 +789,51 @@ async function pasteInto(btn) {
 // 1 source image + short story → N generated key frames, inserted into the
 // strip behind the source. The rest is the normal flf2v pipeline.
 
+// Story frames can chain the same multiple LoRAs a source image was
+// generated with (mirrors the Z-Image tool's combine-multiple picker, just
+// laid out as a checklist rather than toggle chips to fit this narrower panel).
+let storyLoraRegistry = [];               // [{filename, label, trigger}, ...]
+const storyLoraState = {
+  active:     new Set(),                  // filenames currently checked
+  strengths:  {},                         // {filename: strength}, persists per-LoRA even while unchecked
+};
+
 async function loadStoryLoras() {
   try {
     const r = await api('/api/loras');
     const d = await r.json();
-    $('story-lora').innerHTML = (d.loras || []).map(l =>
-      `<option value="${_esc(l.filename)}"${l.filename === d.default ? ' selected' : ''}>${_esc(l.label)}</option>`
-    ).join('');
-  } catch (_) { /* select stays empty → backend default LoRA is used */ }
+    storyLoraRegistry = d.loras || [];
+    storyLoraState.active = new Set(d.default ? [d.default] : []);
+    storyLoraRegistry.forEach(l => { storyLoraState.strengths[l.filename] = 0.5; });
+    renderStoryLoraList();
+  } catch (_) { /* list stays empty → backend default LoRA is used */ }
+}
+
+function renderStoryLoraList() {
+  const box = $('story-lora-list');
+  box.innerHTML = storyLoraRegistry.map(l => {
+    const checked = storyLoraState.active.has(l.filename);
+    const strength = storyLoraState.strengths[l.filename] ?? 0.5;
+    return `
+      <div class="story-lora-item">
+        <label>
+          <input type="checkbox" ${checked ? 'checked' : ''} onchange="toggleStoryLora('${_esc(l.filename)}', this.checked)">
+          ${_esc(l.label)}
+        </label>
+        <input class="field-input" type="number" min="0" max="1" step="0.05" value="${strength}"
+               onchange="setStoryLoraStrength('${_esc(l.filename)}', this.value)">
+      </div>`;
+  }).join('');
+}
+
+function toggleStoryLora(filename, on) {
+  if (on) storyLoraState.active.add(filename);
+  else storyLoraState.active.delete(filename);
+}
+
+function setStoryLoraStrength(filename, val) {
+  const n = parseFloat(val);
+  storyLoraState.strengths[filename] = isNaN(n) ? 0.5 : Math.max(0, Math.min(1, n));
 }
 
 async function loadStoryStyles() {
@@ -810,25 +848,24 @@ async function loadStoryStyles() {
   } catch (_) { /* select keeps only "Source style" → no preset is sent */ }
 }
 
-// Mirrors the selected source image's own LoRA + strength into the story
-// panel so a fresh story sequence defaults to the exact params the source
-// was generated with — same seed reuse already does this on the backend,
-// this closes the loop for LoRA/strength too. Still editable before generating.
+// Mirrors the selected source image's own LoRA(s) + strength into the story
+// panel so a fresh story sequence defaults to the exact chain the source was
+// generated with — same seed reuse already does this on the backend, this
+// closes the loop for LoRA/strength too. Still editable before generating.
 function syncStoryDefaultsFromSource() {
   if (state.mode !== 'flf2v' || state.selectedImages.length !== 1) return;
   const src = state.selectedImages[0];
-  // Source images can carry several chained LoRAs, but this panel only
-  // offers one — mirror the first entry (the rest would need the full
-  // multi-select UI the Z-Image tool has).
-  const first = (src.loras || [])[0];
-  if (!first) return;
-  const loraSel = $('story-lora');
-  if ([...loraSel.options].some(o => o.value === first.name)) {
-    loraSel.value = first.name;
-  }
-  if (first.strength !== null && first.strength !== undefined) {
-    $('story-strength').value = first.strength;
-  }
+  const srcLoras = (src.loras || []).filter(l =>
+    storyLoraRegistry.some(reg => reg.filename === l.name)
+  );
+  if (!srcLoras.length) return;
+  storyLoraState.active = new Set(srcLoras.map(l => l.name));
+  srcLoras.forEach(l => {
+    if (l.strength !== null && l.strength !== undefined) {
+      storyLoraState.strengths[l.name] = l.strength;
+    }
+  });
+  renderStoryLoraList();
 }
 
 async function generateStoryFrames() {
@@ -860,13 +897,10 @@ async function generateStoryFrames() {
       width:  state.width,
       height: state.height,
     };
-    const loraName = $('story-lora').value;
-    if (loraName) {
-      const strengthVal = parseFloat($('story-strength').value);
-      body.loras = [{
-        name: loraName,
-        strength: isNaN(strengthVal) ? 0.5 : Math.max(0, Math.min(1, strengthVal)),
-      }];
+    if (storyLoraState.active.size) {
+      body.loras = [...storyLoraState.active].map(name => ({
+        name, strength: storyLoraState.strengths[name] ?? 0.5,
+      }));
     }
     const styleLetter = $('story-style').value;
     if (styleLetter) body.style = styleLetter;

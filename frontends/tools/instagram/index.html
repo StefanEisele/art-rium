@@ -528,6 +528,14 @@
     #vp-grid {
       flex: 1; min-height: 0; overflow-y: auto;
       display: grid; grid-template-columns: repeat(2, 1fr);
+      /* Without this, rows default to `auto` sizing, whose *minimum* track
+         size resolves through each item's automatic minimum size — which is
+         0 because .vp-item has overflow:hidden. With many items and a
+         definite-height scroll container, the grid's deficit-distribution
+         step then shrinks every row toward that 0 floor instead of letting
+         them overflow and scroll, squashing thumbnails into thin strips.
+         min-content sizes rows to what their content actually needs. */
+      grid-auto-rows: min-content;
       gap: 8px; padding: 12px;
     }
     .vp-item {

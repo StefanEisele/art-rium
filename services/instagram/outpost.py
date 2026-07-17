@@ -31,7 +31,7 @@ from core.models import InstagramPost, Video
 from core.scheduling import companion_at
 from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.ig_video import ensure_ig_compatible
-from services.instagram.media import load_media_refs
+from services.instagram.media import load_media_refs, resolve_video_path
 from services.instagram.reel_concat import concat_reel_videos
 from workers.video_generator import generate_slideshow
 
@@ -147,7 +147,7 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
                     f"Referenced reel video {reel_video_id} is not ready",
                 )
                 return
-            reel_video_path: Path | None = settings.storage_dir / vid.filepath
+            reel_video_path: Path | None = resolve_video_path(vid)
         else:
             reel_video_path = None
 
@@ -298,7 +298,7 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
             if story_companion and story_companion.delay_minutes is not None
             else None
         )
-        source_paths = [settings.storage_dir / v.filepath for v in ordered]
+        source_paths = [resolve_video_path(v) for v in ordered]
 
     # ── Concatenate to a 9:16 reel MP4 (off the DB session) ────────────────
     settings.reels_dir.mkdir(parents=True, exist_ok=True)

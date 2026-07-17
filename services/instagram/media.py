@@ -18,14 +18,31 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from core.models import Image, InstagramPost, InstagramPostMedia, Video
 
 MediaKind = Literal["image", "video"]
+
+
+def resolve_video_path(video: Video) -> Path:
+    """Absolute path to the file Instagram should actually ingest for `video`.
+
+    A soundtrack attached via `/jobs/{id}/soundtrack` is muxed into a sibling
+    file (`muxed_filename`) rather than overwriting the silent original
+    (`filepath`) — see routers/video.py::_serialize's `primary_name` for the
+    same precedence used by the video player. Every reel/companion dispatch
+    path must resolve through here, or a video with an attached soundtrack
+    silently gets published without audio.
+    """
+    if video.muxed_filename:
+        return settings.videos_dir / video.muxed_filename
+    return settings.storage_dir / video.filepath
 
 
 @dataclass(slots=True)

@@ -36,7 +36,7 @@ from services.instagram.graph import (
     wait_container_ready,
 )
 from services.instagram.ig_video import ensure_ig_compatible
-from services.instagram.media import load_media_refs
+from services.instagram.media import load_media_refs, resolve_video_path
 from services.instagram.publisher import MIN_REMOTE_LEAD_SECONDS
 from workers.video_generator import generate_slideshow
 
@@ -159,7 +159,7 @@ async def _resolve_video(
             vid = await db.get(Video, reel_video_id)
         if not vid or vid.status != "done" or not vid.filepath:
             raise ValueError(f"Referenced video {reel_video_id} is not ready")
-        path = await ensure_ig_compatible(settings.storage_dir / vid.filepath)
+        path = await ensure_ig_compatible(resolve_video_path(vid))
         return path, path.name, "video"
 
     if existing_filename:

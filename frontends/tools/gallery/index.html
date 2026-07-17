@@ -1078,11 +1078,13 @@ const populateModal = (img) => {
 
   const meta = $('modal-meta');
   meta.innerHTML = '';
+  const loraChips = (img.loras || []).map(l =>
+    `${loraLabelByFilename[l.name] || l.name} ${Number(l.strength).toFixed(2)}`
+  );
   const chips = [
     img.width && img.height ? `${img.width}×${img.height}` : null,
     img.seed !== null && img.seed !== undefined ? `seed ${img.seed}` : null,
-    img.lora_name ? (loraLabelByFilename[img.lora_name] || img.lora_name) : null,
-    img.lora_strength !== null && img.lora_strength !== undefined ? `strength ${Number(img.lora_strength).toFixed(2)}` : null,
+    ...loraChips,
     img.workflow_name || null,
     formatDate(img.created_at),
   ].filter(Boolean);

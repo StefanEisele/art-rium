@@ -1020,10 +1020,9 @@ class StoryFramesRequest(BaseModel):
     style: str | None = None       # z-Image enhancer style letter (A–D); None = derive from source
     width: int = 1024
     height: int = 1024
-    # None = inherit the source image's own LoRA/strength (high consistency
-    # across the story sequence); an explicit value still overrides it.
-    lora_name: str | None = None
-    lora_strength: float | None = None
+    # None = inherit the source image's own LoRA(s) (high consistency across
+    # the story sequence); an explicit value still overrides it.
+    loras: list[dict] | None = None
 
 
 def _prune_story_jobs() -> None:
@@ -1060,9 +1059,13 @@ async def _run_story_frames(
         description = await describe_image_for_story(jpg_bytes)
 
         _story_update(job_id, "planning", f"Writing {n} frame prompt(s)…", 12)
-        trigger = next(
-            (lora["trigger"] for lora in LORAS if lora["filename"] == req.lora_name), None,
-        )
+        lora_by_filename = {lora["filename"]: lora for lora in LORAS}
+        triggers = [
+            lora_by_filename[sel["name"]]["trigger"]
+            for sel in req.loras
+            if sel["name"] in lora_by_filename and lora_by_filename[sel["name"]]["trigger"]
+        ]
+        trigger = ", ".join(triggers) or None
         prompts = await generate_story_frame_prompts(
             story=req.story, n=n,
             description=description,
@@ -1087,8 +1090,7 @@ async def _run_story_frames(
                     18 + int(78 * i / n),
                 )
                 wf = build_zimage_workflow(
-                    frame_prompt, seed, req.width, req.height,
-                    req.lora_name, req.lora_strength,
+                    frame_prompt, seed, req.width, req.height, req.loras,
                 )
                 prompt_id = await _post_workflow_with_retry(client, wf)
                 outputs = await poll_history(
@@ -1109,8 +1111,7 @@ async def _run_story_frames(
                     seed=seed,
                     width=req.width,
                     height=req.height,
-                    lora_name=req.lora_name,
-                    lora_strength=req.lora_strength,
+                    loras=req.loras,
                     workflow_name=ZIMAGE_WORKFLOW_NAME,
                     batch_id=batch_id,
                 )
@@ -1166,14 +1167,13 @@ async def create_story_frames(body: StoryFramesRequest, db: AsyncSession = Depen
     if not (settings.storage_dir / image.filepath).exists():
         raise HTTPException(status_code=404, detail="Source image file missing on disk")
 
-    # Default LoRA/strength to the source image's own generation params —
-    # keeps the story sequence visually consistent unless explicitly overridden.
-    if body.lora_name is None:
-        body.lora_name = image.lora_name or DEFAULT_LORA
-    if body.lora_strength is None:
-        body.lora_strength = float(image.lora_strength) if image.lora_strength is not None else 0.5
-    if body.lora_name not in ALLOWED_LORAS:
-        raise HTTPException(status_code=400, detail=f"Unknown LoRA: {body.lora_name}")
+    # Default LoRA(s) to the source image's own generation params — keeps the
+    # story sequence visually consistent unless explicitly overridden.
+    if body.loras is None:
+        body.loras = image.loras or [{"name": DEFAULT_LORA, "strength": 0.5}]
+    for sel in body.loras:
+        if sel["name"] not in ALLOWED_LORAS:
+            raise HTTPException(status_code=400, detail=f"Unknown LoRA: {sel['name']}")
 
     job_id = str(uuid.uuid4())
     _story_jobs[job_id] = {

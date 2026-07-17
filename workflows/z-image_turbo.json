@@ -78,18 +78,9 @@
   "47": {
     "inputs": {
       "shift": 3,
-      "model": ["51", 0]
+      "model": ["46", 0]
     },
     "class_type": "ModelSamplingAuraFlow",
     "_meta": {"title": "ModelSamplingAuraFlow"}
-  },
-  "51": {
-    "inputs": {
-      "lora_name": "rustorangeanddimblue_lora_copy.safetensors",
-      "strength_model": 0.5,
-      "model": ["46", 0]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {"title": "Load LoRA"}
   }
 }

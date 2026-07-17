@@ -817,12 +817,17 @@ async function loadStoryStyles() {
 function syncStoryDefaultsFromSource() {
   if (state.mode !== 'flf2v' || state.selectedImages.length !== 1) return;
   const src = state.selectedImages[0];
+  // Source images can carry several chained LoRAs, but this panel only
+  // offers one — mirror the first entry (the rest would need the full
+  // multi-select UI the Z-Image tool has).
+  const first = (src.loras || [])[0];
+  if (!first) return;
   const loraSel = $('story-lora');
-  if (src.lora_name && [...loraSel.options].some(o => o.value === src.lora_name)) {
-    loraSel.value = src.lora_name;
+  if ([...loraSel.options].some(o => o.value === first.name)) {
+    loraSel.value = first.name;
   }
-  if (src.lora_strength !== null && src.lora_strength !== undefined) {
-    $('story-strength').value = src.lora_strength;
+  if (first.strength !== null && first.strength !== undefined) {
+    $('story-strength').value = first.strength;
   }
 }
 
@@ -856,9 +861,13 @@ async function generateStoryFrames() {
       height: state.height,
     };
     const loraName = $('story-lora').value;
-    if (loraName) body.lora_name = loraName;
-    const strengthVal = parseFloat($('story-strength').value);
-    if (!isNaN(strengthVal)) body.lora_strength = Math.max(0, Math.min(1, strengthVal));
+    if (loraName) {
+      const strengthVal = parseFloat($('story-strength').value);
+      body.loras = [{
+        name: loraName,
+        strength: isNaN(strengthVal) ? 0.5 : Math.max(0, Math.min(1, strengthVal)),
+      }];
+    }
     const styleLetter = $('story-style').value;
     if (styleLetter) body.style = styleLetter;
     const r = await api('/api/video/story-frames', {

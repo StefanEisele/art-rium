@@ -15,29 +15,48 @@ from services.ollama.story_frames import (
 
 class TestBuildZimageWorkflow:
     def test_prompt_seed_size_and_lora_land_in_the_right_nodes(self):
-        wf = build_zimage_workflow("a rusty gate", 1234, 960, 704, "some_lora.safetensors", 0.7)
+        loras = [{"name": "some_lora.safetensors", "strength": 0.7}]
+        wf = build_zimage_workflow("a rusty gate", 1234, 960, 704, loras)
         assert wf["45"]["inputs"]["text"] == "a rusty gate"
         assert wf["44"]["inputs"]["seed"] == 1234
         assert wf["41"]["inputs"]["width"] == 960
         assert wf["41"]["inputs"]["height"] == 704
-        assert wf["51"]["inputs"]["lora_name"] == "some_lora.safetensors"
-        assert wf["51"]["inputs"]["strength_model"] == 0.7
+        assert wf["lora_0"]["inputs"]["lora_name"] == "some_lora.safetensors"
+        assert wf["lora_0"]["inputs"]["strength_model"] == 0.7
+        assert wf["47"]["inputs"]["model"] == ["lora_0", 0]
 
     def test_negative_seed_is_randomized(self):
-        wf = build_zimage_workflow("p", -1, 512, 512, "l.safetensors", 0.5)
+        wf = build_zimage_workflow("p", -1, 512, 512, [{"name": "l.safetensors", "strength": 0.5}])
         assert wf["44"]["inputs"]["seed"] >= 0
 
     def test_lora_strength_is_clamped(self):
-        wf = build_zimage_workflow("p", 1, 512, 512, "l.safetensors", 1.7)
-        assert wf["51"]["inputs"]["strength_model"] == 1.0
+        wf = build_zimage_workflow("p", 1, 512, 512, [{"name": "l.safetensors", "strength": 1.7}])
+        assert wf["lora_0"]["inputs"]["strength_model"] == 1.0
+
+    def test_multiple_loras_are_chained_in_order(self):
+        loras = [
+            {"name": "a.safetensors", "strength": 0.3},
+            {"name": "b.safetensors", "strength": 0.5},
+        ]
+        wf = build_zimage_workflow("p", 1, 512, 512, loras)
+        assert wf["lora_0"]["inputs"]["model"] == ["46", 0]
+        assert wf["lora_0"]["inputs"]["lora_name"] == "a.safetensors"
+        assert wf["lora_1"]["inputs"]["model"] == ["lora_0", 0]
+        assert wf["lora_1"]["inputs"]["lora_name"] == "b.safetensors"
+        assert wf["47"]["inputs"]["model"] == ["lora_1", 0]
+
+    def test_no_loras_wires_unet_straight_into_model_sampling(self):
+        wf = build_zimage_workflow("p", 1, 512, 512, [])
+        assert wf["47"]["inputs"]["model"] == ["46", 0]
+        assert not any(k.startswith("lora_") for k in wf)
 
     def test_template_is_not_mutated_between_calls(self):
-        build_zimage_workflow("first", 1, 512, 512, "l.safetensors", 0.5)
-        wf2 = build_zimage_workflow("second", 2, 512, 512, "l.safetensors", 0.5)
+        build_zimage_workflow("first", 1, 512, 512, [{"name": "l.safetensors", "strength": 0.5}])
+        wf2 = build_zimage_workflow("second", 2, 512, 512, [{"name": "l.safetensors", "strength": 0.5}])
         assert wf2["45"]["inputs"]["text"] == "second"
 
     def test_save_node_exists_in_template(self):
-        wf = build_zimage_workflow("p", 1, 512, 512, "l.safetensors", 0.5)
+        wf = build_zimage_workflow("p", 1, 512, 512, [{"name": "l.safetensors", "strength": 0.5}])
         assert wf[ZIMAGE_SAVE_NODE]["class_type"] == "SaveImage"
 
 

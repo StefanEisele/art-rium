@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+class LoraSelection(BaseModel):
+    name: str
+    strength: float = 0.5
+
+
 class GenerateRequest(BaseModel):
     model: str = "zimage"  # "zimage" | "sdxl" | "ernie" — selects the generator backend + workflow
     prompt: str = ""
@@ -51,8 +56,9 @@ class GenerateRequest(BaseModel):
     height: int = 1024
     client_id: str
     batch_count: int = 1
-    lora_name: str = ""  # blank = that model's default (resolved server-side, since the default differs per model)
-    lora_strength: float = 0.5
+    # None/omitted = that model's single default LoRA (resolved server-side).
+    # Z-Image chains every entry; SDXL/Ernie only ever use the first one.
+    loras: list[LoraSelection] | None = None
 
 
 class EnhancePromptsRequest(BaseModel):
@@ -103,12 +109,14 @@ async def generate(req: GenerateRequest, request: Request):
         negative_list = [req.negative_prompt] * batch_count
 
     if req.model in _MODELS_WITHOUT_LORAS:
-        lora_name = None
+        loras: list[dict] = []
     else:
         allowed_loras, default_lora = _lora_registry(req.model)
-        lora_name = req.lora_name or default_lora
-        if lora_name not in allowed_loras:
-            raise HTTPException(status_code=400, detail=f"Unknown LoRA: {lora_name}")
+        selections = req.loras if req.loras else [LoraSelection(name=default_lora)]
+        for sel in selections:
+            if sel.name not in allowed_loras:
+                raise HTTPException(status_code=400, detail=f"Unknown LoRA: {sel.name}")
+        loras = [{"name": sel.name, "strength": sel.strength} for sel in selections]
 
     listener = request.app.state.comfy_listener
     total = len(prompt_list)
@@ -119,14 +127,15 @@ async def generate(req: GenerateRequest, request: Request):
         seed = (req.seed + i) if req.seed >= 0 else random.randint(0, 2**32 - 1)
         if is_sdxl:
             workflow = build_artivision_workflow(
-                prompt_text, negative_list[i], seed, req.width, req.height, lora_name, req.lora_strength,
+                prompt_text, negative_list[i], seed, req.width, req.height,
+                loras[0]["name"], loras[0]["strength"],
             )
             workflow_name = ARTIVISION_WORKFLOW_NAME
         elif is_ernie:
             workflow = build_ernie_workflow(prompt_text, seed, req.width, req.height)
             workflow_name = ERNIE_WORKFLOW_NAME
         else:
-            workflow = build_zimage_workflow(prompt_text, seed, req.width, req.height, lora_name, req.lora_strength)
+            workflow = build_zimage_workflow(prompt_text, seed, req.width, req.height, loras)
             workflow_name = ZIMAGE_WORKFLOW_NAME
 
         result = await post_prompt(workflow, listener.client_id)
@@ -145,8 +154,7 @@ async def generate(req: GenerateRequest, request: Request):
             seed=seed,
             width=req.width,
             height=req.height,
-            lora_name=lora_name,
-            lora_strength=req.lora_strength,
+            loras=loras,
             workflow_name=workflow_name,
         )
         prompt_ids.append(prompt_id)

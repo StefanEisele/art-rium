@@ -87,25 +87,47 @@
     .size-btn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
     .size-btn.active strong { color: var(--accent); }
 
-    /* ── LoRA picker ── */
+    /* ── LoRA picker — each entry is an independent toggle; enabling one
+       reveals its own strength slider inline below it. Z-Image can combine
+       several at once; SDXL/Ernie registries only ever hold 0-1 entries. ── */
     .lora-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
+      display: flex;
+      flex-direction: column;
       gap: 8px;
     }
 
-    .lora-btn {
+    .lora-item {
       background: var(--surface2); border: 1.5px solid var(--border);
-      border-radius: 10px; color: var(--text-dim);
-      font-size: 13px; font-weight: 600; padding: 10px 8px;
-      cursor: pointer; text-align: center;
-      transition: all 0.15s; font-family: inherit;
-      -webkit-tap-highlight-color: transparent;
-      line-height: 1.3;
+      border-radius: 10px; overflow: hidden;
+      transition: border-color 0.15s;
     }
-    .lora-btn small { display: block; font-size: 10px; font-weight: 400; margin-top: 2px; opacity: 0.7; }
-    .lora-btn.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-    .lora-btn.active small { opacity: 0.7; }
+    .lora-item.active { border-color: var(--accent); }
+
+    .lora-toggle {
+      width: 100%; display: flex; align-items: center; gap: 10px;
+      background: none; border: none; padding: 10px 12px;
+      color: var(--text-dim); font-size: 13px; font-weight: 600;
+      text-align: left; cursor: pointer; font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .lora-item.active .lora-toggle { color: var(--accent); }
+    .lora-toggle small { display: block; font-size: 10px; font-weight: 400; margin-top: 2px; opacity: 0.7; }
+
+    .lora-check {
+      flex-shrink: 0; width: 18px; height: 18px; border-radius: 5px;
+      border: 1.5px solid var(--border); color: transparent;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; transition: all 0.15s;
+    }
+    .lora-item.active .lora-check {
+      background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+    }
+
+    .lora-item-strength {
+      display: none; align-items: center; gap: 10px;
+      padding: 0 12px 12px;
+    }
+    .lora-item.active .lora-item-strength { display: flex; }
 
     /* ── Strength slider ── */
     .strength-row {
@@ -340,11 +362,8 @@
     #negative-prompt-field { display: none; }
     #negative-prompt-field.show { display: flex; }
 
-    /* ── LoRA row — 1 (SDXL) to 4 (Z-Image) entries, so wrap instead of a fixed 3-col grid ── */
-    .lora-row { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
-
-    /* ── LoRA fields hidden entirely for models with no LoRA in the library (e.g. Ernie Turbo) ── */
-    #lora-field.hidden, #lora-strength-field.hidden { display: none; }
+    /* ── LoRA field hidden entirely for models with no LoRA in the library (e.g. Ernie Turbo) ── */
+    #lora-field.hidden { display: none; }
   </style>
 </head>
 <body>
@@ -449,20 +468,11 @@
         <div class="batch-row" id="batch-row"></div>
       </div>
 
-      <!-- LoRA — hidden entirely for models with no LoRA in the library -->
+      <!-- LoRA — hidden entirely for models with no LoRA in the library.
+           Each entry togglable; strength slider appears inline once active. -->
       <div class="field" id="lora-field">
-        <label>LoRA Style</label>
+        <label>LoRA Style — tap to combine multiple</label>
         <div class="lora-row" id="lora-row"></div>
-      </div>
-
-      <!-- LoRA Strength -->
-      <div class="field" id="lora-strength-field">
-        <label>LoRA Strength</label>
-        <div class="strength-row">
-          <input type="range" id="lora-strength" min="0" max="1" step="0.05" value="0.5"
-                 oninput="onLoraStrength(this.value)">
-          <span class="strength-val" id="lora-strength-val">0.50</span>
-        </div>
       </div>
 
     </div>
@@ -545,7 +555,6 @@ const DOM_IDS = {
   modelSdxlBtn: 'model-sdxl',
   modelErnieBtn: 'model-ernie',
   loraField: 'lora-field',
-  loraStrengthField: 'lora-strength-field',
   negativePromptField: 'negative-prompt-field',
   negativePrompt: 'negative-prompt',
   enhanceReview: 'enhance-review',
@@ -582,8 +591,8 @@ const state = {
   batchTotal: 1,
   doneCount: 0,
   generatedImages: [],
-  loraName:     '',     // populated by buildLoraButtons() from GET /api/loras
-  loraStrength: 0.5,
+  activeLoras:    new Set(),  // filenames currently toggled on, in toggle order — populated by buildLoraList()
+  loraStrengths:  {},         // {filename: strength}, persists per-LoRA even while toggled off
   // Enhance-from-idea flow:
   //   mode='direct'  → prompt text + batch_count (classic)
   //   mode='enhance' → idea text → POST /api/prompts/enhance → review list → POST /api/generate{prompts}
@@ -916,8 +925,7 @@ const startGenerationRequest = async (extra) => {
         width: state.imgWidth,
         height: state.imgHeight,
         client_id: state.clientId,
-        lora_name: state.loraName,
-        lora_strength: state.loraStrength,
+        loras: [...state.activeLoras].map(name => ({ name, strength: state.loraStrengths[name] })),
         ...extra,
       }),
     });
@@ -931,16 +939,35 @@ const startGenerationRequest = async (extra) => {
 
 // ── Mode + enhance review ──────────────────────────────────────────────────
 
+/** Trigger words of every currently-active LoRA, joined for the prompt prefix. */
+const combinedTrigger = () => {
+  return [...state.activeLoras]
+    .map(f => loraRegistry.triggerOf(f))
+    .filter(Boolean)
+    .join(', ');
+};
+
 /**
- * Prepend the current LoRA trigger word to an enhanced prompt so the LoRA
- * fires at maximum weight (Z-Image weights early tokens for content).
- * No-op when no LoRA is selected or when the prompt already starts with it.
+ * Prepend the active LoRAs' trigger words to an enhanced prompt so they
+ * fire at maximum weight (Z-Image weights early tokens for content).
+ * No-op when no LoRA is active or the prompt already starts with the combo.
  */
 const withTrigger = (prompt) => {
-  const trigger = loraRegistry.triggerOf(state.loraName);
+  const trigger = combinedTrigger();
   if (!trigger) return prompt;
   if (prompt.startsWith(trigger)) return prompt;
-  return `${trigger} ${prompt}`;
+  return `${trigger}, ${prompt}`;
+};
+
+/** Swap an old trigger-word prefix for a new one at the front of `text`. */
+const swapTriggerPrefix = (text, oldPrefix, newPrefix) => {
+  if (oldPrefix && text.startsWith(oldPrefix)) {
+    text = text.slice(oldPrefix.length).replace(/^[\s,]+/, '');
+  }
+  if (newPrefix) {
+    text = text ? `${newPrefix}, ${text}` : newPrefix;
+  }
+  return text;
 };
 
 // SDXL's negative prompt only makes sense in Direct mode — in Enhance mode
@@ -954,7 +981,7 @@ const updateNegativePromptVisibility = () => {
 // stale enhance-review cards (they were phrased for the previous model).
 const setModel = async (model) => {
   if (model === state.model) return;
-  const oldTrigger = loraRegistry.triggerOf(state.loraName);
+  const oldPrefix = combinedTrigger();
   state.model = model;
 
   $(DOM_IDS.modelZimageBtn).classList.toggle('active', model === 'zimage');
@@ -962,16 +989,11 @@ const setModel = async (model) => {
   $(DOM_IDS.modelErnieBtn).classList.toggle('active', model === 'ernie');
   updateNegativePromptVisibility();
 
-  await buildLoraButtons();  // refetches for the new model; resets state.loraName to its default
+  await buildLoraList();  // refetches for the new model; resets state.activeLoras to its default
 
   if (state.mode === 'direct') {
     const promptEl = $(DOM_IDS.prompt);
-    const newTrigger = loraRegistry.triggerOf(state.loraName);
-    let text = promptEl.value;
-    if (oldTrigger && text.startsWith(oldTrigger)) {
-      text = text.slice(oldTrigger.length).replace(/^[\s,]+/, '');
-    }
-    promptEl.value = newTrigger ? (text ? `${newTrigger} ${text}` : newTrigger) : text;
+    promptEl.value = swapTriggerPrefix(promptEl.value, oldPrefix, combinedTrigger());
     onPromptInput();
   }
 
@@ -1000,7 +1022,7 @@ const setMode = (mode) => {
   //   enhance → idea text must NOT contain the trigger (Qwen would treat
   //             it as a literal noun); we strip it on entry, re-add on exit.
   const promptEl = $(DOM_IDS.prompt);
-  const trigger = loraRegistry.triggerOf(state.loraName);
+  const trigger = combinedTrigger();
 
   if (mode === 'enhance') {
     setText(DOM_IDS.promptLabel, 'Idea');
@@ -1016,7 +1038,7 @@ const setMode = (mode) => {
     promptEl.maxLength = CONFIG.maxPromptLength;
     setText(DOM_IDS.charLimit, String(CONFIG.maxPromptLength));
     if (trigger && !promptEl.value.startsWith(trigger)) {
-      promptEl.value = promptEl.value ? `${trigger} ${promptEl.value}` : trigger;
+      promptEl.value = promptEl.value ? `${trigger}, ${promptEl.value}` : trigger;
     }
   }
   onPromptInput();
@@ -1168,40 +1190,39 @@ const setBatch = (n, btn) => {
   selectButton('.batch-btn', btn);
 };
 
-// LoRA registry — populated by buildLoraButtons() from GET /api/loras
+// LoRA registry — populated by buildLoraList() from GET /api/loras
 const loraRegistry = {
   list: [],                                 // [{filename, label, trigger}, …]
   triggerOf: (filename) => (loraRegistry.list.find(l => l.filename === filename) || {}).trigger || '',
 };
 
-const setLora = (name, btn) => {
-  // Direct mode: massage the prompt textarea so the trigger lives at position 0.
-  // Enhance mode: the textarea holds the idea, not the final prompt — leave it
-  // alone and re-render the review cards (if any) so the trigger preview updates.
-  if (state.mode === 'direct') {
-    const promptEl   = $(DOM_IDS.prompt);
-    const oldTrigger = loraRegistry.triggerOf(state.loraName);
-    const newTrigger = loraRegistry.triggerOf(name);
+// Toggle one LoRA on/off. Several can be active at once — each carries its
+// own strength, applied as a chain in the order they were switched on.
+const toggleLora = (filename, i) => {
+  // Direct mode: massage the prompt textarea so the trigger word(s) live at
+  // position 0. Enhance mode: the textarea holds the idea, not the final
+  // prompt — leave it alone and re-render the review cards instead.
+  const oldPrefix = state.mode === 'direct' ? combinedTrigger() : null;
 
-    let text = promptEl.value;
-    if (oldTrigger && text.startsWith(oldTrigger)) {
-      text = text.slice(oldTrigger.length).replace(/^[\s,]+/, '');
-    }
-    promptEl.value = newTrigger ? (text ? `${newTrigger} ${text}` : newTrigger) : text;
+  if (state.activeLoras.has(filename)) state.activeLoras.delete(filename);
+  else state.activeLoras.add(filename);
+
+  $(`lora-item-${i}`).classList.toggle('active', state.activeLoras.has(filename));
+
+  if (state.mode === 'direct') {
+    const promptEl = $(DOM_IDS.prompt);
+    promptEl.value = swapTriggerPrefix(promptEl.value, oldPrefix, combinedTrigger());
     onPromptInput();
   }
-
-  state.loraName = name;
-  selectButton('.lora-btn', btn);
 
   if (state.mode === 'enhance' && state.enhancePhase === 'review') {
     renderEnhanceReview();
   }
 };
 
-const onLoraStrength = (val) => {
-  state.loraStrength = parseFloat(val);
-  setText('lora-strength-val', state.loraStrength.toFixed(2));
+const onLoraStrength = (filename, val, i) => {
+  state.loraStrengths[filename] = parseFloat(val);
+  setText(`lora-strength-val-${i}`, state.loraStrengths[filename].toFixed(2));
 };
 
 const updateShareButton = () => {
@@ -1256,7 +1277,7 @@ const buildBatchRow = () => {
   }
 };
 
-const buildLoraButtons = async () => {
+const buildLoraList = async () => {
   const row = $(DOM_IDS.loraRow);
   row.innerHTML = '';
   let payload;
@@ -1271,34 +1292,55 @@ const buildLoraButtons = async () => {
   }
 
   loraRegistry.list = payload.loras || [];
-  state.loraName = payload.default || (loraRegistry.list[0] && loraRegistry.list[0].filename) || '';
+  const defaultFilename = payload.default || (loraRegistry.list[0] && loraRegistry.list[0].filename) || '';
+  state.activeLoras = new Set(defaultFilename ? [defaultFilename] : []);
+  state.loraStrengths = {};
+  loraRegistry.list.forEach(l => { state.loraStrengths[l.filename] = 0.5; });
 
-  // Models with no LoRA in the library (e.g. Ernie Turbo) hide both fields
+  // Models with no LoRA in the library (e.g. Ernie Turbo) hide the field
   // entirely rather than showing an empty row.
   const hasLoras = loraRegistry.list.length > 0;
   $(DOM_IDS.loraField).classList.toggle('hidden', !hasLoras);
-  $(DOM_IDS.loraStrengthField).classList.toggle('hidden', !hasLoras);
 
-  loraRegistry.list.forEach((l) => {
-    const btn = document.createElement('button');
-    btn.className = 'lora-btn' + (l.filename === state.loraName ? ' active' : '');
-    btn.innerHTML = `${l.label}<small>${l.trigger}</small>`;
-    btn.onclick = () => setLora(l.filename, btn);
-    row.appendChild(btn);
+  loraRegistry.list.forEach((l, i) => {
+    const item = document.createElement('div');
+    item.className = 'lora-item' + (state.activeLoras.has(l.filename) ? ' active' : '');
+    item.id = `lora-item-${i}`;
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'lora-toggle';
+    toggle.innerHTML = `<span class="lora-check">✓</span><span>${l.label}<small>${l.trigger}</small></span>`;
+    toggle.onclick = () => toggleLora(l.filename, i);
+
+    const strengthRow = document.createElement('div');
+    strengthRow.className = 'lora-item-strength';
+    const slider = document.createElement('input');
+    slider.type = 'range'; slider.min = '0'; slider.max = '1'; slider.step = '0.05';
+    slider.value = String(state.loraStrengths[l.filename]);
+    slider.oninput = (e) => onLoraStrength(l.filename, e.target.value, i);
+    const val = document.createElement('span');
+    val.className = 'strength-val';
+    val.id = `lora-strength-val-${i}`;
+    val.textContent = state.loraStrengths[l.filename].toFixed(2);
+    strengthRow.append(slider, val);
+
+    item.append(toggle, strengthRow);
+    row.appendChild(item);
   });
 };
 
 window.addEventListener('load', async () => {
   buildBatchRow();
   buildHeaderButtons();
-  await buildLoraButtons();
+  await buildLoraList();
   state.generatedImages = storage.loadImages();
   gallery.render();
 
-  // Prepend default LoRA trigger word if prompt is empty
+  // Prepend default LoRA trigger word(s) if prompt is empty
   const promptEl = $(DOM_IDS.prompt);
   if (!promptEl.value.trim()) {
-    promptEl.value = loraRegistry.triggerOf(state.loraName);
+    promptEl.value = combinedTrigger();
     onPromptInput();
   }
 

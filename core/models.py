@@ -19,7 +19,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.db import Base
@@ -45,8 +45,10 @@ class Image(Base):
     seed: Mapped[int | None] = mapped_column(BigInteger)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
-    lora_name: Mapped[str | None] = mapped_column(String(256))       # LoRA filename used at generation time
-    lora_strength: Mapped[float | None] = mapped_column(Numeric(4, 3))  # strength_model, 0.000–1.000
+    # [{"name": "<filename>.safetensors", "strength": 0.500}, ...] — one entry
+    # per LoRA active at generation time, applied as a chain (order matters
+    # for Z-Image; SDXL/Ernie only ever populate 0 or 1 entry today).
+    loras: Mapped[list[dict] | None] = mapped_column(JSONB)
     workflow_name: Mapped[str | None] = mapped_column(String(128))
     batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     thumbnail_path: Mapped[str | None] = mapped_column(Text)        # relative to storage_dir, JPEG 512 px

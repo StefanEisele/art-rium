@@ -3,11 +3,15 @@ Unit tests for the story-frames pipeline's pure parts: the shared z-Image
 workflow builder (no ComfyUI) and the frame-prompt LLM wrapper's
 normalization/trigger logic (mocked _chat_json, no Ollama).
 """
+import json
+
 import pytest
 
+from routers.video import _seed_for_frame
 from services.comfy.zimage import ZIMAGE_SAVE_NODE, build_zimage_workflow
 from services.ollama import story_frames as story_module
 from services.ollama.story_frames import (
+    _salvage_truncated_frames,
     ensure_trigger,
     generate_story_frame_prompts,
 )
@@ -177,6 +181,91 @@ class TestGenerateStoryFramePrompts:
         text = _read_prompt("story-frames.md")
         assert text.strip()
         assert "{STYLE_BLOCK}" in text
+
+
+class TestSalvageTruncatedFrames:
+    def test_recovers_complete_frames_before_truncation(self):
+        raw = '{"frames": ["frame one", "frame two", "frame three that got cut off mid'
+        salvaged = _salvage_truncated_frames(raw)
+        assert salvaged == '{"frames": ["frame one", "frame two"]}'
+
+    def test_no_frames_key_returns_unchanged(self):
+        raw = '{"other": "stuff"'
+        assert _salvage_truncated_frames(raw) == raw
+
+    def test_first_frame_truncated_returns_unchanged(self):
+        # Nothing usable to recover — let the caller retry instead of
+        # "succeeding" with zero frames.
+        raw = '{"frames": ["this one never closes and runs on forever'
+        assert _salvage_truncated_frames(raw) == raw
+
+    def test_handles_escaped_quotes_inside_a_frame(self):
+        raw = r'{"frames": ["a \"quoted\" phrase", "second frame", "third cut off'
+        salvaged = _salvage_truncated_frames(raw)
+        assert salvaged == r'{"frames": ["a \"quoted\" phrase", "second frame"]}'
+        json.loads(salvaged)
+
+    def test_fully_complete_array_recovers_all_entries(self):
+        raw = '{"frames": ["a", "b", "c"]}'
+        assert _salvage_truncated_frames(raw) == '{"frames": ["a", "b", "c"]}'
+
+    async def test_salvage_feeds_into_chat_json_retry_flow(self, monkeypatch):
+        # End-to-end through _chat_json: first response is truncated
+        # mid-string (real-world failure mode), salvage recovers the
+        # complete leading frames instead of raising.
+        import services.ollama.chat as chat_module
+
+        class FakeResponse:
+            status_code = 200
+            def json(self):
+                return {"message": {"content":
+                    '{"frames": ["art_vision, first frame text", '
+                    '"art_vision, second frame text", '
+                    '"art_vision, third frame that runs on and on and never closes'
+                }}
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                return False
+            async def post(self, *a, **kw):
+                return FakeResponse()
+
+        monkeypatch.setattr(chat_module.httpx, "AsyncClient", lambda **kw: FakeClient())
+
+        result = await generate_story_frame_prompts(
+            story="a door opens", n=3, description="desc", trigger="art_vision",
+        )
+        assert result == [
+            "art_vision, first frame text",
+            "art_vision, second frame text",
+            "art_vision, second frame text",
+        ]
+
+
+class TestSeedForFrame:
+    def test_first_occurrence_keeps_base_seed(self):
+        seen: dict[str, int] = {}
+        assert _seed_for_frame("a prompt", 1000, seen) == 1000
+
+    def test_repeated_prompt_bumps_seed(self):
+        seen: dict[str, int] = {}
+        _seed_for_frame("a prompt", 1000, seen)
+        assert _seed_for_frame("a prompt", 1000, seen) == 1001
+        assert _seed_for_frame("a prompt", 1000, seen) == 1002
+
+    def test_different_prompts_all_keep_base_seed(self):
+        seen: dict[str, int] = {}
+        assert _seed_for_frame("frame one", 1000, seen) == 1000
+        assert _seed_for_frame("frame two", 1000, seen) == 1000
+        assert _seed_for_frame("frame three", 1000, seen) == 1000
+
+    def test_mutates_seen_prompts_across_calls(self):
+        seen: dict[str, int] = {}
+        _seed_for_frame("dup", 5, seen)
+        _seed_for_frame("dup", 5, seen)
+        assert seen["dup"] == 2
 
 
 class TestZimageStyleCatalogue:

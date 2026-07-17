@@ -1040,6 +1040,18 @@ def _story_update(job_id: str, status: str, message: str, pct: int) -> None:
         job.update(status=status, message=message, pct=pct)
 
 
+def _seed_for_frame(frame_prompt: str, base_seed: int, seen_prompts: dict[str, int]) -> int:
+    """Bump the seed when *frame_prompt* repeats verbatim earlier in the same
+    job (e.g. generate_story_frame_prompts padding a short response by
+    duplicating the last frame). With the seed otherwise shared across every
+    frame, a repeated prompt is a byte-identical ComfyUI submission — the
+    node-level cache then skips execution and returns no fresh SaveImage
+    output. Mutates `seen_prompts` to track repeat counts across calls."""
+    dup_count = seen_prompts.get(frame_prompt, 0)
+    seen_prompts[frame_prompt] = dup_count + 1
+    return base_seed + dup_count
+
+
 async def _run_story_frames(
     job_id: str,
     req: StoryFramesRequest,
@@ -1082,6 +1094,8 @@ async def _run_story_frames(
         seed = src_seed if src_seed is not None and src_seed >= 0 else random.randint(0, 2**32 - 1)
         batch_id = uuid.uuid4()
 
+        seen_prompts: dict[str, int] = {}
+
         async with httpx.AsyncClient(timeout=60) as client:
             for i, frame_prompt in enumerate(prompts):
                 _story_update(
@@ -1089,8 +1103,10 @@ async def _run_story_frames(
                     f"Frame {i + 1}/{n} — generating…",
                     18 + int(78 * i / n),
                 )
+                frame_seed = _seed_for_frame(frame_prompt, seed, seen_prompts)
+
                 wf = build_zimage_workflow(
-                    frame_prompt, seed, req.width, req.height, req.loras,
+                    frame_prompt, frame_seed, req.width, req.height, req.loras,
                 )
                 prompt_id = await _post_workflow_with_retry(client, wf)
                 outputs = await poll_history(
@@ -1108,7 +1124,7 @@ async def _run_story_frames(
                 dest, image_id = await ingest_comfy_image(
                     rel,
                     prompt=frame_prompt,
-                    seed=seed,
+                    seed=frame_seed,
                     width=req.width,
                     height=req.height,
                     loras=req.loras,

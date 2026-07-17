@@ -16,12 +16,59 @@ System prompt lives in prompts/story-frames.md — tunable without a code
 change, same convention as prompts/video-transitions.md.
 """
 import logging
+import re
 
 from core.config import settings
 from services.ollama.analysis import _TITLER_KEEP_ALIVE
 from services.ollama.chat import _chat_json, _read_prompt
 
 logger = logging.getLogger(__name__)
+
+_FRAMES_ARRAY_START = re.compile(r'"frames"\s*:\s*\[')
+
+
+def _salvage_truncated_frames(s: str) -> str:
+    """Recover whichever leading frame prompts are complete when the model
+    runs on inside one frame's string and gets cut off by num_predict before
+    ever writing the closing quote/bracket — the JSON parser then reports an
+    unterminated string. Drops the trailing (incomplete) entry; the caller's
+    existing count-mismatch padding fills in whatever ends up missing.
+
+    Returns `s` unchanged when nothing usable can be recovered (e.g. the very
+    first frame is the one that ran away), so the normal retry-on-failure
+    path in `_chat_json` kicks in instead of "succeeding" with zero frames.
+    """
+    m = _FRAMES_ARRAY_START.search(s)
+    if not m:
+        return s
+    i, n = m.end(), len(s)
+    frames: list[str] = []
+    while i < n:
+        while i < n and s[i] in " \t\r\n,":
+            i += 1
+        if i >= n or s[i] != '"':
+            break
+        j, buf, closed = i + 1, [], False
+        while j < n:
+            c = s[j]
+            if c == "\\" and j + 1 < n:
+                buf.append(c)
+                buf.append(s[j + 1])
+                j += 2
+                continue
+            if c == '"':
+                closed = True
+                j += 1
+                break
+            buf.append(c)
+            j += 1
+        if not closed:
+            break
+        frames.append('"' + "".join(buf) + '"')
+        i = j
+    if not frames:
+        return s
+    return '{"frames": [' + ", ".join(frames) + "]}"
 
 _DESCRIBE_SYSTEM = """You are an art analyst preparing a reference sheet for an image-generation pipeline. Describe the artwork image precisely and concretely in 3-5 sentences: subject(s) with appearance/clothing/materials, setting, composition and camera angle, color palette (name the actual colors), lighting, and artistic style/medium/texture. No interpretation, no story, no marketing language — only what is visible.
 
@@ -120,7 +167,8 @@ async def generate_story_frame_prompts(
         think=False,
         timeout=timeout,
         label="generate_story_frame_prompts",
-        max_attempts=2,
+        salvage=_salvage_truncated_frames,
+        max_attempts=3,
     )
     raw = parsed.get("frames") or []
     if not isinstance(raw, list):

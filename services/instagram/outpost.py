@@ -442,6 +442,9 @@ async def _apply_remote_state(post_id: uuid.UUID, remote: dict) -> None:
             if post.error != err:
                 post.error = err
                 changed = True
+            if post.status != "failed":
+                post.status = "failed"
+                changed = True
 
         # Reel companion mirror.
         if remote_reel == "posted":

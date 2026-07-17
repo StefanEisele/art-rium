@@ -573,9 +573,22 @@ async def _update_outpost_post(
 ) -> dict:
     """
     Apply edits to an outpost-dispatched post. Allowed: caption, scheduled_at,
-    companion_time, reel_delay retime (existing reel only). Forbidden: image
-    changes, reel add/remove, source video swap, story delays.
+    companion_time, reel_delay retime (existing reel only), and local status
+    overrides (cancel / mark-posted). Forbidden: image changes, reel
+    add/remove, source video swap, story delays, and retrying an already-
+    failed job in place — the Pi has no resubmit path once it has marked a
+    job failed, so "scheduled" would just silently sit there again.
     """
+    if body.status is not None and body.status != post.status:
+        if post.status == "failed" and body.status == "scheduled":
+            raise HTTPException(
+                status_code=409,
+                detail=("Cannot retry a failed cloud-scheduled post in place — the Pi "
+                        "outpost has no resubmit path once it has marked a job failed. "
+                        "Delete this post and create a new one instead."),
+            )
+        post.status = body.status
+
     requested = set(body.model_fields_set) - {"status"}
     reel = find_companion(post, "reel")
     story = find_companion(post, "story")
@@ -668,7 +681,11 @@ async def _update_outpost_post(
             pi_story_publish_at = new_story_at
 
     if all(v is None for v in (pi_caption, pi_scheduled_at, pi_reel_publish_at, pi_story_publish_at)):
-        # Nothing to send to the Pi — return current state.
+        # Nothing to push to the Pi, but local-only fields (status,
+        # companion_time with no active companion yet, etc.) may still have
+        # changed — commit those rather than silently discarding them.
+        post.updated_at = datetime.now(timezone.utc)
+        await db.commit()
         images, videos = await _load_media_for_post(post, db)
         return _serialize(post, images, videos)
 

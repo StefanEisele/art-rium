@@ -32,9 +32,14 @@ async def run_improv_session(
     *,
     pip_corner: str = "tr",
     pip_width_pct: float = 0.24,
+    include_bed: bool = False,
+    bed_volume: float = 0.35,
 ) -> None:
     try:
-        await _run(session_id, pip_corner=pip_corner, pip_width_pct=pip_width_pct)
+        await _run(
+            session_id, pip_corner=pip_corner, pip_width_pct=pip_width_pct,
+            include_bed=include_bed, bed_volume=bed_volume,
+        )
     except Exception as exc:
         logger.exception("Improv session %s crashed", session_id)
         await _mark_failed(session_id, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}")
@@ -45,6 +50,8 @@ async def _run(
     *,
     pip_corner: str = "tr",
     pip_width_pct: float = 0.24,
+    include_bed: bool = False,
+    bed_volume: float = 0.35,
 ) -> None:
     async with AsyncSessionLocal() as db:
         session = await db.get(ImprovSession, session_id)
@@ -77,6 +84,8 @@ async def _run(
         ffmpeg_path=settings.ffmpeg_path,
         pip_corner=pip_corner,
         pip_width_pct=pip_width_pct,
+        include_bed=include_bed,
+        bed_volume=bed_volume,
     )
 
     # Probe dimensions once per mix so the WP embed renders in the right

@@ -3,16 +3,23 @@ Unit tests for the pure ffmpeg argv builders (code review P1) — these
 assemble a `list[str]` command and never touch a subprocess, so they're
 testable without ffmpeg installed.
 """
+import pytest
+
 from pathlib import Path
 
 from services.improv.mux import (
+    BED_VOLUME_MAX,
+    BED_VOLUME_MIN,
     PIP_WIDTH_PCT_MAX,
     PIP_WIDTH_PCT_MIN,
     _hands_cmd,
     _pip_cmd,
     _synth_cmd,
+    _synth_cmd_with_bed,
+    clamp_bed_volume,
     clamp_pip_width,
 )
+from services.video.audio_stretch import build_rubberband_filter, build_stretch_cmd
 from services.video.soundtrack import _mux_cmd
 from workers.video_generator import _scale_pad, _single_cmd, _slideshow_cmd
 
@@ -28,6 +35,17 @@ class TestClampPipWidth:
         assert clamp_pip_width(0.99) == PIP_WIDTH_PCT_MAX
 
 
+class TestClampBedVolume:
+    def test_within_range_unchanged(self):
+        assert clamp_bed_volume(0.35) == 0.35
+
+    def test_below_min_clamped(self):
+        assert clamp_bed_volume(0.0) == BED_VOLUME_MIN
+
+    def test_above_max_clamped(self):
+        assert clamp_bed_volume(5.0) == BED_VOLUME_MAX
+
+
 class TestImprovMuxCmds:
     def test_synth_cmd_maps_video_from_source_audio_from_recording(self):
         cmd = _synth_cmd("ffmpeg", Path("source.mp4"), Path("rec.mp4"), Path("out.mp4"))
@@ -38,6 +56,20 @@ class TestImprovMuxCmds:
         assert "0:v:0" in cmd  # video from first input (source)
         assert "1:a:0" in cmd  # audio from second input (recording)
         assert "-shortest" in cmd
+
+    def test_synth_cmd_with_bed_mixes_both_audio_streams(self):
+        cmd = _synth_cmd_with_bed(
+            "ffmpeg", Path("source.mp4"), Path("rec.mp4"), Path("out.mp4"),
+            bed_volume=0.35, piano_volume=1.0,
+        )
+        assert cmd.count("-i") == 2
+        assert "0:v:0" in cmd  # video still comes from the source
+        assert "[aout]" in cmd  # mixed audio output, not a raw stream index
+        filter_complex = cmd[cmd.index("-filter_complex") + 1]
+        assert "volume=0.350" in filter_complex
+        assert "volume=1.000" in filter_complex
+        assert "amix=inputs=2" in filter_complex
+        assert cmd[-1] == str(Path("out.mp4"))
 
     def test_hands_cmd_copies_video_only_recording_input(self):
         cmd = _hands_cmd("ffmpeg", Path("rec.mp4"), Path("out.mp4"))
@@ -82,6 +114,41 @@ class TestSoundtrackMuxCmd:
         afade = next(c for c in cmd if c.startswith("afade="))
         assert "st=12.500" in afade
         assert "d=2.000" in afade
+
+
+class TestAudioStretch:
+    def test_default_detector_is_percussive(self):
+        assert build_rubberband_filter(1.5) == "rubberband=tempo=1.500000:detector=percussive"
+
+    def test_ratio_below_one_needs_no_chaining(self):
+        # rife_multiplier=4 -> ratio 1/4; rubberband takes any ratio in one stage.
+        filt = build_rubberband_filter(0.25)
+        assert filt == "rubberband=tempo=0.250000:detector=percussive"
+
+    def test_detector_is_overridable(self):
+        filt = build_rubberband_filter(0.5, detector="compound")
+        assert filt == "rubberband=tempo=0.500000:detector=compound"
+
+    def test_non_positive_ratio_raises(self):
+        with pytest.raises(ValueError):
+            build_rubberband_filter(0)
+
+    def test_stretch_cmd_trims_padding_before_stretching(self):
+        cmd = build_stretch_cmd(
+            "ffmpeg", Path("in.mp4"), Path("out.mp4"),
+            ratio=0.5, native_audio_duration=2.042, target_duration=9.0,
+        )
+        assert cmd[0] == "ffmpeg"
+        assert "0:v:0" in cmd
+        assert "0:a:0" in cmd
+        assert "copy" in cmd
+        af = next(c for c in cmd if c.startswith("atrim="))
+        assert "atrim=end=2.042000" in af
+        assert "asetpts=PTS-STARTPTS" in af
+        assert "rubberband=tempo=0.500000:detector=percussive" in af
+        assert "apad" in af
+        assert "9.000" in cmd
+        assert cmd[-1] == str(Path("out.mp4"))
 
 
 class TestSlideshowCmds:

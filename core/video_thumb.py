@@ -119,6 +119,28 @@ async def extract_video_frames(
     return frames
 
 
+async def probe_has_audio(src: Path) -> bool:
+    """Return True if `src` has at least one audio stream. Used to decide
+    whether an "include background audio" opt-in has anything to mix — a
+    silent source makes it a harmless no-op rather than an error."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _ffprobe_path(),
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=index",
+            "-of", "csv=p=0",
+            str(src),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        return proc.returncode == 0 and bool(out.decode().strip())
+    except Exception as e:
+        logger.warning("ffprobe audio-stream probe failed for %s: %s", src, e)
+        return False
+
+
 async def probe_video_dimensions(src: Path) -> tuple[int | None, int | None]:
     """Return (width, height) of the first video stream, or (None, None)
     when ffprobe fails. Used to populate Video.width/height for sources

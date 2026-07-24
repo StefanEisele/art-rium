@@ -5,10 +5,11 @@ logic (mocked _chat_json, no Ollama).
 """
 import pytest
 
-from routers.video import _build_flf2v_single_workflow
+from routers.video import _build_flf2v_single_workflow, _build_ltx_single_workflow
 from services.ollama import analysis as analysis_module
 from services.ollama.analysis import (
     generate_i2v_motion_prompts,
+    generate_ltx_motion_prompts,
     generate_transition_prompts,
 )
 
@@ -80,6 +81,50 @@ class TestBuildFlf2vSingleWorkflow:
             "start.png", "end.png", "a specific transition prompt", 25, 960, 960, 24, "prefix", 3,
         )
         assert wf["t0_pos"]["inputs"]["text"] == "a specific transition prompt"
+
+
+class TestBuildLtxSingleWorkflow:
+    def test_default_no_rife_node_wired_straight_from_decode(self):
+        wf, save_id, _ = _build_ltx_single_workflow(
+            "img.png", "a prompt", 25, 960, 960, 24, "prefix",
+        )
+        assert "ltx_rife" not in wf
+        assert wf[save_id]["inputs"]["images"] == ["ltx_vdec", 0]
+
+    def test_rife_multiplier_inserts_rife_node(self):
+        wf, save_id, _ = _build_ltx_single_workflow(
+            "img.png", "a prompt", 25, 960, 960, 24, "prefix", 3,
+        )
+        assert wf["ltx_rife"]["class_type"] == "RIFE VFI"
+        assert wf["ltx_rife"]["inputs"]["multiplier"] == 3
+        assert wf["ltx_rife"]["inputs"]["frames"] == ["ltx_vdec", 0]
+        assert wf[save_id]["inputs"]["images"] == ["ltx_rife", 0]
+
+    def test_audio_always_wired_from_native_decode_regardless_of_rife(self):
+        # Native LTX audio is intentionally left at its pre-RIFE length — the
+        # caller (services.video.audio_stretch) re-syncs it afterward.
+        wf, save_id, _ = _build_ltx_single_workflow(
+            "img.png", "a prompt", 25, 960, 960, 24, "prefix", 4,
+        )
+        assert wf[save_id]["inputs"]["audio"] == ["ltx_adec", 0]
+
+    def test_frame_count_snapped_to_8n_plus_1_and_returned(self):
+        _, _, length = _build_ltx_single_workflow(
+            "img.png", "prompt", 30, 960, 960, 24, "prefix",
+        )
+        assert length == 33  # (30-1+4)//8*8+1
+
+    def test_frame_count_already_valid_is_unchanged(self):
+        _, _, length = _build_ltx_single_workflow(
+            "img.png", "prompt", 49, 960, 960, 24, "prefix",
+        )
+        assert length == 49
+
+    def test_prompt_lands_in_positive_clip_encode(self):
+        wf, _, _ = _build_ltx_single_workflow(
+            "img.png", "a specific ltx prompt", 25, 960, 960, 24, "prefix",
+        )
+        assert wf["ltx_pos"]["inputs"]["text"] == "a specific ltx prompt"
 
 
 class TestGenerateTransitionPrompts:
@@ -178,4 +223,63 @@ class TestGenerateI2vMotionPrompts:
     async def test_reads_prompt_file_without_raising(self):
         from services.ollama.chat import _read_prompt
         text = _read_prompt("video-i2v-motion.md")
+        assert text.strip()
+
+
+class TestGenerateLtxMotionPrompts:
+    """Mirrors TestGenerateI2vMotionPrompts — same per-image fan-out helper,
+    different system prompt file (LTX-2.3's audio-aware variant)."""
+
+    async def test_one_call_per_image_with_single_jpg_each(self, monkeypatch):
+        calls = []
+        async def fake_chat_json(**kwargs):
+            calls.append(kwargs)
+            return {"animation": f"prompt {len(calls)}"}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        result = await generate_ltx_motion_prompts([b"1", b"2", b"3"])
+        assert result == ["prompt 1", "prompt 2", "prompt 3"]
+        assert len(calls) == 3
+        assert all(kw["jpgs"] == [img] for kw, img in zip(calls, [b"1", b"2", b"3"]))
+        assert "image 2 of 3" in calls[1]["user_text"]
+
+    async def test_uses_ltx_system_prompt_not_wan(self, monkeypatch):
+        systems = []
+        async def fake_chat_json(**kwargs):
+            systems.append(kwargs["system"])
+            return {"animation": "ok"}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        await generate_ltx_motion_prompts([b"1"])
+        from services.ollama.chat import _read_prompt
+        assert systems[0] == _read_prompt("video-ltx-motion.md")
+        assert systems[0] != _read_prompt("video-i2v-motion.md")
+
+    async def test_failed_image_yields_empty_slot(self, monkeypatch):
+        calls = []
+        async def fake_chat_json(**kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return {"animation": f"prompt {len(calls)}"}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        result = await generate_ltx_motion_prompts([b"1", b"2", b"3"])
+        assert result == ["prompt 1", "", "prompt 3"]
+
+    async def test_all_calls_failing_raises(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            raise RuntimeError("ollama down")
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        with pytest.raises(RuntimeError):
+            await generate_ltx_motion_prompts([b"1", b"2"])
+
+    async def test_empty_image_list_raises(self):
+        with pytest.raises(RuntimeError):
+            await generate_ltx_motion_prompts([])
+
+    async def test_reads_prompt_file_without_raising(self):
+        from services.ollama.chat import _read_prompt
+        text = _read_prompt("video-ltx-motion.md")
         assert text.strip()

@@ -25,10 +25,24 @@ import logging
 import uuid
 from pathlib import Path
 
+from core.video_thumb import probe_has_audio
+
 logger = logging.getLogger(__name__)
 
 # Loudness target — Instagram recommends -14 LUFS integrated, true-peak <= -1 dBTP.
 _LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
+
+# "synth" ambient-bed defaults — piano reads as the lead, the source video's
+# own generated audio (e.g. LTX-2.3's native track) sits quietly underneath.
+BED_VOLUME_DEFAULT = 0.35
+PIANO_VOLUME_DEFAULT = 1.0
+BED_VOLUME_MIN = 0.1
+BED_VOLUME_MAX = 0.8
+
+
+def clamp_bed_volume(vol: float) -> float:
+    """Clamp the ambient-bed volume to the supported [MIN, MAX] window."""
+    return max(BED_VOLUME_MIN, min(BED_VOLUME_MAX, vol))
 
 # PiP inset geometry — confirmed with user 2026-05-16.
 PIP_WIDTH_PCT_DEFAULT = 0.24    # 24% of background width
@@ -60,6 +74,8 @@ async def mux_session(
     ffmpeg_path: str = "ffmpeg",
     pip_corner: str = PIP_CORNER_DEFAULT,
     pip_width_pct: float = PIP_WIDTH_PCT_DEFAULT,
+    include_bed: bool = False,
+    bed_volume: float = BED_VOLUME_DEFAULT,
 ) -> tuple[Path, Path, Path]:
     """
     Produce the three mix outputs for one improv session.
@@ -70,6 +86,14 @@ async def mux_session(
 
     `pip_width_pct` is the inset's width as a fraction of the background
     width (e.g. 0.24 = 24%). Clamped to [0.10, 0.50].
+
+    `include_bed` opts the "synth" output into blending the source video's
+    own audio (e.g. LTX-2.3's native generated track) in quietly underneath
+    the piano, both audible — piano at `PIANO_VOLUME_DEFAULT`, bed at
+    `bed_volume` (clamped to [BED_VOLUME_MIN, BED_VOLUME_MAX]). Only takes
+    effect when the source actually has an audio stream; otherwise this is a
+    harmless no-op (falls back to the plain piano-only mix). `hands` and
+    `pip` are unaffected — this pass only touches `synth`.
 
     Returns (mix_synth_path, mix_hands_path, mix_pip_path), all inside `output_dir`.
     Raises RuntimeError if any ffmpeg invocation exits non-zero.
@@ -83,10 +107,20 @@ async def mux_session(
     corner = pip_corner if pip_corner in _PIP_CORNERS else PIP_CORNER_DEFAULT
     width_pct = clamp_pip_width(pip_width_pct)
 
-    await _run_ffmpeg(
-        _synth_cmd(ffmpeg_path, source_video, recording, mix_synth),
-        label="mix_synth",
-    )
+    use_bed = include_bed and await probe_has_audio(source_video)
+    if use_bed:
+        await _run_ffmpeg(
+            _synth_cmd_with_bed(
+                ffmpeg_path, source_video, recording, mix_synth,
+                bed_volume=clamp_bed_volume(bed_volume),
+            ),
+            label="mix_synth",
+        )
+    else:
+        await _run_ffmpeg(
+            _synth_cmd(ffmpeg_path, source_video, recording, mix_synth),
+            label="mix_synth",
+        )
     await _run_ffmpeg(
         _hands_cmd(ffmpeg_path, recording, mix_hands),
         label="mix_hands",
@@ -115,6 +149,43 @@ def _synth_cmd(ffmpeg: str, source: Path, recording: Path, out: Path) -> list[st
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-af", _LOUDNORM_FILTER,
+        "-shortest",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+
+
+def _synth_cmd_with_bed(
+    ffmpeg: str,
+    source: Path,
+    recording: Path,
+    out: Path,
+    *,
+    bed_volume: float = BED_VOLUME_DEFAULT,
+    piano_volume: float = PIANO_VOLUME_DEFAULT,
+) -> list[str]:
+    """
+    Like _synth_cmd, but blends the source video's own audio in quietly
+    underneath the piano instead of discarding it: two volume-adjusted
+    streams combined via amix, then loudness-normalised as one signal.
+    `-shortest` (via amix's duration=shortest) still clips to whichever
+    stream ends first, matching _synth_cmd's behaviour.
+    """
+    filter_complex = (
+        f"[0:a]volume={bed_volume:.3f}[bed];"
+        f"[1:a]volume={piano_volume:.3f}[piano];"
+        f"[bed][piano]amix=inputs=2:duration=shortest:dropout_transition=0,"
+        f"{_LOUDNORM_FILTER}[aout]"
+    )
+    return [
+        ffmpeg, "-y",
+        "-i", str(source),
+        "-i", str(recording),
+        "-filter_complex", filter_complex,
+        "-map", "0:v:0",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
         "-shortest",
         "-movflags", "+faststart",
         str(out),

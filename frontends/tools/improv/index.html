@@ -222,6 +222,15 @@
         </div>
       </div>
 
+      <div class="card">
+        <h2>4. Background audio</h2>
+        <p class="hint">If the source video has its own generated audio (e.g. an LTX-2.3 clip), blend it in quietly under the piano in the "synth" mix — both audible, piano more present. Leaves "hands" and "pip" piano-only.</p>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-dim);">
+          <input type="checkbox" id="include-bed-toggle" style="width:16px;height:16px;accent-color:var(--accent);">
+          Hintergrundton (LTX) einbeziehen
+        </label>
+      </div>
+
       <button class="gen-btn" id="submit-btn" onclick="submitSession()" disabled>Generate mixes</button>
 
       <div class="card" id="status-card">
@@ -524,6 +533,7 @@ async function submitSession() {
     fd.append('recording', state.recordingFile);
     fd.append('pip_corner', state.pipCorner || 'tr');
     fd.append('pip_width_pct', String(state.pipWidth || 0.24));
+    fd.append('include_bed', String(document.getElementById('include-bed-toggle').checked));
     const r = await fetch('/api/improv/sessions', {
       method: 'POST',
       headers: { 'X-API-Key': state.apiKey },

@@ -45,6 +45,8 @@ _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 _VALID_PIP_CORNERS = {"tr", "br", "tl", "bl"}
 _PIP_WIDTH_MIN = 0.10
 _PIP_WIDTH_MAX = 0.50
+_BED_VOLUME_MIN = 0.1
+_BED_VOLUME_MAX = 0.8
 
 
 @router.post("/sessions", status_code=202)
@@ -53,6 +55,8 @@ async def create_session(
     recording: UploadFile = File(...),
     pip_corner: str = Form("tr"),
     pip_width_pct: float = Form(0.24),
+    include_bed: bool = Form(False),
+    bed_volume: float = Form(0.35),
     db: AsyncSession = Depends(get_db),
 ):
     source = await db.get(Video, source_video_id)
@@ -64,6 +68,7 @@ async def create_session(
 
     corner = pip_corner if pip_corner in _VALID_PIP_CORNERS else "tr"
     width_pct = max(_PIP_WIDTH_MIN, min(_PIP_WIDTH_MAX, pip_width_pct))
+    bed_vol = max(_BED_VOLUME_MIN, min(_BED_VOLUME_MAX, bed_volume))
 
     settings.improv_dir.mkdir(parents=True, exist_ok=True)
     session_id = uuid.uuid4()
@@ -99,12 +104,17 @@ async def create_session(
     await db.commit()
 
     safe_create_task(
-        run_improv_session(session_id, pip_corner=corner, pip_width_pct=width_pct),
+        run_improv_session(
+            session_id, pip_corner=corner, pip_width_pct=width_pct,
+            include_bed=include_bed, bed_volume=bed_vol,
+        ),
         name=f"improv_session:{session_id}",
     )
     logger.info(
-        "Improv session %s queued — source=%s, recording=%s (%.1f MB), pip_corner=%s, pip_width=%.2f",
+        "Improv session %s queued — source=%s, recording=%s (%.1f MB), pip_corner=%s, "
+        "pip_width=%.2f, include_bed=%s, bed_volume=%.2f",
         session_id, source_video_id, rec_name, written / 1_048_576, corner, width_pct,
+        include_bed, bed_vol,
     )
     return {"id": str(session_id), "status": "queued"}
 

@@ -71,6 +71,7 @@ from services.comfy.ingest import ingest_comfy_image
 from services.comfy.zimage import ZIMAGE_SAVE_NODE, build_zimage_workflow
 from services.ollama.analysis import (
     generate_i2v_motion_prompts,
+    generate_ltx_motion_prompts,
     generate_transition_prompts,
 )
 from services.ollama.story_frames import (
@@ -78,6 +79,7 @@ from services.ollama.story_frames import (
     generate_story_frame_prompts,
 )
 from services.ollama.zimage_enhance import get_zimage_style_block
+from services.video.audio_stretch import stretch_ltx_audio
 from services.video.merge import MergeInput, merge_clips
 from services.video.soundtrack import mux_soundtrack
 
@@ -384,7 +386,8 @@ def _build_ltx_single_workflow(
     frame_count: int,
     width: int, height: int, fps: int,
     vid_prefix: str,
-) -> tuple[dict, str]:
+    rife_multiplier: int = 1,
+) -> tuple[dict, str, int]:
     """Single-image LTX-2.3 i2v segment producing an mp4 *with* generated audio.
 
     Faithful API-format translation of the `Image to Video (LTX-2.3)` subgraph:
@@ -393,7 +396,17 @@ def _build_ltx_single_workflow(
 
     Like the Wan builder, one image == one ComfyUI submission so the VRAM peak
     is independent of how many images the batch holds. Returns (workflow,
-    save_node_id) for the shared harvesting path.
+    save_node_id, snapped_length) for the shared harvesting path — the caller
+    needs `snapped_length` (frames at `fps`) to compute the native pre-RIFE
+    audio duration when stretching audio to match a RIFE'd clip.
+
+    rife_multiplier > 1 inserts a RIFE VFI pass on the decoded video frames
+    (same node/params as the Wan builders below), which — like those — stretches
+    real-time duration rather than just adding smoothness at a fixed duration
+    (VHS_VideoCombine's frame_rate stays at `fps`, frame count multiplies). The
+    native LTX audio track is decoded at the *original* length/fps, so it ends
+    up shorter than the RIFE'd video; the caller re-syncs it via
+    services.video.audio_stretch.stretch_ltx_audio after harvesting.
     """
     # LTX latent compression is 32 spatially; the low-res pass runs at half the
     # final size and is upscaled 2×, so the full dims must be divisible by 64.
@@ -451,9 +464,30 @@ def _build_ltx_single_workflow(
         p+"adec":    {"class_type": "LTXVAudioVAEDecode", "inputs": {"samples": [p+"sephi", 1], "audio_vae": [p+"avae", 0]}},
     }
 
+    # Optional RIFE VFI on the decoded frames (off at rife_multiplier=1 — no
+    # node added at all, matching the Wan builders' param shape exactly so the
+    # ComfyUI-Frame-Interpolation node stays interchangeable across workflows).
+    frames_node = (p+"vdec", 0)
+    if rife_multiplier > 1:
+        wf[p+"rife"] = {"class_type": "RIFE VFI", "inputs": {
+            "ckpt_name":                  _RIFE_CKPT,
+            "clear_cache_after_n_frames": 10,
+            "multiplier":                 rife_multiplier,
+            "fast_mode":                  True,
+            "ensemble":                   True,
+            "scale_factor":               1,
+            "dtype":                      "float32",
+            "torch_compile":              False,
+            "batch_size":                 1,
+            "frames":                     [p+"vdec", 0],
+        }}
+        frames_node = (p+"rife", 0)
+
     # VHS mux so the existing _comfy_save_path harvester finds the output, and
     # the segment carries LTX's generated audio (h264/yuv420p for broad
     # browser playback). Multi-clip assembly still concatenates video only.
+    # When RIFE is on, this audio track is intentionally left at its native
+    # (shorter) length — the caller stretches it to match afterward.
     save_id = "ltx_save"
     wf[save_id] = {"class_type": "VHS_VideoCombine", "inputs": {
         "frame_rate":      fps,
@@ -465,10 +499,10 @@ def _build_ltx_single_workflow(
         "save_metadata":   False,
         "pingpong":        False,
         "save_output":     True,
-        "images":          [p+"vdec", 0],
+        "images":          list(frames_node),
         "audio":           [p+"adec", 0],
     }}
-    return wf, save_id
+    return wf, save_id, length
 
 
 # ── Segment storage helpers ───────────────────────────────────────────────────
@@ -702,9 +736,11 @@ async def _run_i2v_multi(
         pct_seg_hi  = seg_band_lo + int(seg_span * (i + 1)   / n_imgs)
 
         _set_progress(vid_key, "submitting", f"Clip {i + 1}/{n_imgs} — submitting to ComfyUI…", pct_seg_lo)
+        ltx_length = None
         if req.workflow == "ltx_i2v":
-            wf, save_node = _build_ltx_single_workflow(
+            wf, save_node, ltx_length = _build_ltx_single_workflow(
                 fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
+                req.rife_multiplier,
             )
         else:
             wf, save_node = _build_i2v_single_workflow(
@@ -724,7 +760,17 @@ async def _run_i2v_multi(
         # immediately — a crash on a later segment loses nothing.
         seg_dest  = seg_dir / f"seg_{i}.mp4"
         seg_thumb = seg_dir / f"seg_{i}_thumb.jpg"
-        await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
+        if req.workflow == "ltx_i2v" and req.rife_multiplier > 1:
+            # RIFE stretched the video's real-time duration but not LTX's
+            # native audio track — re-sync by time-stretching the audio
+            # (pitch preserved) to the RIFE'd video's actual duration.
+            await stretch_ltx_audio(
+                seg_src, seg_dest,
+                native_length=ltx_length, fps=req.fps,
+                ffmpeg_path=settings.ffmpeg_path,
+            )
+        else:
+            await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
         await make_video_thumbnail(seg_dest, seg_thumb)
         await _persist_clip(video_id, i, seg_dest.name, seg_thumb.name, p_i, fc_i, req)
         _set_progress(vid_key, "running", f"Clip {i + 1}/{n_imgs} — saved ✓", pct_seg_hi)
@@ -911,6 +957,7 @@ _TRANSITION_TIMEOUT_PER_IMAGE = 20.0
 class SuggestTransitionsRequest(BaseModel):
     image_ids: list[uuid.UUID]   # in the user's selected playback order
     context: str = ""            # optional story/narrative context (story-frames flow)
+    workflow: str = "i2v_multi"  # suggest-i2v only: "i2v_multi" (Wan, silent) | "ltx_i2v" (LTX-2.3, native audio)
 
 
 async def _load_suggest_jpgs(
@@ -972,7 +1019,9 @@ async def suggest_i2v(
 ):
     """VLM-suggested per-image surreal animation prompts for i2v_multi/ltx_i2v
     — one vision call, N prompts back (one per image). Advisory only, exactly
-    like /suggest-transitions."""
+    like /suggest-transitions. `body.workflow` picks the model-specific
+    prompt writer: ltx_i2v gets LTX-2.3's audio-aware variant (native audio),
+    everything else gets the Wan2.2 (silent) variant."""
     n = len(body.image_ids)
     if n < 1:
         raise HTTPException(status_code=400, detail="Need at least 1 image to suggest prompts")
@@ -981,13 +1030,14 @@ async def suggest_i2v(
 
     jpgs = await _load_suggest_jpgs(body.image_ids, db)
     logger.info(
-        "Suggest-i2v: %d images, model=%s, payload=%dKB",
-        n, settings.ollama_titler_model, sum(len(j) for j in jpgs) // 1024,
+        "Suggest-i2v: %d images, workflow=%s, model=%s, payload=%dKB",
+        n, body.workflow, settings.ollama_titler_model, sum(len(j) for j in jpgs) // 1024,
     )
 
     timeout = max(_TRANSITION_TIMEOUT_FLOOR, _TRANSITION_TIMEOUT_PER_IMAGE * n)
+    generate = generate_ltx_motion_prompts if body.workflow == "ltx_i2v" else generate_i2v_motion_prompts
     try:
-        prompts = await generate_i2v_motion_prompts(jpgs, context=body.context, timeout=timeout)
+        prompts = await generate(jpgs, context=body.context, timeout=timeout)
     except Exception as exc:
         logger.exception("i2v prompt suggestion failed for %d images", n)
         raise HTTPException(status_code=502, detail=f"Suggestion failed: {exc}")
@@ -1244,6 +1294,8 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
         for fc in body.frame_counts:
             if not (5 <= fc <= 81):
                 raise HTTPException(status_code=400, detail="frame_counts values must be 5–81")
+        if body.rife_multiplier not in (1, 2, 3, 4):
+            raise HTTPException(status_code=400, detail="rife_multiplier must be 1 (off), 2, 3 or 4")
     else:
         if not (1 <= n <= 10):
             raise HTTPException(status_code=400, detail="i2v_multi requires 1–10 image IDs")

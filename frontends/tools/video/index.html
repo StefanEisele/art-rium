@@ -363,14 +363,11 @@
           </div>
         </div>
 
-        <!-- Resolution -->
+        <!-- Resolution (chips are re-rendered per-mode by renderResChips(), since LTX-2.3's
+             documented two-stage pipeline prefers a larger square than Wan2.2's) -->
         <div class="field-row">
           <span class="field-label">Resolution</span>
-          <div class="res-chips" id="res-chips">
-            <button class="res-chip active" data-w="960" data-h="960" onclick="setRes(960,960,this)">960×960</button>
-            <button class="res-chip" data-w="1280" data-h="704" onclick="setRes(1280,704,this)">1280×704</button>
-            <button class="res-chip" data-w="704" data-h="1280" onclick="setRes(704,1280,this)">704×1280</button>
-          </div>
+          <div class="res-chips" id="res-chips"></div>
         </div>
 
         <!-- FPS -->
@@ -383,14 +380,13 @@
           </select>
         </div>
 
-        <!-- RIFE multiplier (i2v_multi only) -->
+        <!-- RIFE multiplier (i2v_multi/flf2v/ltx_i2v) — chip set is re-rendered per-mode by
+             renderRifeChips() since ltx_i2v additionally offers a "1× (off)" default: RIFE
+             stretches real-time duration (more frames at the same fps), which for ltx_i2v also
+             requires stretching its native audio to match, so it opts in rather than defaulting on. -->
         <div class="field-row" id="rife-row">
           <span class="field-label">RIFE ×</span>
-          <div class="res-chips" id="rife-chips">
-            <button class="res-chip"        data-mult="2" onclick="setRife(2,this)">2×</button>
-            <button class="res-chip active" data-mult="3" onclick="setRife(3,this)">3×</button>
-            <button class="res-chip"        data-mult="4" onclick="setRife(4,this)">4×</button>
-          </div>
+          <div class="res-chips" id="rife-chips"></div>
           <span style="font-size:11px;color:var(--text-dim)">frame interpolation</span>
         </div>
 
@@ -488,7 +484,7 @@ const state = {
   perImageSettings: new Map(),   // imageId → {prompt, frameCount}
   transitionSettings: new Map(), // "idA__idB" → {prompt, frameCount} — flf2v pairs
   width: 960, height: 960,
-  rifeMultiplier: 3,             // i2v_multi/flf2v: RIFE VFI interpolation factor (2 | 3 | 4)
+  rifeMultiplier: 3,             // i2v_multi/flf2v/ltx_i2v: RIFE VFI interpolation factor (1=off | 2 | 3 | 4)
   pingpong: false,               // i2v_multi: VHS_VideoCombine pingpong flag
   endOnKeyframe: false,          // flf2v: append raw end key frame (pixel-exact landing, cut risk)
   pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
@@ -516,6 +512,7 @@ const maxImagesForMode = () =>
 
 // ── Mode ──────────────────────────────────────────────────────────────────────
 function setMode(mode, el) {
+  const prevMode = state.mode;
   state.mode = mode;
   document.querySelectorAll('.mode-chip').forEach(c => c.classList.remove('active'));
   el.classList.add('active');
@@ -524,31 +521,72 @@ function setMode(mode, el) {
     state.selectedImages = state.selectedImages.slice(0, maxN);
     ArtRium.toast(`Trimmed to ${maxN} images for this mode`);
   }
+  // RIFE stretches real-time duration (more frames at the same fps); for
+  // ltx_i2v that also means stretching its native audio to match (server-side),
+  // so switching into it resets to "1× (off)" rather than carrying over a Wan
+  // default — and switching back to a Wan mode restores 3×.
+  const enteringLtx = mode === 'ltx_i2v' && prevMode !== 'ltx_i2v';
+  const leavingLtx  = mode !== 'ltx_i2v' && prevMode === 'ltx_i2v';
+  if (enteringLtx) state.rifeMultiplier = 1;
+  else if (leavingLtx) state.rifeMultiplier = 3;
   renderStrip();
+  renderResChips();
+  renderRifeChips();
   _updateModeFields();
 }
 
 function _updateModeFields() {
-  // RIFE interpolation is shared by both Wan workflows (i2v_multi + flf2v);
-  // LTX has its own native motion and doesn't use it. Pingpong (boomerang)
-  // stays i2v_multi-only.
-  const usesRife = state.mode === 'i2v_multi' || state.mode === 'flf2v';
-  $('rife-row').style.display     = usesRife ? '' : 'none';
+  // Pingpong (boomerang) stays i2v_multi-only.
   $('pingpong-row').style.display = state.mode === 'i2v_multi' ? '' : 'none';
   $('endkf-row').style.display    = state.mode === 'flf2v' ? '' : 'none';
   $('story-section').style.display = state.mode === 'flf2v' ? '' : 'none';
 }
 
-function setRife(mult, el) {
-  state.rifeMultiplier = mult;
-  document.querySelectorAll('#rife-chips .res-chip').forEach(c => c.classList.remove('active'));
+// ── Resolution ────────────────────────────────────────────────────────────────
+// LTX-2.3's own documented two-stage pipeline (half-res sample pass + 2x latent
+// upscale) targets a larger square than Wan2.2 (1280×1280 vs 960×960); 16:9/9:16
+// are already correct for both model families, so only the square chip differs.
+const RES_PRESETS = {
+  wan: [[960, 960, '960×960'], [1280, 704, '1280×704'], [704, 1280, '704×1280']],
+  ltx: [[960, 960, '960×960 (fast)'], [1280, 1280, '1280×1280 (HQ)'],
+        [1280, 704, '1280×704'], [704, 1280, '704×1280']],
+};
+
+function renderResChips() {
+  const presets = RES_PRESETS[state.mode === 'ltx_i2v' ? 'ltx' : 'wan'];
+  const stillValid = presets.some(([w, h]) => w === state.width && h === state.height);
+  if (!stillValid) { state.width = presets[0][0]; state.height = presets[0][1]; }
+  $('res-chips').innerHTML = presets.map(([w, h, label]) => {
+    const active = (w === state.width && h === state.height) ? ' active' : '';
+    return `<button class="res-chip${active}" onclick="setRes(${w},${h},this)">${label}</button>`;
+  }).join('');
+}
+
+function setRes(w, h, el) {
+  state.width = w; state.height = h;
+  document.querySelectorAll('#res-chips .res-chip').forEach(c => c.classList.remove('active'));
   el.classList.add('active');
 }
 
-// ── Resolution ────────────────────────────────────────────────────────────────
-function setRes(w, h, el) {
-  state.width = w; state.height = h;
-  document.querySelectorAll('.res-chip').forEach(c => c.classList.remove('active'));
+// ── RIFE ──────────────────────────────────────────────────────────────────────
+const RIFE_PRESETS = {
+  wan: [2, 3, 4],
+  ltx: [1, 2, 3, 4],
+};
+
+function renderRifeChips() {
+  const mults = RIFE_PRESETS[state.mode === 'ltx_i2v' ? 'ltx' : 'wan'];
+  if (!mults.includes(state.rifeMultiplier)) state.rifeMultiplier = mults[0];
+  $('rife-chips').innerHTML = mults.map(m => {
+    const label = m === 1 ? '1× (off)' : `${m}×`;
+    const active = m === state.rifeMultiplier ? ' active' : '';
+    return `<button class="res-chip${active}" onclick="setRife(${m},this)">${label}</button>`;
+  }).join('');
+}
+
+function setRife(mult, el) {
+  state.rifeMultiplier = mult;
+  document.querySelectorAll('#rife-chips .res-chip').forEach(c => c.classList.remove('active'));
   el.classList.add('active');
 }
 
@@ -745,6 +783,7 @@ async function suggestI2vPrompts() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         image_ids: state.selectedImages.map(i => i.id),
+        workflow: state.mode,
       }),
     });
     const d = await r.json();
@@ -1761,6 +1800,8 @@ function pollSoundtrackMux(videoId, songId) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
   renderStrip();
+  renderResChips();
+  renderRifeChips();
   loadStoryLoras();
   loadStoryStyles();
   await loadVideos();

@@ -496,6 +496,7 @@ const state = {
   deleteAfterMerge: false,       // remove source clips once the merge succeeds
   storyPollTimer: null,          // interval id while a story-frames job runs
   storySource: null,             // source image object captured when the job starts
+  suggestI2vPollTimer: null,     // interval id while a suggest-i2v job runs
 };
 
 const $ = id => document.getElementById(id);
@@ -649,7 +650,8 @@ function renderPerImageSection() {
   });
 
   sec.innerHTML = '';
-  // Surreal Wan2.2/LTX animation prompts — one VLM call fills every textarea.
+  // Surreal Wan2.2/LTX animation prompts — one VLM call per image, run as a
+  // polled background job (see pollSuggestI2vJob).
   const sug = document.createElement('button');
   sug.type = 'button';
   sug.className = 'suggest-prompts-btn';
@@ -775,7 +777,6 @@ async function suggestTransitionPrompts() {
 async function suggestI2vPrompts() {
   if (state.selectedImages.length < 1) return;
   const btn = $('suggest-i2v-btn');
-  const prevText = btn.textContent;
   btn.disabled = true; btn.textContent = 'Suggesting…';
   try {
     const r = await api('/api/video/suggest-i2v', {
@@ -787,25 +788,65 @@ async function suggestI2vPrompts() {
       }),
     });
     const d = await r.json();
-    const prompts = d.prompts || [];
-    const rows = Array.from($('per-img-section').querySelectorAll('.per-img-row'));
-    rows.forEach((row, i) => {
-      const ta = row.querySelector('.per-img-prompt');
-      const fcInput = row.querySelector('.per-img-frames');
-      if (ta && prompts[i] !== undefined) {
-        ta.value = prompts[i];
-        state.perImageSettings.set(row.dataset.imgId, {
-          prompt: prompts[i],
-          frameCount: parseInt(fcInput.value) || 49,
-        });
-      }
-    });
-    ArtRium.toast('Prompts suggested ✓');
+    pollSuggestI2vJob(d.job_id);
   } catch (e) {
-    ArtRium.toast(e.message || 'Failed to suggest prompts', true);
-  } finally {
-    btn.disabled = false; btn.textContent = prevText;
+    ArtRium.toast(e.message || 'Failed to start prompt suggestion', true);
+    _resetSuggestI2vButton();
   }
+}
+
+function _resetSuggestI2vButton() {
+  const btn = $('suggest-i2v-btn');
+  btn.disabled = false; btn.textContent = '✨ Suggest prompts';
+}
+
+// Per-image LTX/Wan animation prompts run as a polled background job — N
+// serialized VLM calls (one per image) easily clear a minute and would 524
+// behind the Cloudflare tunnel's ~100s timeout if awaited inline. Mirrors
+// pollStoryJob's shape.
+function pollSuggestI2vJob(jobId) {
+  if (state.suggestI2vPollTimer) clearInterval(state.suggestI2vPollTimer);
+  const btn = $('suggest-i2v-btn');
+  let misses = 0;
+  state.suggestI2vPollTimer = setInterval(async () => {
+    let job;
+    try {
+      const r = await api(`/api/video/suggest-i2v/${jobId}`);
+      job = await r.json();
+      misses = 0;
+    } catch (_) {
+      if (++misses >= 5) {
+        clearInterval(state.suggestI2vPollTimer); state.suggestI2vPollTimer = null;
+        _resetSuggestI2vButton();
+        ArtRium.toast('Lost contact with the prompt suggestion job', true);
+      }
+      return;
+    }
+    if (job.status === 'running') btn.textContent = job.message || 'Suggesting…';
+
+    if (job.status === 'done' || job.status === 'failed') {
+      clearInterval(state.suggestI2vPollTimer); state.suggestI2vPollTimer = null;
+      _resetSuggestI2vButton();
+      if (job.status === 'failed') {
+        ArtRium.toast(job.error || 'Prompt suggestion failed', true);
+        return;
+      }
+      const prompts = job.prompts || [];
+      const rows = Array.from($('per-img-section').querySelectorAll('.per-img-row'));
+      rows.forEach((row, i) => {
+        const ta = row.querySelector('.per-img-prompt');
+        const fcInput = row.querySelector('.per-img-frames');
+        if (ta && prompts[i] !== undefined) {
+          ta.value = prompts[i];
+          state.perImageSettings.set(row.dataset.imgId, {
+            prompt: prompts[i],
+            frameCount: parseInt(fcInput.value) || 49,
+          });
+        }
+      });
+      ArtRium.toast('Prompts suggested ✓');
+    }
+  }, 2000);
 }
 
 // One-tap paste into the nearest prompt textarea — saves the long-press /

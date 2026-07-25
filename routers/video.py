@@ -1013,15 +1013,62 @@ async def suggest_transitions(
     return {"prompts": prompts}
 
 
-@router.post("/suggest-i2v")
+_SUGGEST_I2V_JOBS_KEEP = 20     # in-memory job entries retained (newest first)
+
+# job_id → {status, message, pct, prompts, error, created_at}
+_suggest_i2v_jobs: dict[str, dict] = {}
+
+
+def _prune_suggest_i2v_jobs() -> None:
+    if len(_suggest_i2v_jobs) <= _SUGGEST_I2V_JOBS_KEEP:
+        return
+    for job_id, _ in sorted(
+        _suggest_i2v_jobs.items(), key=lambda kv: kv[1].get("created_at", "")
+    )[: len(_suggest_i2v_jobs) - _SUGGEST_I2V_JOBS_KEEP]:
+        _suggest_i2v_jobs.pop(job_id, None)
+
+
+async def _run_suggest_i2v(job_id: str, jpgs: list[bytes], workflow: str, context: str) -> None:
+    """Background task behind /suggest-i2v: N serialized per-image VLM calls
+    (LTX-2.3's audio-aware prompts in particular) reliably clear a minute for
+    more than a couple of images, well past the Cloudflare tunnel's ~100s
+    upstream timeout — running this inline in the request handler was the
+    524. Polled like /story-frames instead."""
+    n = len(jpgs)
+    generate = generate_ltx_motion_prompts if workflow == "ltx_i2v" else generate_i2v_motion_prompts
+
+    def on_progress(done: int, total: int) -> None:
+        job = _suggest_i2v_jobs.get(job_id)
+        if job is not None:
+            job.update(message=f"Prompt {done}/{total}…", pct=max(1, int(100 * done / total)))
+
+    try:
+        prompts = await generate(jpgs, context=context, on_progress=on_progress)
+        job = _suggest_i2v_jobs.get(job_id)
+        if job is not None:
+            job.update(status="done", message=f"{n} prompt(s) ready", pct=100, prompts=prompts)
+    except Exception as exc:
+        logger.exception("Suggest-i2v job %s failed (%d images)", job_id, n)
+        job = _suggest_i2v_jobs.get(job_id)
+        if job is not None:
+            msg = str(exc).strip()
+            job.update(
+                status="failed",
+                message="Suggestion failed",
+                error=(f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__)[:1000],
+            )
+
+
+@router.post("/suggest-i2v", status_code=202)
 async def suggest_i2v(
     body: SuggestTransitionsRequest, db: AsyncSession = Depends(get_db),
 ):
-    """VLM-suggested per-image surreal animation prompts for i2v_multi/ltx_i2v
-    — one vision call, N prompts back (one per image). Advisory only, exactly
-    like /suggest-transitions. `body.workflow` picks the model-specific
-    prompt writer: ltx_i2v gets LTX-2.3's audio-aware variant (native audio),
-    everything else gets the Wan2.2 (silent) variant."""
+    """Kick off VLM-suggested per-image surreal animation prompts for
+    i2v_multi/ltx_i2v — one vision call PER image, run as a background job
+    polled via GET /suggest-i2v/{job_id} (see _run_suggest_i2v for why: this
+    used to run inline and 524'd behind the Cloudflare tunnel). `body.workflow`
+    picks the model-specific prompt writer: ltx_i2v gets LTX-2.3's audio-aware
+    variant (native audio), everything else gets the Wan2.2 (silent) variant."""
     n = len(body.image_ids)
     if n < 1:
         raise HTTPException(status_code=400, detail="Need at least 1 image to suggest prompts")
@@ -1034,15 +1081,32 @@ async def suggest_i2v(
         n, body.workflow, settings.ollama_titler_model, sum(len(j) for j in jpgs) // 1024,
     )
 
-    timeout = max(_TRANSITION_TIMEOUT_FLOOR, _TRANSITION_TIMEOUT_PER_IMAGE * n)
-    generate = generate_ltx_motion_prompts if body.workflow == "ltx_i2v" else generate_i2v_motion_prompts
-    try:
-        prompts = await generate(jpgs, context=body.context, timeout=timeout)
-    except Exception as exc:
-        logger.exception("i2v prompt suggestion failed for %d images", n)
-        raise HTTPException(status_code=502, detail=f"Suggestion failed: {exc}")
+    job_id = str(uuid.uuid4())
+    _suggest_i2v_jobs[job_id] = {
+        "job_id":     job_id,
+        "status":     "running",
+        "message":    f"Prompt 0/{n}…",
+        "pct":        1,
+        "prompts":    [],
+        "error":      None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _prune_suggest_i2v_jobs()
 
-    return {"prompts": prompts}
+    safe_create_task(
+        _run_suggest_i2v(job_id, jpgs, body.workflow, body.context),
+        name=f"suggest_i2v:{job_id}",
+    )
+    logger.info("Queued suggest-i2v job %s (%d images, workflow=%s)", job_id, n, body.workflow)
+    return {"job_id": job_id, "status": "running"}
+
+
+@router.get("/suggest-i2v/{job_id}")
+async def get_suggest_i2v_job(job_id: str):
+    job = _suggest_i2v_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Suggest-i2v job not found (server restarted?)")
+    return job
 
 
 # ── Story key-frames (flf2v story mode) ───────────────────────────────────────

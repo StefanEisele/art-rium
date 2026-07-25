@@ -225,6 +225,24 @@ class TestGenerateI2vMotionPrompts:
         text = _read_prompt("video-i2v-motion.md")
         assert text.strip()
 
+    async def test_on_progress_fires_once_per_image_including_failures(self, monkeypatch):
+        # The suggest-i2v background job (routers/video.py) reports status via
+        # this callback — it must fire for every image, success or failure,
+        # so a job never gets stuck mid-progress.
+        calls = []
+        async def fake_chat_json(**kwargs):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return {"animation": f"prompt {len(calls)}"}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        progress = []
+        await generate_i2v_motion_prompts(
+            [b"1", b"2", b"3"], on_progress=lambda done, total: progress.append((done, total)),
+        )
+        assert progress == [(1, 3), (2, 3), (3, 3)]
+
 
 class TestGenerateLtxMotionPrompts:
     """Mirrors TestGenerateI2vMotionPrompts — same per-image fan-out helper,

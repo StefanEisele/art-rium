@@ -4,6 +4,7 @@ Ollama VLM analysis — per-image alt-text/SEO metadata, title suggestions
 """
 import base64
 import logging
+from collections.abc import Callable
 
 import httpx
 
@@ -280,6 +281,7 @@ async def _generate_per_image_motion_prompts(
     label: str,
     context: str = "",
     timeout: float = 300.0,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[str]:
     """
     Shared per-image loop behind generate_i2v_motion_prompts (Wan2.2) and
@@ -296,6 +298,12 @@ async def _generate_per_image_motion_prompts(
 
     *context* is optional free text about the intended video, folded into
     every per-image message when present.
+
+    N serialized vision calls easily add up past a minute — *on_progress*,
+    when given, is called (completed, total) after each image so a caller
+    running this as a background job (see routers/video.py's suggest-i2v
+    job) can report incremental status instead of leaving the client to
+    guess for the whole duration.
 
     Returns exactly len(jpgs) strings; an image whose call fails yields ""
     (logged), so the client just shows an empty textarea for that slot.
@@ -338,11 +346,15 @@ async def _generate_per_image_motion_prompts(
             )
             prompts.append("")
             failures += 1
+            if on_progress is not None:
+                on_progress(i + 1, n)
             continue
         prompt = _extract_animation(parsed)
         if not prompt:
             logger.warning("%s: image %d/%d returned no usable prompt", label, i + 1, n)
         prompts.append(prompt)
+        if on_progress is not None:
+            on_progress(i + 1, n)
 
     if failures == n:
         raise RuntimeError(f"{label}: every per-image call failed")
@@ -354,6 +366,7 @@ async def generate_i2v_motion_prompts(
     *,
     context: str = "",
     timeout: float = 300.0,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[str]:
     """One surreal Wan2.2-style animation prompt per image (no audio — Wan2.2
     is silent). System prompt lives in prompts/video-i2v-motion.md."""
@@ -367,6 +380,7 @@ async def generate_i2v_motion_prompts(
         label="generate_i2v_motion_prompts",
         context=context,
         timeout=timeout,
+        on_progress=on_progress,
     )
 
 
@@ -375,6 +389,7 @@ async def generate_ltx_motion_prompts(
     *,
     context: str = "",
     timeout: float = 300.0,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[str]:
     """One surreal LTX-2.3-style animation+audio prompt per image — LTX-2.3
     generates native audio synced to the prompt, so unlike the Wan variant
@@ -390,6 +405,7 @@ async def generate_ltx_motion_prompts(
         label="generate_ltx_motion_prompts",
         context=context,
         timeout=timeout,
+        on_progress=on_progress,
     )
 
 

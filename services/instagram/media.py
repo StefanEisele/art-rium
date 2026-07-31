@@ -33,13 +33,17 @@ MediaKind = Literal["image", "video"]
 def resolve_video_path(video: Video) -> Path:
     """Absolute path to the file Instagram should actually ingest for `video`.
 
-    A soundtrack attached via `/jobs/{id}/soundtrack` is muxed into a sibling
-    file (`muxed_filename`) rather than overwriting the silent original
-    (`filepath`) — see routers/video.py::_serialize's `primary_name` for the
-    same precedence used by the video player. Every reel/companion dispatch
-    path must resolve through here, or a video with an attached soundtrack
-    silently gets published without audio.
+    Post-processing writes sibling files rather than overwriting the original
+    (`filepath`): a soundtrack muxes into `muxed_filename`, and a grain pass
+    re-encodes whichever of those is current into `grain_filename`. So the
+    grained file, when present, is the most complete rendition and wins — see
+    routers/video.py::_serialize's `primary_name` for the same precedence used
+    by the video player, and keep the two in step. Every reel/companion
+    dispatch path must resolve through here, or a video gets published without
+    its soundtrack or without the grain the user applied.
     """
+    if video.grain_filename:
+        return settings.videos_dir / video.grain_filename
     if video.muxed_filename:
         return settings.videos_dir / video.muxed_filename
     return settings.storage_dir / video.filepath
@@ -91,7 +95,16 @@ async def load_media_refs(post: InstagramPost, db: AsyncSession) -> list[MediaRe
         elif m.kind == "video":
             vid = videos.get(m.video_id)
             if vid and vid.status == "done" and vid.filename and vid.filepath:
-                refs.append(MediaRef("video", vid.id, vid.filename, vid.filepath))
+                # Resolve through the same precedence every other dispatch path
+                # uses. Reading vid.filename/vid.filepath straight off the row
+                # would publish the clean original, dropping an attached
+                # soundtrack and any applied grain — /share/video serves out of
+                # videos_dir, where both derived variants live.
+                resolved = resolve_video_path(vid)
+                refs.append(MediaRef(
+                    "video", vid.id, resolved.name,
+                    str(resolved.relative_to(settings.storage_dir)),
+                ))
     return refs
 
 

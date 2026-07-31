@@ -262,6 +262,40 @@
       pointer-events: none;
     }
 
+    /* ── Grain chip: strength slider + preview/apply, mirrors the soundtrack chip ── */
+    .grain-chip {
+      display: flex; flex-direction: column; gap: 8px;
+      padding: 8px 10px; margin-top: 8px;
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 8px; font-size: 13px;
+    }
+    .grain-chip .row { display: flex; align-items: center; gap: 8px; }
+    .grain-chip .label { color: var(--text-dim); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
+    .grain-chip .glyph { color: var(--accent); font-size: 15px; }
+    .grain-chip .value { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; min-width: 26px; text-align: right; }
+    .grain-chip input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 22px; }
+    .grain-chip .chip-btn {
+      background: transparent; border: 1px solid var(--border);
+      color: var(--text-dim); border-radius: 6px; padding: 4px 9px;
+      font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit;
+    }
+    .grain-chip .chip-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+    .grain-chip .chip-btn:disabled { opacity: .45; cursor: default; }
+    .grain-chip .chip-btn.apply { color: var(--accent); border-color: rgba(224,122,58,0.35); background: rgba(224,122,58,0.06); flex: 1; }
+    .grain-chip .chip-btn.remove { color: var(--red); border-color: rgba(255,69,58,0.25); }
+    .grain-chip.working .label,
+    .grain-chip.working .glyph { animation: step-pulse 1.4s ease-in-out infinite; }
+    .grain-preview { margin-top: 2px; }
+    .grain-preview video { width: 100%; border-radius: 6px; display: block; background: #000; }
+    .grain-preview .hint { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
+    .grain-badge {
+      position: absolute; top: 8px; left: 8px;
+      background: rgba(0,0,0,0.62); color: #fff;
+      border-radius: 4px; padding: 1px 7px; font-size: 12px;
+      pointer-events: none;
+    }
+    .soundtrack-badge + .grain-badge { top: 32px; }
+
     /* ── Song picker modal (vertical list, audio previews) ── */
     #song-picker-modal { display: none; position: fixed; inset: 0; z-index: 101; background: var(--bg); flex-direction: column; padding-top: env(safe-area-inset-top); }
     #song-picker-modal.show { display: flex; }
@@ -1534,7 +1568,8 @@ function makeVideoCard(v) {
   } else if (v.status === 'done' && v.url) {
     const videoUrl = withAuth(v.url);
     const thumbUrl = v.thumb_url ? withAuth(v.thumb_url) : null;
-    const stBadge = v.has_soundtrack ? '<div class="soundtrack-badge">♪</div>' : '';
+    const stBadge = (v.has_soundtrack ? '<div class="soundtrack-badge">♪</div>' : '')
+                  + (v.has_grain ? `<div class="grain-badge">▒ ${v.grain_strength}</div>` : '');
     if (thumbUrl) {
       body = `
         <div class="video-preview-wrap" id="wrap-${v.id}">
@@ -1596,6 +1631,7 @@ function makeVideoCard(v) {
     <div class="video-meta"><strong>${meta}</strong></div>
     ${_promptCollapse(v)}
     ${_soundtrackBlock(v)}
+    ${_grainBlock(v)}
     ${body}
     <div class="video-actions">${actions}</div>
   `;
@@ -1623,6 +1659,158 @@ function _soundtrackBlock(v) {
     <span class="label">Soundtrack</span>
     <button class="chip-btn add" onclick="openSongPicker('${v.id}')">+ Attach</button>
   </div>`;
+}
+
+// ── Film grain ────────────────────────────────────────────────────────────────
+// Wan2.2 clips come out plastic-smooth. The grain pass re-encodes into a
+// sibling file, so any strength can be tried and undone. The preview grades
+// 4s out of the middle with the exact encoder settings the full render uses,
+// which is what makes "too much / too little" a decidable question before
+// committing to a ~9s full render.
+
+const GRAIN_DEFAULT = 30;
+
+function _grainStrength(v) {
+  // A slider the user has already moved wins over the persisted value, so a
+  // card re-render mid-adjustment doesn't snap the handle back.
+  if (state.grainDraft.has(v.id)) return state.grainDraft.get(v.id);
+  return v.grain_strength || GRAIN_DEFAULT;
+}
+
+function _grainBlock(v) {
+  if (v.status !== 'done' || !v.filename) return '';
+  if (state.grainingVideos.has(v.id)) {
+    return `<div class="grain-chip working">
+      <div class="row"><span class="glyph">▒</span><span class="label">Applying grain…</span></div>
+    </div>`;
+  }
+  const s = _grainStrength(v);
+  const prev = state.grainPreviewUrl.get(v.id);
+  return `<div class="grain-chip" id="grain-chip-${v.id}">
+    <div class="row">
+      <span class="glyph">▒</span>
+      <span class="label">Grain</span>
+      <input type="range" min="1" max="100" value="${s}" id="grain-range-${v.id}"
+             oninput="onGrainSlide('${v.id}', this.value)">
+      <span class="value" id="grain-val-${v.id}">${s}</span>
+    </div>
+    <div class="row">
+      <button class="chip-btn" id="grain-prev-btn-${v.id}" onclick="previewGrain('${v.id}')">Preview 4s</button>
+      <button class="chip-btn apply" onclick="applyGrain('${v.id}')">${v.has_grain ? 'Re-apply' : 'Apply'}</button>
+      ${v.has_grain ? `<button class="chip-btn remove" onclick="removeGrain('${v.id}')">Remove</button>` : ''}
+    </div>
+    ${prev ? _grainPreviewHtml(prev) : ''}
+  </div>`;
+}
+
+function _grainPreviewHtml(url) {
+  return `<div class="grain-preview">
+    <video src="${url}" controls playsinline autoplay muted loop></video>
+    <div class="hint">4s from the middle, encoded exactly like the full render.</div>
+  </div>`;
+}
+
+function onGrainSlide(id, value) {
+  state.grainDraft.set(id, parseInt(value, 10));
+  const el = document.getElementById(`grain-val-${id}`);
+  if (el) el.textContent = value;
+}
+
+async function previewGrain(id) {
+  const strength = state.grainDraft.get(id)
+    ?? (parseInt(document.getElementById(`grain-range-${id}`)?.value, 10) || GRAIN_DEFAULT);
+  const btn = document.getElementById(`grain-prev-btn-${id}`);
+  if (btn) { btn.disabled = true; btn.textContent = 'Rendering…'; }
+  try {
+    const r = await api(`/api/video/jobs/${id}/grain/preview`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({strength}),
+    });
+    const d = await r.json();
+    // One preview file per video, overwritten on every call — without a
+    // cache-buster the browser replays the previous strength.
+    const url = withAuth(`${d.url}?_t=${Date.now()}`);
+    state.grainPreviewUrl.set(id, url);
+    // Patch the DOM instead of re-rendering the card, so the slider keeps
+    // both its position and its focus while iterating.
+    const chip = document.getElementById(`grain-chip-${id}`);
+    if (chip) {
+      const old = chip.querySelector('.grain-preview');
+      if (old) old.remove();
+      chip.insertAdjacentHTML('beforeend', _grainPreviewHtml(url));
+    }
+  } catch (e) {
+    ArtRium.toast('Preview failed: ' + e.message, true);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Preview 4s'; }
+  }
+}
+
+async function applyGrain(id) {
+  const strength = state.grainDraft.get(id)
+    ?? (parseInt(document.getElementById(`grain-range-${id}`)?.value, 10) || GRAIN_DEFAULT);
+  state.grainingVideos.add(id);
+  try {
+    const r = await api(`/api/video/jobs/${id}/grain`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({strength}),
+    });
+    updateVideoCard(await r.json());
+    pollGrain(id, strength);
+  } catch (e) {
+    state.grainingVideos.delete(id);
+    ArtRium.toast('Grain failed: ' + e.message, true);
+  }
+}
+
+async function removeGrain(id) {
+  if (!confirm('Remove grain and go back to the clean render?')) return;
+  try {
+    const r = await api(`/api/video/jobs/${id}/grain`, {method: 'DELETE'});
+    state.grainDraft.delete(id);
+    state.grainPreviewUrl.delete(id);
+    updateVideoCard(await r.json());
+    ArtRium.toast('Grain removed');
+  } catch (e) {
+    ArtRium.toast('Remove failed: ' + e.message, true);
+  }
+}
+
+function pollGrain(id, strength) {
+  // Mirrors pollSoundtrackMux: status stays 'done' throughout, so completion
+  // needs its own signal. It has to be `grain_rendering`, not the strength:
+  // re-applying the SAME strength leaves grain_strength untouched, so a
+  // strength check alone reports success on the first poll while ffmpeg is
+  // still writing the file — and the card then loads a half-written render.
+  const startedAt = Date.now();
+  const interval = setInterval(async () => {
+    try {
+      const r = await api(`/api/video/jobs/${id}`);
+      const v = await r.json();
+      if (!v.grain_rendering && v.has_grain && v.grain_strength === strength) {
+        clearInterval(interval);
+        state.grainingVideos.delete(id);
+        state.grainPreviewUrl.delete(id);
+        updateVideoCard(v);
+        ArtRium.toast('Grain applied');
+        return;
+      }
+      if (v.error) {
+        clearInterval(interval);
+        state.grainingVideos.delete(id);
+        updateVideoCard(v);
+        ArtRium.toast('Grain failed: ' + v.error, true);
+        return;
+      }
+    } catch (e) { /* transient network error — keep polling */ }
+    if (Date.now() - startedAt > 5 * 60 * 1000) {
+      clearInterval(interval);
+      state.grainingVideos.delete(id);
+      ArtRium.toast('Grain took too long — refresh to see status', true);
+    }
+  }, 2000);
 }
 
 function markDirty(field, id) {
@@ -1708,6 +1896,9 @@ state.songs = [];
 state.songPickerVideoId = null;
 state.songPickerSearch = '';
 state.muxingVideos = new Set();
+state.grainingVideos = new Set();   // videos with a grain render in flight
+state.grainDraft = new Map();       // videoId → strength currently on the slider
+state.grainPreviewUrl = new Map();  // videoId → last rendered preview URL
 
 async function openSongPicker(videoId) {
   state.songPickerVideoId = videoId;

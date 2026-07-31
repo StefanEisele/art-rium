@@ -80,6 +80,7 @@ from services.ollama.story_frames import (
 )
 from services.ollama.zimage_enhance import get_zimage_style_block
 from services.video.audio_stretch import stretch_ltx_audio
+from services.video.grain import render_grain, render_grain_preview
 from services.video.merge import MergeInput, merge_clips
 from services.video.soundtrack import mux_soundtrack
 
@@ -1612,6 +1613,9 @@ async def delete_video(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     if video.muxed_filename:
         mp = settings.videos_dir / video.muxed_filename
         mp.unlink(missing_ok=True)
+    if video.grain_filename:
+        (settings.videos_dir / video.grain_filename).unlink(missing_ok=True)
+    (settings.videos_dir / _grain_preview_name(video_id)).unlink(missing_ok=True)
     thumb = settings.videos_dir / f"{video_id}_thumb.jpg"
     thumb.unlink(missing_ok=True)
     seg_dir = _segments_dir(video_id)
@@ -1662,7 +1666,21 @@ async def _run_soundtrack_mux(video_id: uuid.UUID, song_id: uuid.UUID) -> None:
                 video.soundtrack_song_id = song_id
                 video.muxed_filename = out_name
                 video.error = None
+                grain_strength = video.grain_strength
                 await db.commit()
+            else:
+                grain_strength = None
+
+        # The grain pass reads the muxed file, so a new soundtrack invalidates
+        # any existing grained render — re-run it rather than leave a stale
+        # grained file (which _serialize would still prefer) carrying the old
+        # audio, or none at all.
+        if grain_strength:
+            _progress[video_key] = {
+                "phase": "graining", "message": "Re-applying grain…", "pct": 70,
+            }
+            await _apply_grain(video_id, grain_strength)
+
         _progress.pop(video_key, None)
         logger.info("Soundtrack attached: video=%s song=%s → %s", video_id, song_id, out_name)
 
@@ -1725,6 +1743,177 @@ async def detach_soundtrack(video_id: uuid.UUID, db: AsyncSession = Depends(get_
     video.soundtrack_song_id = None
     await db.commit()
     await db.refresh(video)
+
+    # Dropping the soundtrack swaps the grain pass's source file back to the
+    # silent original, so an existing grained render now carries audio that
+    # was just removed. Re-render it in the background (a full re-encode is
+    # far too slow to hold this request open).
+    if video.grain_strength:
+        _progress[str(video_id)] = {
+            "phase": "graining", "message": "Re-applying grain…", "pct": 10,
+        }
+        safe_create_task(
+            _run_grain(video_id, video.grain_strength), name=f"grain:{video_id}",
+        )
+    return _serialize(video)
+
+
+# ── Film grain (post-hoc pass over a finished video) ──────────────────────────
+# Wan2.2 output is clean to the point of looking plastic. The grain pass is a
+# derived sibling file like the soundtrack mux, never an overwrite: `filename`
+# stays pristine so any strength can be tried, undone, or re-tried.
+
+class GrainApply(BaseModel):
+    strength: int  # 1–100 UI scale; validated in the endpoint
+
+
+def _grain_source(video: Video) -> Path:
+    """The ungrained file a grain pass should read.
+
+    Deliberately never `grain_filename` itself: re-grading always starts from
+    a clean source, so moving the slider replaces the grain instead of baking
+    a second pass on top of the first. Prefers the muxed (audio-bearing)
+    variant so an attached soundtrack survives the re-encode.
+    """
+    if video.muxed_filename:
+        return settings.videos_dir / video.muxed_filename
+    return settings.storage_dir / video.filepath
+
+
+def _grain_name(video_id: uuid.UUID) -> str:
+    return f"{video_id}_grain.mp4"
+
+
+def _grain_preview_name(video_id: uuid.UUID) -> str:
+    return f"{video_id}_grainprev.mp4"
+
+
+async def _apply_grain(video_id: uuid.UUID, strength: int) -> None:
+    """Render the grain pass from the ungrained source and persist it.
+
+    Raises on failure; each caller decides how to report. Also used to
+    re-render after a soundtrack change, since that swaps the source file
+    underneath an existing grain.
+    """
+    async with AsyncSessionLocal() as db:
+        video = await db.get(Video, video_id)
+        if not video or not video.filepath:
+            raise RuntimeError("Video row gone or has no file")
+        src = _grain_source(video)
+
+    if not src.exists():
+        raise RuntimeError(f"Source file missing: {src.name}")
+
+    out_name = _grain_name(video_id)
+    await render_grain(
+        src, settings.videos_dir / out_name, strength,
+        ffmpeg_path=settings.ffmpeg_path,
+    )
+
+    async with AsyncSessionLocal() as db:
+        video = await db.get(Video, video_id)
+        if video:
+            video.grain_strength = strength
+            video.grain_filename = out_name
+            video.error = None
+            await db.commit()
+    logger.info("Grain applied: video=%s strength=%d → %s", video_id, strength, out_name)
+
+
+async def _run_grain(video_id: uuid.UUID, strength: int) -> None:
+    """Background task behind POST /jobs/{id}/grain — a full re-encode of a
+    16-30s clip runs well past a request's patience, so it is polled like the
+    soundtrack mux rather than awaited inline."""
+    video_key = str(video_id)
+    _progress[video_key] = {"phase": "graining", "message": "Adding grain…", "pct": 50}
+    try:
+        await _apply_grain(video_id, strength)
+        _progress.pop(video_key, None)
+    except Exception as exc:
+        logger.exception("Grain render failed for video=%s strength=%s", video_id, strength)
+        _progress.pop(video_key, None)
+        msg = str(exc).strip()
+        err = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+        async with AsyncSessionLocal() as db:
+            video = await db.get(Video, video_id)
+            if video:
+                video.error = err[:1000]
+                await db.commit()
+
+
+def _validate_grain_target(video: Video | None, strength: int) -> None:
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.status != "done" or not video.filename:
+        raise HTTPException(status_code=409, detail="Video is not ready (status must be 'done')")
+    if not 1 <= strength <= 100:
+        raise HTTPException(status_code=422, detail="strength must be between 1 and 100")
+
+
+@router.post("/jobs/{video_id}/grain/preview")
+async def preview_grain(
+    video_id: uuid.UUID, body: GrainApply, db: AsyncSession = Depends(get_db),
+):
+    """Grade a few seconds out of the middle of the clip and return its URL.
+
+    Runs inline: the point is a tight look-adjust-look loop, and a 4s excerpt
+    encodes in a second or two. The file is overwritten on every call, so the
+    caller must cache-bust the URL it gets back.
+    """
+    video = await db.get(Video, video_id)
+    _validate_grain_target(video, body.strength)
+
+    src = _grain_source(video)
+    if not src.exists():
+        raise HTTPException(status_code=409, detail="Source video file is missing on disk")
+
+    out_name = _grain_preview_name(video_id)
+    try:
+        seconds = await render_grain_preview(
+            src, settings.videos_dir / out_name, body.strength,
+            ffmpeg_path=settings.ffmpeg_path,
+        )
+    except Exception as exc:
+        logger.exception("Grain preview failed for video=%s", video_id)
+        raise HTTPException(status_code=502, detail=f"Preview failed: {exc}")
+
+    return {
+        "url": f"/api/video/file/{out_name}",
+        "strength": body.strength,
+        "seconds": round(seconds, 2),
+    }
+
+
+@router.post("/jobs/{video_id}/grain", status_code=202)
+async def apply_grain(
+    video_id: uuid.UUID, body: GrainApply, db: AsyncSession = Depends(get_db),
+):
+    video = await db.get(Video, video_id)
+    _validate_grain_target(video, body.strength)
+
+    # Clear a stale error from an earlier attempt so the frontend poller can't
+    # read it as this attempt failing before the render has even started.
+    if video.error is not None:
+        video.error = None
+        await db.commit()
+
+    _progress[str(video_id)] = {"phase": "graining", "message": "Adding grain…", "pct": 10}
+    safe_create_task(_run_grain(video_id, body.strength), name=f"grain:{video_id}")
+    return _serialize(video)
+
+
+@router.delete("/jobs/{video_id}/grain")
+async def remove_grain(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    video = await db.get(Video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    if video.grain_filename:
+        (settings.videos_dir / video.grain_filename).unlink(missing_ok=True)
+    (settings.videos_dir / _grain_preview_name(video_id)).unlink(missing_ok=True)
+    video.grain_filename = None
+    video.grain_strength = None
+    await db.commit()
+    await db.refresh(video)
     return _serialize(video)
 
 
@@ -1739,21 +1928,65 @@ async def serve_video(filename: str):
 
 # ── Serializer ────────────────────────────────────────────────────────────────
 
+def _is_graining(v: Video) -> bool:
+    """Whether a grain render is in flight for this video right now.
+
+    Re-applying the *same* strength leaves `grain_strength` unchanged, so a
+    client watching that field alone would call the job finished on its first
+    poll — while ffmpeg is still writing the file. This is the signal that
+    actually flips.
+    """
+    return _progress.get(str(v.id), {}).get("phase") == "graining"
+
+
+def _render_version(v: Video, primary_name: str | None) -> str | None:
+    """Cache-busting token for the derived file currently being served.
+
+    Post-processing reuses one filename per video (`{id}_grain.mp4`,
+    `{id}_muxed.mp4`), so re-rendering replaces the bytes behind a URL without
+    changing the URL itself. /api/video/file sends an ETag but no
+    Cache-Control, which leaves browsers (and Cloudflare's edge cache for
+    static extensions) caching heuristically — roughly 10% of the file's age,
+    so days for anything not brand new — and replaying the *first* render
+    without ever revalidating. A re-applied grain then looked like it had
+    never been applied.
+
+    Keying the URL on the file's mtime gives every distinct render its own
+    URL, while letting an unchanged one stay cached. The original is written
+    once and never rewritten, so it needs no token.
+    """
+    if not primary_name or primary_name == v.filename:
+        return None
+    try:
+        return str((settings.videos_dir / primary_name).stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
 def _serialize(v: Video) -> dict:
-    # When a soundtrack is attached, the muxed file is the default `url`
-    # so players load the audio-bearing variant. The silent original stays
-    # available via `original_url`.
-    primary_name = v.muxed_filename or v.filename
+    # Derived variants take precedence in the order they are produced: the
+    # grain pass reads the muxed file when there is one, so a grained file is
+    # always the most complete rendition. The clean original stays available
+    # via `original_url`. services/instagram/media.py::resolve_video_path
+    # mirrors this precedence — keep the two in step.
+    primary_name = v.grain_filename or v.muxed_filename or v.filename
+    version = _render_version(v, primary_name)
+    primary_url = f"/api/video/file/{primary_name}" if primary_name else None
+    if primary_url and version:
+        primary_url = f"{primary_url}?v={version}"
     return {
         "id":                str(v.id),
         "status":            v.status,
         "workflow":          v.workflow or "flf2v",
         "filename":          v.filename,
-        "url":               f"/api/video/file/{primary_name}" if primary_name else None,
+        "url":               primary_url,
         "original_url":      f"/api/video/file/{v.filename}" if v.filename else None,
         "soundtrack_song_id": str(v.soundtrack_song_id) if v.soundtrack_song_id else None,
         "muxed_filename":    v.muxed_filename,
         "has_soundtrack":    bool(v.muxed_filename),
+        "grain_strength":    v.grain_strength,
+        "has_grain":         bool(v.grain_filename),
+        "grain_rendering":   _is_graining(v),
         "thumb_url":         f"/api/video/thumb/{v.id}" if (v.status == "done" and v.filename) else None,
         "image_ids":         [str(i) for i in v.image_ids] if v.image_ids else [],
         "prompt":            v.prompt,

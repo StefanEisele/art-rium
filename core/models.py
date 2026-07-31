@@ -324,6 +324,11 @@ class Video(Base):
         UUID(as_uuid=True), ForeignKey("songs.id", ondelete="SET NULL"), nullable=True
     )
     muxed_filename: Mapped[str | None] = mapped_column(String(512))   # in storage/videos/, sibling of `filename`
+    # Optional film-grain pass (/tools/video detail modal). Always re-rendered
+    # from the ungrained source (muxed_filename or filename) so repeated
+    # strength changes replace the grain instead of stacking it.
+    grain_strength: Mapped[int | None] = mapped_column(SmallInteger)   # 1–100 UI scale; null = no grain
+    grain_filename: Mapped[str | None] = mapped_column(String(512))    # in storage/videos/, sibling of `filename`
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     frame_count: Mapped[int | None] = mapped_column(Integer)  # representative/fallback frame count (flf2v: per-transition; i2v_multi/ltx_i2v: per-image)

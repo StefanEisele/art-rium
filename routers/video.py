@@ -127,6 +127,23 @@ _LTX_LORA      = "ltx-2.3-22b-distilled-lora-384.safetensors"
 _LTX_TEXT_ENC  = "gemma_3_12B_it_fp8_e4m3fn.safetensors"
 _LTX_UPSCALER  = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
 _LTX_NEG       = "pc game, console game, video game, cartoon, childish, ugly"
+# Both CFGGuider calls below run at cfg=1 (required by the distilled LoRA's
+# few-step schedule), which makes the negative prompt mathematically inert —
+# uncond + 1*(cond-uncond) == cond. Steering away from artifacts (hard cuts,
+# scene changes) has to happen via the positive prompt, the sampler choice,
+# and the image conditioning strength below, not the negative prompt.
+# Low-res-pass image-conditioning strength: how strongly the source image
+# anchors the *first* latent frame before the low-res sampling pass runs.
+# 0.7 is LTX's own documented default (room for motion) — verified 2026-07-29
+# against the official `video_ltx2_3_i2v.json` ComfyUI template, which our
+# graph otherwise replicates almost node-for-node. A prior attempt raised
+# this to 0.85 to fight mid-clip drift/hard-cuts, but that traded away motion
+# instead: it produced long static/frozen openings without actually fixing
+# the cuts (see the sampler_name comment below — the ancestral sampler was
+# the more likely real cause). Reverted to the official 0.7. The high-res
+# refine pass stays at 1.0 (unchanged) to preserve fine detail once the
+# low-res content is locked in.
+_LTX_IMG_STRENGTH_LO = 0.7
 # Two-stage sigma schedules baked into the source workflow: a longer low-res
 # pass, then a short refinement pass on the 2×-upscaled latent.
 _LTX_SIGMAS_LO = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
@@ -439,10 +456,18 @@ def _build_ltx_single_workflow(
         p+"evid":    {"class_type": "EmptyLTXVLatentVideo", "inputs": {"width": half_w, "height": half_h, "length": length, "batch_size": 1}},
         p+"eaud":    {"class_type": "LTXVEmptyLatentAudio", "inputs": {"frames_number": length, "frame_rate": fps, "batch_size": 1, "audio_vae": [p+"avae", 0]}},
         # ── Low-res AV sampling pass ──
-        p+"i2vlo":   {"class_type": "LTXVImgToVideoInplace", "inputs": {"vae": [p+"ckpt", 2], "image": [p+"pre", 0], "latent": [p+"evid", 0], "strength": 0.7, "bypass": False}},
+        p+"i2vlo":   {"class_type": "LTXVImgToVideoInplace", "inputs": {"vae": [p+"ckpt", 2], "image": [p+"pre", 0], "latent": [p+"evid", 0], "strength": _LTX_IMG_STRENGTH_LO, "bypass": False}},
         p+"catlo":   {"class_type": "LTXVConcatAVLatent",    "inputs": {"video_latent": [p+"i2vlo", 0], "audio_latent": [p+"eaud", 0]}},
         p+"noiselo": {"class_type": "RandomNoise",           "inputs": {"noise_seed": seed}},
-        p+"samlo":   {"class_type": "KSamplerSelect",        "inputs": {"sampler_name": "euler_ancestral_cfg_pp"}},
+        # sampler_name "euler" on both stages (not the "_cfg_pp"/ancestral
+        # variants) — verified 2026-07-29 against the official ComfyUI
+        # `video_ltx2_3_i2v.json` template, which uses plain "euler" for both
+        # KSamplerSelect nodes in this exact two-stage low-res+upscale+refine
+        # shape. Ancestral sampling injects fresh stochastic noise at every
+        # step; on an 8-step (low-res) / 3-step (high-res) distilled schedule
+        # that's a plausible driver of the reported mid-clip content drift
+        # and hard cuts — switched to match the verified official spec.
+        p+"samlo":   {"class_type": "KSamplerSelect",        "inputs": {"sampler_name": "euler"}},
         p+"siglo":   {"class_type": "ManualSigmas",          "inputs": {"sigmas": _LTX_SIGMAS_LO}},
         p+"gdlo":    {"class_type": "CFGGuider",             "inputs": {"model": [p+"lora", 0], "positive": [p+"cond", 0], "negative": [p+"cond", 1], "cfg": 1}},
         p+"kslo":    {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": [p+"noiselo", 0], "guider": [p+"gdlo", 0], "sampler": [p+"samlo", 0], "sigmas": [p+"siglo", 0], "latent_image": [p+"catlo", 0]}},
@@ -453,7 +478,7 @@ def _build_ltx_single_workflow(
         p+"cathi":   {"class_type": "LTXVConcatAVLatent",   "inputs": {"video_latent": [p+"i2vhi", 0], "audio_latent": [p+"seplo", 1]}},
         # ── High-res refinement pass ──
         p+"noisehi": {"class_type": "RandomNoise",           "inputs": {"noise_seed": 42}},
-        p+"samhi":   {"class_type": "KSamplerSelect",        "inputs": {"sampler_name": "euler_cfg_pp"}},
+        p+"samhi":   {"class_type": "KSamplerSelect",        "inputs": {"sampler_name": "euler"}},
         p+"sighi":   {"class_type": "ManualSigmas",          "inputs": {"sigmas": _LTX_SIGMAS_HI}},
         p+"crop":    {"class_type": "LTXVCropGuides",        "inputs": {"positive": [p+"cond", 0], "negative": [p+"cond", 1], "latent": [p+"seplo", 0]}},
         p+"gdhi":    {"class_type": "CFGGuider",             "inputs": {"model": [p+"lora", 0], "positive": [p+"crop", 0], "negative": [p+"crop", 1], "cfg": 1}},

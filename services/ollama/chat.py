@@ -19,10 +19,27 @@ logger = logging.getLogger(__name__)
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 
 
-@lru_cache(maxsize=4)
-def _read_prompt(filename: str) -> str:
-    """Lazy-load a file from prompts/ once per process."""
+@lru_cache(maxsize=64)
+def _read_prompt_cached(filename: str, _mtime_ns: int) -> str:
     return (_PROMPTS_DIR / filename).read_text(encoding="utf-8")
+
+
+def _read_prompt(filename: str) -> str:
+    """Load a file from prompts/, cached per (name, mtime).
+
+    Keying on mtime means editing a prompt file takes effect on the next call
+    instead of at the next server restart. That matters because these files
+    are the tuning surface for prompt behaviour — the previous
+    cache-forever-per-process version silently served the pre-edit text for
+    the life of the process, so a tuning round could be evaluated against the
+    prompt it was meant to replace.
+    """
+    path = _PROMPTS_DIR / filename
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0  # let read_text raise the real error below
+    return _read_prompt_cached(filename, mtime_ns)
 
 
 def _b64_jpgs(jpgs: list[bytes]) -> list[str]:

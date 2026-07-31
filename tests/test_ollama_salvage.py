@@ -209,3 +209,49 @@ class TestValidateEssayBlock:
         result = _validate_essay_block("en", block)
         assert len(result["movements"]) == 1
         assert result["movements"][0]["heading"] == "Real"
+
+
+class TestReadPromptCache:
+    """Prompt files are the tuning surface for model behaviour, so an edit has
+    to take effect on the next call — the previous cache-forever-per-process
+    version served pre-edit text for the life of the server, meaning a tuning
+    round could be evaluated against the prompt it was meant to replace."""
+
+    def test_reflects_an_edit_without_a_restart(self, tmp_path, monkeypatch):
+        import services.ollama.chat as chat_module
+
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+        target = prompts_dir / "probe.md"
+        target.write_text("original", encoding="utf-8")
+        monkeypatch.setattr(chat_module, "_PROMPTS_DIR", prompts_dir)
+
+        assert chat_module._read_prompt("probe.md") == "original"
+
+        # Same path, new content and a distinct mtime.
+        target.write_text("edited", encoding="utf-8")
+        import os
+        st = target.stat()
+        os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+        assert chat_module._read_prompt("probe.md") == "edited"
+
+    def test_repeat_reads_are_cached(self, tmp_path, monkeypatch):
+        import services.ollama.chat as chat_module
+
+        prompts_dir = tmp_path / "prompts"
+        prompts_dir.mkdir()
+        (prompts_dir / "probe2.md").write_text("cached", encoding="utf-8")
+        monkeypatch.setattr(chat_module, "_PROMPTS_DIR", prompts_dir)
+
+        before = chat_module._read_prompt_cached.cache_info().hits
+        chat_module._read_prompt("probe2.md")
+        chat_module._read_prompt("probe2.md")
+        assert chat_module._read_prompt_cached.cache_info().hits == before + 1
+
+    def test_missing_file_still_raises(self, tmp_path, monkeypatch):
+        import services.ollama.chat as chat_module
+
+        monkeypatch.setattr(chat_module, "_PROMPTS_DIR", tmp_path)
+        with pytest.raises(OSError):
+            chat_module._read_prompt("nope.md")

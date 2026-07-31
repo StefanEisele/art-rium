@@ -547,10 +547,15 @@ function _updateModeFields() {
 // LTX-2.3's own documented two-stage pipeline (half-res sample pass + 2x latent
 // upscale) targets a larger square than Wan2.2 (1280×1280 vs 960×960); 16:9/9:16
 // are already correct for both model families, so only the square chip differs.
+// 1080 itself isn't divisible by Wan's 16 or LTX's 64, so the 1080p tier
+// submits 1088 (both models' nearest clean multiple — matches the existing
+// default width/height) while still labelling the chip "1080" for clarity.
 const RES_PRESETS = {
-  wan: [[960, 960, '960×960'], [1280, 704, '1280×704'], [704, 1280, '704×1280']],
+  wan: [[960, 960, '960×960'], [1280, 704, '1280×704'], [704, 1280, '704×1280'],
+        [1920, 1088, '1920×1080'], [1088, 1920, '1080×1920']],
   ltx: [[960, 960, '960×960 (fast)'], [1280, 1280, '1280×1280 (HQ)'],
-        [1280, 704, '1280×704'], [704, 1280, '704×1280']],
+        [1280, 704, '1280×704'], [704, 1280, '704×1280'],
+        [1920, 1088, '1920×1080'], [1088, 1920, '1080×1920']],
 };
 
 function renderResChips() {

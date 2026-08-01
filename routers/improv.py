@@ -2,9 +2,11 @@
 Piano-improvisation tool.
 
 Workflow:
-  1. User picks a generated source video on /tools/improv/.
+  1. User picks a generated source video on /tools/improv/, and — when the
+     video tool has already put a film-grain pass on it — which rendition to
+     mix against (see services/improv/source).
   2. Frontend shows a public share URL (with image_share_token) so the user
-     can open the source video on a second device next to the piano.
+     can open that same rendition on a second device next to the piano.
   3. User records on iPhone (Blackmagic Camera + Focusrite Scarlett 2i4),
      uploads the resulting MP4 here.
   4. ffmpeg mux produces two outputs (synth + hands) — see services/improv/mux.
@@ -29,6 +31,7 @@ from core.db import get_db
 from core.models import ImprovSession, Video
 from core.tasks import safe_create_task
 from services.improv.runner import run_improv_session
+from services.improv.source import source_filename
 from services.instagram.graph import share_url
 
 logger = logging.getLogger(__name__)
@@ -57,6 +60,7 @@ async def create_session(
     pip_width_pct: float = Form(0.24),
     include_bed: bool = Form(False),
     bed_volume: float = Form(0.35),
+    use_grain: bool = Form(True),
     db: AsyncSession = Depends(get_db),
 ):
     source = await db.get(Video, source_video_id)
@@ -106,15 +110,15 @@ async def create_session(
     safe_create_task(
         run_improv_session(
             session_id, pip_corner=corner, pip_width_pct=width_pct,
-            include_bed=include_bed, bed_volume=bed_vol,
+            include_bed=include_bed, bed_volume=bed_vol, use_grain=use_grain,
         ),
         name=f"improv_session:{session_id}",
     )
     logger.info(
         "Improv session %s queued — source=%s, recording=%s (%.1f MB), pip_corner=%s, "
-        "pip_width=%.2f, include_bed=%s, bed_volume=%.2f",
+        "pip_width=%.2f, include_bed=%s, bed_volume=%.2f, use_grain=%s (grained=%s)",
         session_id, source_video_id, rec_name, written / 1_048_576, corner, width_pct,
-        include_bed, bed_vol,
+        include_bed, bed_vol, use_grain, use_grain and bool(source.grain_filename),
     )
     return {"id": str(session_id), "status": "queued"}
 
@@ -126,6 +130,7 @@ async def get_share_url(
     tick_every: int = 24,
     accent_every: int = 4,
     loop_bars: int = 0,
+    grain: bool = True,
     db: AsyncSession = Depends(get_db),
 ):
     """Public URL for the source video — points at the loop player so the
@@ -135,13 +140,20 @@ async def get_share_url(
     boots the iPad straight into the desired countdown/metronome/bar config.
     The iPad can still tap the cog to live-edit; those edits persist in
     its localStorage and override the URL on subsequent scans.
+
+    `grain` mirrors POST /sessions' `use_grain` and defaults the same way, so
+    the clip the user plays along to on the iPad is the one the mux will use.
+    Both renditions live in videos_dir, which is where /share/video/ reads
+    from, so this needs no extra routing.
     """
     video = await db.get(Video, video_id)
     if not video or not video.filename:
         raise HTTPException(404, "Video not found")
 
+    name = source_filename(video, use_grain=grain)
+    grained = name != video.filename
     fps = video.fps or 24
-    base = share_url(video.filename, kind="video-loop")
+    base = share_url(name, kind="video-loop")
     extra = {
         "fps": fps,
         "countdown": max(0, min(10, countdown)),
@@ -151,7 +163,12 @@ async def get_share_url(
     }
     sep = "&" if "?" in base else "?"
     qs = "&".join(f"{k}={v}" for k, v in extra.items())
-    return {"url": f"{base}{sep}{qs}", "fps": fps, "duration": video.frame_count}
+    return {
+        "url": f"{base}{sep}{qs}",
+        "fps": fps,
+        "duration": video.frame_count,
+        "grained": grained,
+    }
 
 
 @router.get("/sessions/{session_id}")

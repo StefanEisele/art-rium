@@ -35,6 +35,7 @@ from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import InstagramPost
 from core.scheduling import companion_at
+from services.instagram.collaborators import container_field as collaborators_field
 from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
@@ -147,6 +148,7 @@ class _Snapshot:
     """Plain-Python snapshot of post + ordered media children, decoupled from any DB session."""
     media:            list[MediaRef]
     caption:          str
+    collaborators:    list[str] | None
     story_delay:      int | None
     reel_delay:       int | None
     companion_time:   str | None
@@ -172,6 +174,7 @@ async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
         return _Snapshot(
             media=media,
             caption=post.caption or "",
+            collaborators=post.collaborators or None,
             story_delay=story.delay_minutes if story else None,
             reel_delay=reel.delay_minutes if reel else None,
             companion_time=post.companion_time,
@@ -210,8 +213,9 @@ async def _call_graph_api(
 async def _child_payload(ref: MediaRef, *, is_carousel_item: bool) -> dict[str, str]:
     """Build the per-child media-container payload for Graph API.
 
-    For carousel children, `is_carousel_item=true` is required and the
-    `caption` must NOT be set (it's set on the parent container).
+    For carousel children, `is_carousel_item=true` is required and neither
+    `caption` nor `collaborators` may be set — both belong on the parent
+    container, and a child carrying them fails the whole call.
 
     Video children are routed through ensure_ig_compatible so any
     HEVC/10-bit master is transcoded to H.264/yuv420p before the share
@@ -236,6 +240,7 @@ async def _create_single_container(
     ref = snap.media[0]
     data = await _child_payload(ref, is_carousel_item=False)
     data["caption"] = snap.caption
+    data.update(collaborators_field(snap.collaborators))
     if scheduled_publish_time is not None:
         data["scheduled_publish_time"] = str(scheduled_publish_time)
     container_id = await create_media_container(client, data, f"create single {ref.kind} container")
@@ -272,10 +277,13 @@ async def _create_carousel_container(
         else:
             await wait_container_ready(client, item_id)
 
+    # `collaborators` goes on the parent only — Meta rejects the call with
+    # "param collaborators is not allowed" if a child container carries it.
     data: dict[str, str] = {
         "media_type": "CAROUSEL",
         "children":   ",".join(child_ids),
         "caption":    snap.caption,
+        **collaborators_field(snap.collaborators),
     }
     if scheduled_publish_time is not None:
         data["scheduled_publish_time"] = str(scheduled_publish_time)

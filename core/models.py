@@ -168,6 +168,9 @@ class InstagramPost(Base):
         ARRAY(UUID(as_uuid=True))
     )                                                               # ordered list of 1–4 source videos for kind='reel' concat
     caption: Mapped[str | None] = mapped_column(Text)
+    collaborators: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String(30))
+    )                                                               # up to 3 IG usernames invited as co-authors; not supported on stories
     scheduled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )

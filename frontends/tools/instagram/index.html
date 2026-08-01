@@ -439,6 +439,20 @@
     textarea#caption-input:focus { border-color: var(--accent); }
     textarea#caption-input::placeholder { color: var(--text-dim); }
 
+    /* Collaborators ("Coop-Partner") — up to 3 IG usernames, feed/carousel/reel
+       only. Instagram has no collaborator support on stories. */
+    .collab-input {
+      width: 100%;
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 10px; color: var(--text); font-size: 14px;
+      padding: 11px 13px; outline: none; font-family: inherit;
+      transition: border-color 0.2s; -webkit-appearance: none;
+    }
+    .collab-input:focus { border-color: var(--accent); }
+    .collab-input::placeholder { color: var(--text-dim); }
+    .collab-input:disabled { opacity: 0.55; cursor: not-allowed; }
+    .collab-hint { font-size: 12px; color: var(--text-dim); margin-top: 5px; }
+
     /* Offset scheduling row */
     .schedule-row {
       display: flex;
@@ -744,6 +758,14 @@
         <button class="hashtag-add-btn" onclick="addHashtagSet('caption-input', 'hashtag-select')">Add</button>
       </div>
 
+      <!-- Collaborators -->
+      <div>
+        <input class="collab-input" id="collab-input" type="text"
+               autocapitalize="none" autocorrect="off" spellcheck="false"
+               placeholder="Collaborators — @username, @username">
+        <div class="collab-hint">Up to 3 public accounts, invited as co-authors. They must accept before the post shows on their profile. Not available on stories.</div>
+      </div>
+
       <!-- Offset scheduling -->
       <div class="schedule-row">
         <label>Post</label>
@@ -872,6 +894,14 @@
         <option value="#art #artist #artistsoninstagram #artwork #artoftheday">Artist Community</option>
       </select>
       <button class="hashtag-add-btn" onclick="addHashtagSet('detail-caption', 'detail-hashtag-select')">Add</button>
+    </div>
+
+    <!-- Collaborators -->
+    <div id="detail-collab-wrap">
+      <input class="collab-input" id="detail-collab" type="text"
+             autocapitalize="none" autocorrect="off" spellcheck="false"
+             placeholder="Collaborators — @username, @username">
+      <div class="collab-hint" id="detail-collab-hint">Up to 3 public accounts, invited as co-authors.</div>
     </div>
 
     <!-- Companion delay selectors (only for scheduled posts) -->
@@ -1162,11 +1192,15 @@ function renderTimeline() {
         cloudMarker = ' <span title="Scheduled directly with Instagram — survives server restart">☁</span>';
       }
 
+      const collabMarker = (p.collaborators && p.collaborators.length)
+        ? ` <span title="Collaborators: ${escHtml(formatCollaborators(p.collaborators))}">🤝</span>`
+        : '';
+
       row.innerHTML = `
         ${thumbHTML}
         <div class="post-info">
           <div class="post-date">
-            ${fmtDate(p.scheduled_at)}${cloudMarker}
+            ${fmtDate(p.scheduled_at)}${cloudMarker}${collabMarker}
             <span class="${statusClass(p.status)}">${statusLabel(p.status)}</span>
           </div>
           ${titleText ? `<div class="post-title">${isCarousel ? (isMixed ? '🎞️ ' : (nVid > 0 ? '▶ ' : '📸 ')) : ''}${titleText}</div>` : ''}
@@ -1865,12 +1899,18 @@ async function schedulePost() {
 
   try {
     let body;
+    const collaborators = parseCollaborators($('collab-input').value);
+    if (collaborators.length > 3) {
+      ArtRium.toast('At most 3 collaborators per post', true);
+      return;
+    }
     if (state.mode === 'reel') {
       if (!state.selectedReelVideos.length) return;
       body = {
         kind:                 'reel',
         reel_video_ids:       state.selectedReelVideos.map(v => v.id),
         caption:              $('caption-input').value.trim() || null,
+        collaborators:        collaborators.length ? collaborators : null,
         scheduled_at:         state.computedDate,
         story_delay_minutes:  state.storyDelay,
         companion_time:       state.companionTime,
@@ -1882,6 +1922,7 @@ async function schedulePost() {
         kind:                 'feed',
         media:                state.selectedMedia.map(m => ({ kind: m.kind, id: m.id })),
         caption:              $('caption-input').value.trim() || null,
+        collaborators:        collaborators.length ? collaborators : null,
         scheduled_at:         state.computedDate,
         reel_delay_minutes:   state.reelDelay,
         story_delay_minutes:  state.storyDelay,
@@ -1916,6 +1957,7 @@ async function schedulePost() {
     state.cloudDispatch = false;
     $('picker-grid').innerHTML = '';
     $('caption-input').value = '';
+    $('collab-input').value = '';
     _syncChips('reel-chips', null);
     _syncChips('story-chips', null);
     $('companion-time-input').value = '18:23';
@@ -2091,6 +2133,20 @@ function openDetail(post) {
   // Companion delay chips (only editable for scheduled posts)
   const isScheduled = post.status === 'scheduled';
 
+  // Collaborators. Once a post is on the Pi the container is built there and
+  // its /update endpoint only takes caption + times, so the server rejects a
+  // change with 409 — show the value read-only rather than inviting an edit.
+  // Same for anything already published: the container is long gone.
+  $('detail-collab').value = formatCollaborators(post.collaborators);
+  $('detail-collab').disabled = !isScheduled || !!post.outpost_id;
+  const collabHint = !isScheduled
+    ? ''   // reason is obvious from the status badge
+    : post.outpost_id
+      ? 'Fixed once the post is handed to the Pi outpost — delete and recreate to change.'
+      : 'Up to 3 public accounts, invited as co-authors.';
+  $('detail-collab-hint').textContent = collabHint;
+  $('detail-collab-hint').style.display = collabHint ? '' : 'none';
+
   // Editable date/time (only for scheduled posts)
   $('detail-schedule-edit').style.display = isScheduled ? '' : 'none';
   if (isScheduled) {
@@ -2140,6 +2196,16 @@ async function saveDetail() {
     const patchBody = { caption: $('detail-caption').value.trim() || null };
     // Always include delays so the server knows the user's intent (model_fields_set)
     if (state.activePost.status === 'scheduled') {
+      // Skipped for outpost posts — the field is read-only there and sending it
+      // unchanged is harmless, but omitting it keeps the 409 path unreachable.
+      if (!state.activePost.outpost_id) {
+        const collaborators = parseCollaborators($('detail-collab').value);
+        if (collaborators.length > 3) {
+          ArtRium.toast('At most 3 collaborators per post', true);
+          return;
+        }
+        patchBody.collaborators = collaborators.length ? collaborators : null;
+      }
       patchBody.reel_delay_minutes  = state.detailReelDelay;
       patchBody.story_delay_minutes = state.detailStoryDelay;
       patchBody.companion_time      = state.detailCompanionTime;
@@ -2264,6 +2330,27 @@ function addHashtagSet(textareaId, selectId) {
   ta.value = cur ? cur.trimEnd() + '\n' + tags : tags;
   sel.value = '';
   ta.dispatchEvent(new Event('input'));
+}
+
+// ── Collaborators ─────────────────────────────────────────────────────────────
+// Free-text in, array out. Accepts commas, spaces or newlines as separators and
+// tolerates a leading "@". Mirrors the server's case-insensitive de-dupe so the
+// local "max 3" check counts the same things the server does; the server still
+// normalises again and is the one that rejects malformed names.
+function parseCollaborators(raw) {
+  const seen = new Set();
+  const out = [];
+  for (const part of (raw || '').split(/[\s,]+/)) {
+    const name = part.replace(/^@+/, '').trim();
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    out.push(name);
+  }
+  return out;
+}
+
+function formatCollaborators(list) {
+  return (list || []).map(u => '@' + u).join(', ');
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

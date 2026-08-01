@@ -22,6 +22,7 @@ from core.db import get_db
 from core.models import InstagramPost, Image, Video
 from core.scheduling import companion_at
 from core.tasks import safe_create_task
+from services.instagram.collaborators import normalize as normalize_collaborators
 from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.graph import missing_config
 from services.instagram.media import replace_media_items
@@ -51,6 +52,10 @@ class PostCreate(BaseModel):
     carousel_image_ids: Optional[list[uuid.UUID]] = None    # additional images (2nd…10th)
     reel_video_ids: Optional[list[uuid.UUID]] = None        # 1–4 source videos to concat for kind='reel'
     caption: Optional[str] = None
+    # IG usernames invited as co-authors. The count is enforced by
+    # normalize_collaborators() *after* de-duplication, not by a max_length
+    # here — otherwise "@alice, @Alice, @bob, @carol" would be rejected as 4.
+    collaborators: Optional[list[str]] = None
     scheduled_at: datetime          # client computes this (incl. offset logic)
     story_delay_minutes: Optional[int] = None  # null = off; N = N min after feed/reel
     reel_delay_minutes:  Optional[int] = None  # null = off; N = N min after feed (kind='feed' only)
@@ -61,6 +66,7 @@ class PostCreate(BaseModel):
 
 class PostUpdate(BaseModel):
     caption: Optional[str] = None
+    collaborators: Optional[list[str]] = None   # explicit null clears; count checked after de-dupe
     scheduled_at: Optional[datetime] = None
     status: Optional[str] = None    # scheduled | posted | cancelled
     media: Optional[list[MediaItem]] = Field(default=None, max_length=10)  # full ordered replacement; overrides carousel_image_ids
@@ -151,6 +157,7 @@ def _serialize(
         "reel_video_ids": [str(i) for i in post.reel_video_ids] if post.reel_video_ids else None,
         "is_carousel": len(post.media) > 1,
         "caption": post.caption,
+        "collaborators": post.collaborators or None,
         "scheduled_at": post.scheduled_at.isoformat(),
         "status": post.status,
         "instagram_media_id": post.instagram_media_id,
@@ -319,6 +326,11 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
     if dispatch_target not in {"local", "outpost"}:
         raise HTTPException(status_code=400, detail="dispatch_target must be 'local' or 'outpost'")
 
+    try:
+        collaborators = normalize_collaborators(body.collaborators)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     media_tuples: list[tuple[str, uuid.UUID]] = []
 
     if kind == "reel":
@@ -368,6 +380,7 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
         kind=kind,
         reel_video_ids=(body.reel_video_ids or None) if kind == "reel" else None,
         caption=body.caption,
+        collaborators=collaborators,
         scheduled_at=scheduled_at,
         status="scheduled",
         companion_time=body.companion_time,
@@ -474,6 +487,14 @@ async def update_post(
     if body.caption is not None and body.caption != post.caption:
         post.caption = body.caption
         invalidates_remote = True
+    if "collaborators" in body.model_fields_set:
+        try:
+            new_collaborators = normalize_collaborators(body.collaborators)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if new_collaborators != (post.collaborators or None):
+            post.collaborators = new_collaborators
+            invalidates_remote = True
     if body.scheduled_at is not None:
         scheduled_at = body.scheduled_at
         if scheduled_at.tzinfo is None:
@@ -608,6 +629,15 @@ async def _update_outpost_post(
         bad.add("carousel_image_ids")
     if "reel_video_id" in requested and body.reel_video_id != (reel.video_id if reel else None):
         bad.add("reel_video_id")
+    # The Pi builds the container itself and its /update endpoint only takes
+    # caption + times, so collaborators are fixed once the job is enqueued.
+    if "collaborators" in requested:
+        try:
+            wanted = normalize_collaborators(body.collaborators)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if wanted != (post.collaborators or None):
+            bad.add("collaborators")
     if bad:
         raise HTTPException(
             status_code=409,

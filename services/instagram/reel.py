@@ -26,6 +26,7 @@ from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import InstagramPost, Video
 from core.scheduling import companion_at
+from services.instagram.collaborators import container_field as collaborators_field
 from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
@@ -86,6 +87,7 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
             for ref in media_refs if ref.kind == "image"
         ]
         caption = post.caption or ""
+        collaborators = post.collaborators or None
         reel_video_id = reel.video_id
         existing_filename = reel.video_filename
 
@@ -104,6 +106,7 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
                     "caption":                caption,
                     "share_to_feed":          "true",
                     "scheduled_publish_time": str(int(publish_at.timestamp())),
+                    **collaborators_field(collaborators),
                 },
                 "reel container",
             )

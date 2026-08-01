@@ -29,6 +29,7 @@ from core.db import AsyncSessionLocal
 from core.imaging import prepare_for_upload
 from core.models import InstagramPost, Video
 from core.scheduling import companion_at
+from services.instagram.collaborators import container_field as collaborators_field
 from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.ig_video import ensure_ig_compatible
 from services.instagram.media import load_media_refs, resolve_video_path
@@ -124,6 +125,7 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
             return
 
         caption = post.caption or ""
+        collaborators = post.collaborators or None
         scheduled_at = post.scheduled_at
         reel_companion = find_companion(post, "reel")
         story_companion = find_companion(post, "story")
@@ -209,7 +211,13 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
             await _record_failure(post_id, f"Slideshow render failed: {exc}")
             return
 
-    data = {"caption": caption, "scheduled_at": _iso(scheduled_at)}
+    # `collaborators` rides along as the same JSON array the Graph API takes;
+    # a Pi that predates collaborator support just ignores the extra field.
+    data = {
+        "caption": caption,
+        "scheduled_at": _iso(scheduled_at),
+        **collaborators_field(collaborators),
+    }
     if reel_publish_at is not None:
         data["reel_publish_at"] = _iso(reel_publish_at)
     if story_publish_at is not None:
@@ -291,6 +299,7 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
             return
 
         caption = post.caption or ""
+        collaborators = post.collaborators or None
         scheduled_at = post.scheduled_at
         story_companion = find_companion(post, "story")
         story_publish_at = (
@@ -315,7 +324,11 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
     # ── Multipart upload to /enqueue-reel ──────────────────────────────────
     # Streamed from disk (not read into bytes) so httpx doesn't hold the
     # whole concatenated reel resident in RAM.
-    data = {"caption": caption, "scheduled_at": _iso(scheduled_at)}
+    data = {
+        "caption": caption,
+        "scheduled_at": _iso(scheduled_at),
+        **collaborators_field(collaborators),
+    }
     if story_publish_at is not None:
         data["story_publish_at"] = _iso(story_publish_at)
 

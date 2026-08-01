@@ -19,6 +19,7 @@ from services.improv.mux import (
     clamp_bed_volume,
     clamp_pip_width,
 )
+from services.improv.source import has_grain, source_filename, source_path
 from services.video.audio_stretch import build_rubberband_filter, build_stretch_cmd
 from services.video.grain import (
     NOISE_CEILING,
@@ -103,6 +104,47 @@ class TestImprovMuxCmds:
         default = _pip_cmd("ffmpeg", Path("bg.mp4"), Path("inset.mp4"), Path("out.mp4"), corner="tr")
         unknown = _pip_cmd("ffmpeg", Path("bg.mp4"), Path("inset.mp4"), Path("out.mp4"), corner="nonsense")
         assert default == unknown
+
+
+class TestImprovSourceRendition:
+    """Improv used to read `filepath` unconditionally, so a clip the user had
+    deliberately grained came back out of the mux smooth again. Unlike the
+    Instagram dispatch paths this is a choice, not a fixed precedence — but an
+    unchecked box and a missing grain file have to behave identically."""
+
+    def _video(self, **kw):
+        from core.models import Video
+        return Video(filename="clean.mp4", filepath="videos/clean.mp4", **kw)
+
+    def test_grained_rendition_wins_when_asked_for(self):
+        v = self._video(grain_filename="x_grain.mp4", grain_strength=30)
+        assert source_path(v, use_grain=True).name == "x_grain.mp4"
+        assert source_filename(v, use_grain=True) == "x_grain.mp4"
+
+    def test_original_when_grain_is_declined(self):
+        v = self._video(grain_filename="x_grain.mp4", grain_strength=30)
+        assert source_path(v, use_grain=False).name == "clean.mp4"
+        assert source_filename(v, use_grain=False) == "clean.mp4"
+
+    def test_falls_back_to_the_original_when_nothing_was_grained(self):
+        v = self._video()
+        assert source_path(v, use_grain=True).name == "clean.mp4"
+        assert source_filename(v, use_grain=True) == "clean.mp4"
+        assert not has_grain(v)
+
+    def test_grain_ignores_the_muxed_variant_it_was_built_from(self):
+        # The grain pass reads the muxed file, so the grained rendition
+        # already carries the soundtrack — resolving to muxed here would
+        # hand ffmpeg the ungrained picture.
+        v = self._video(muxed_filename="x_muxed.mp4", grain_filename="x_grain.mp4")
+        assert source_path(v, use_grain=True).name == "x_grain.mp4"
+
+    def test_declining_grain_keeps_todays_behaviour_of_reading_the_original(self):
+        # Improv has never picked up an attached soundtrack on its own, and
+        # this change is about grain — turning it off must not quietly start
+        # muxing the song in as the bed.
+        v = self._video(muxed_filename="x_muxed.mp4", grain_filename="x_grain.mp4")
+        assert source_path(v, use_grain=False).name == "clean.mp4"
 
 
 class TestSoundtrackMuxCmd:

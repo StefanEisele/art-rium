@@ -20,6 +20,7 @@ import httpx
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import InstagramPost, Video
+from services.instagram.collaborators import container_field as collaborators_field
 from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
@@ -99,6 +100,7 @@ async def publish_reel(post_id: uuid.UUID) -> None:
         # mixed feed post are skipped here — they're already in the carousel.
         image_refs = [r for r in await load_media_refs(post, db) if r.kind == "image"]
         caption = post.caption or ""
+        collaborators = post.collaborators or None
         reel_companion = find_companion(post, "reel")
         reel_video_id = reel_companion.video_id if reel_companion else None
 
@@ -143,6 +145,7 @@ async def publish_reel(post_id: uuid.UUID) -> None:
                     "video_url":     share_url(video_path.name, kind=kind),
                     "caption":       caption,
                     "share_to_feed": "true",
+                    **collaborators_field(collaborators),
                 },
                 "reel container",
             )

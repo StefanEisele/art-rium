@@ -23,6 +23,7 @@ from core.db import AsyncSessionLocal
 from core.models import ImprovSession, Video
 from core.video_thumb import make_video_thumbnail, probe_video_dimensions
 from services.improv.mux import mux_session
+from services.improv.source import source_path
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +35,12 @@ async def run_improv_session(
     pip_width_pct: float = 0.24,
     include_bed: bool = False,
     bed_volume: float = 0.35,
+    use_grain: bool = True,
 ) -> None:
     try:
         await _run(
             session_id, pip_corner=pip_corner, pip_width_pct=pip_width_pct,
-            include_bed=include_bed, bed_volume=bed_volume,
+            include_bed=include_bed, bed_volume=bed_volume, use_grain=use_grain,
         )
     except Exception as exc:
         logger.exception("Improv session %s crashed", session_id)
@@ -52,6 +54,7 @@ async def _run(
     pip_width_pct: float = 0.24,
     include_bed: bool = False,
     bed_volume: float = 0.35,
+    use_grain: bool = True,
 ) -> None:
     async with AsyncSessionLocal() as db:
         session = await db.get(ImprovSession, session_id)
@@ -72,13 +75,25 @@ async def _run(
         session.error = None
         await db.commit()
 
-        source_path = settings.storage_dir / source.filepath
+        # Grained rendition when the user asked for one and it exists —
+        # see services/improv/source.py for why this is a choice rather
+        # than the fixed precedence the Instagram paths use.
+        src_path = source_path(source, use_grain=use_grain)
+        grained = use_grain and bool(source.grain_filename)
         source_video_id = source.id
         source_filename = source.filename or "video"
 
+    if not src_path.exists():
+        await _mark_failed(session_id, f"Source video file missing: {src_path.name}")
+        return
+
     # ── ffmpeg pass (off the DB session) ────────────────────────────────────
+    logger.info(
+        "Improv session %s muxing against %s (%s rendition)",
+        session_id, src_path.name, "grained" if grained else "original",
+    )
     mix_synth_path, mix_hands_path, mix_pip_path = await mux_session(
-        source_path,
+        src_path,
         recording_path,
         settings.videos_dir,
         ffmpeg_path=settings.ffmpeg_path,
@@ -97,9 +112,9 @@ async def _run(
 
     # ── Persist output Video rows + session refs ────────────────────────────
     async with AsyncSessionLocal() as db:
-        synth = _make_video_row(mix_synth_path, source_filename, kind="synth", dimensions=synth_dim)
-        hands = _make_video_row(mix_hands_path, source_filename, kind="hands", dimensions=hands_dim)
-        pip   = _make_video_row(mix_pip_path,   source_filename, kind="pip",   dimensions=pip_dim)
+        synth = _make_video_row(mix_synth_path, source_filename, kind="synth", dimensions=synth_dim, grained=grained)
+        hands = _make_video_row(mix_hands_path, source_filename, kind="hands", dimensions=hands_dim, grained=grained)
+        pip   = _make_video_row(mix_pip_path,   source_filename, kind="pip",   dimensions=pip_dim,   grained=grained)
         db.add_all([synth, hands, pip])
         await db.flush()
 
@@ -138,14 +153,18 @@ def _make_video_row(
     *,
     kind: str,
     dimensions: tuple[int | None, int | None] = (None, None),
+    grained: bool = False,
 ) -> Video:
+    # The hands mix is the recording alone, so the source rendition never
+    # reaches it — noting "grained" there would be a lie.
     label, workflow = _KIND_LABELS[kind]
+    suffix = " · grained source" if grained and kind != "hands" else ""
     w, h = dimensions
     return Video(
         id=uuid.uuid4(),
         filename=path.name,
         filepath=str(path.relative_to(settings.storage_dir)).replace("\\", "/"),
-        prompt=f"{label} of {source_filename}",
+        prompt=f"{label} of {source_filename}{suffix}",
         status="done",
         workflow=workflow,
         width=w,

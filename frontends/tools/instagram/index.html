@@ -218,6 +218,8 @@
     .delay-chip.active {
       background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
     }
+    .delay-chip:disabled { opacity: 0.5; cursor: not-allowed; }
+    .collab-chip-row { margin-top: 7px; }
     .companion-time-input {
       background: var(--surface2); border: 1.5px solid var(--border);
       border-radius: 8px; color: var(--text); font-size: 14px; font-weight: 600;
@@ -763,6 +765,7 @@
         <input class="collab-input" id="collab-input" type="text"
                autocapitalize="none" autocorrect="off" spellcheck="false"
                placeholder="Collaborators — @username, @username">
+        <div class="delay-chips collab-chip-row" id="collab-chips"></div>
         <div class="collab-hint">Up to 3 public accounts, invited as co-authors. They must accept before the post shows on their profile. Not available on stories.</div>
       </div>
 
@@ -901,6 +904,7 @@
       <input class="collab-input" id="detail-collab" type="text"
              autocapitalize="none" autocorrect="off" spellcheck="false"
              placeholder="Collaborators — @username, @username">
+      <div class="delay-chips collab-chip-row" id="detail-collab-chips"></div>
       <div class="collab-hint" id="detail-collab-hint">Up to 3 public accounts, invited as co-authors.</div>
     </div>
 
@@ -1958,6 +1962,7 @@ async function schedulePost() {
     $('picker-grid').innerHTML = '';
     $('caption-input').value = '';
     $('collab-input').value = '';
+    syncCollabChips('collab-chips', '');
     _syncChips('reel-chips', null);
     _syncChips('story-chips', null);
     $('companion-time-input').value = '18:23';
@@ -2139,6 +2144,10 @@ function openDetail(post) {
   // Same for anything already published: the container is long gone.
   $('detail-collab').value = formatCollaborators(post.collaborators);
   $('detail-collab').disabled = !isScheduled || !!post.outpost_id;
+  syncCollabChips('detail-collab-chips', $('detail-collab').value);
+  document.querySelectorAll('#detail-collab-chips .collab-chip').forEach(btn => {
+    btn.disabled = $('detail-collab').disabled;
+  });
   const collabHint = !isScheduled
     ? ''   // reason is obvious from the status badge
     : post.outpost_id
@@ -2352,6 +2361,49 @@ function parseCollaborators(raw) {
 function formatCollaborators(list) {
   return (list || []).map(u => '@' + u).join(', ');
 }
+
+// Quick-pick chips for accounts we tag often. Clicking a chip toggles that
+// username in the input (respecting the same 3-max / de-dupe rules as free
+// typing); typing manually keeps the chips in sync via the 'input' listener.
+const COLLAB_PRESETS = ['iiii.ai', 'epicworldaiart', 'art.ai.future', 'aicccreatorshub', 'echoesmag.ai'];
+
+function renderCollabChips(chipsId, inputId) {
+  $(chipsId).innerHTML = COLLAB_PRESETS.map(u =>
+    `<button type="button" class="delay-chip collab-chip" data-username="${escHtml(u)}"
+             onclick="toggleCollabPreset('${inputId}','${chipsId}',this)">@${escHtml(u)}</button>`
+  ).join('');
+}
+
+function syncCollabChips(chipsId, rawValue) {
+  const list = parseCollaborators(rawValue).map(u => u.toLowerCase());
+  document.querySelectorAll(`#${chipsId} .collab-chip`).forEach(btn => {
+    btn.classList.toggle('active', list.includes(btn.dataset.username.toLowerCase()));
+  });
+}
+
+function toggleCollabPreset(inputId, chipsId, btnEl) {
+  const input = $(inputId);
+  if (input.disabled) return;
+  const username = btnEl.dataset.username;
+  const list = parseCollaborators(input.value);
+  const idx = list.findIndex(u => u.toLowerCase() === username.toLowerCase());
+  if (idx >= 0) {
+    list.splice(idx, 1);
+  } else {
+    if (list.length >= 3) {
+      ArtRium.toast('At most 3 collaborators per post', true);
+      return;
+    }
+    list.push(username);
+  }
+  input.value = formatCollaborators(list);
+  syncCollabChips(chipsId, input.value);
+}
+
+renderCollabChips('collab-chips', 'collab-input');
+renderCollabChips('detail-collab-chips', 'detail-collab');
+$('collab-input').addEventListener('input', () => syncCollabChips('collab-chips', $('collab-input').value));
+$('detail-collab').addEventListener('input', () => syncCollabChips('detail-collab-chips', $('detail-collab').value));
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 $('offset-days').addEventListener('input', updateComputedDate);

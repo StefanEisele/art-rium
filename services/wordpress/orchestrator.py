@@ -43,6 +43,7 @@ from core.config import settings
 from core.imaging import prepare_for_vlm
 from core.models import ANIMATE_WORKFLOWS, Article, Image, Video
 from core.video_thumb import extract_video_frames
+from services.image.rendition import resolve_image_path
 from services.ollama.articles import write_article, write_modal_article, write_rich_article
 from services.wordpress.client import request_json
 from services.wordpress.renderers import (
@@ -98,7 +99,9 @@ async def _encode_for_vlm(images: list[Image]) -> list[bytes]:
     Raises FileNotFoundError if any source is missing on disk."""
     jpgs: list[bytes] = []
     for img in images:
-        src = settings.storage_dir / img.filepath
+        # The rendition the article will actually embed (WP media upload
+        # resolves the same way), so the writer describes what readers see.
+        src = resolve_image_path(img)
         if not src.exists():
             raise FileNotFoundError(f"Source image missing on disk: {src}")
         vlm_jpg, _ = await prepare_for_vlm(src)

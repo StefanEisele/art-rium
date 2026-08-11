@@ -494,6 +494,53 @@
     }
     .notes-textarea:focus { border-color: var(--accent); }
 
+    /* ── Auto-enhance ("Zauberstab") ── */
+    .enhance-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    }
+    .enhance-row {
+      display: flex; align-items: center; gap: 10px;
+    }
+    .wand-btn {
+      flex-shrink: 0;
+      width: 40px; height: 40px; border-radius: 10px;
+      border: 1px solid var(--border); background: var(--surface2);
+      color: var(--text); font-size: 19px; line-height: 1;
+      cursor: pointer; -webkit-tap-highlight-color: transparent;
+      display: flex; align-items: center; justify-content: center;
+      transition: background .15s, border-color .15s, transform .1s;
+    }
+    .wand-btn:hover:not(:disabled) { border-color: var(--accent); }
+    .wand-btn:active:not(:disabled) { transform: scale(0.94); }
+    .wand-btn.on { background: var(--accent-soft); border-color: var(--accent); }
+    .wand-btn:disabled { opacity: 0.5; cursor: default; }
+    /* Pulses while the render runs — the pass is sub-second, so a spinner
+       would flash in and out; a pulse on the control that was pressed reads
+       as "working" without moving any layout. */
+    .wand-btn.busy { animation: wand-pulse 0.9s ease-in-out infinite; }
+    @keyframes wand-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+    #enhance-strength { flex: 1; min-width: 0; accent-color: var(--accent); }
+    .enhance-pct {
+      font-size: 12px; color: var(--text-dim);
+      font-variant-numeric: tabular-nums; min-width: 40px; text-align: right;
+    }
+    .compare-btn {
+      border: 1px solid var(--border); background: var(--surface2);
+      color: var(--text-dim); border-radius: 7px;
+      font-size: 11px; padding: 4px 8px; cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none; -webkit-user-select: none;
+    }
+    .compare-btn:active { color: var(--accent); border-color: var(--accent); }
+    .enhance-hint { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+    .enhance-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+    .enhance-chip {
+      font-size: 10px; padding: 2px 6px; border-radius: 5px;
+      background: var(--surface2); color: var(--text-dim);
+      font-variant-numeric: tabular-nums;
+    }
+
     /* ── Action buttons ── */
     .action-row {
       display: flex; gap: 10px;
@@ -642,6 +689,21 @@
   </div>
 
   <div class="modal-body">
+
+    <!-- Auto-enhance ("Zauberstab") -->
+    <div>
+      <div class="section-label enhance-head">
+        <span>Verbessern</span>
+        <button class="compare-btn" id="compare-btn" style="display:none">Original halten</button>
+      </div>
+      <div class="enhance-row">
+        <button class="wand-btn" id="wand-btn" onclick="onWand()" title="Automatisch verbessern">🪄</button>
+        <input type="range" id="enhance-strength" min="0" max="150" step="5" value="100" style="display:none">
+        <span class="enhance-pct" id="enhance-pct" style="display:none">100%</span>
+      </div>
+      <div class="enhance-hint" id="enhance-hint"></div>
+      <div class="enhance-chips" id="enhance-chips"></div>
+    </div>
 
     <!-- Title -->
     <div>
@@ -1060,10 +1122,12 @@ const populateModal = (img) => {
   state.modal.rating = img.rating || null;
   state.modal.tags   = img.tags ? [...img.tags] : [];
 
-  // Full-quality image in modal
-  $('modal-img').src = withAuth(img.url);
+  // Full-quality image in modal — the enhanced rendition when there is one,
+  // so the modal shows what publishing will use.
+  $('modal-img').src = withAuth(img.primary_url || img.url);
   $('modal-img').alt = img.filename;
 
+  renderEnhanceUI(img);
   renderStars(state.modal.rating);
 
   const promptEl = $('modal-prompt');
@@ -1105,6 +1169,129 @@ const populateModal = (img) => {
 
   $('nav-prev').disabled = state.modal.index <= 0;
   $('nav-next').disabled = state.modal.index >= state.images.length - 1;
+};
+
+// ══════════════════════════════════════════════════════════
+// AUTO-ENHANCE ("Zauberstab")
+// ══════════════════════════════════════════════════════════
+// Same two-speed shape as the video tool's grain pass: dragging the slider
+// renders a downscaled *preview* server-side, and only releasing it commits
+// the real sibling file. Both go through the identical analyse→plan→apply
+// chain, so what is judged during the drag is what gets written.
+let enhancePreviewTimer = null;
+
+/** Turn the applied Adjustments into short human chips ("what did it do?"). */
+const enhanceParamChips = (p) => {
+  if (!p) return [];
+  const pct = (v) => Math.round(v * 100);
+  const chips = [];
+  if (p.black_point > 0 || p.white_point < 255) chips.push(`Tonwerte ${p.black_point}–${p.white_point}`);
+  if (Math.abs(p.gamma - 1) > 0.01) {
+    chips.push(`Belichtung ${p.gamma < 1 ? '+' : '−'}${Math.abs(pct(1 - p.gamma))}%`);
+  }
+  if (p.shadows    > 0.01) chips.push(`Schatten +${pct(p.shadows)}`);
+  if (p.highlights > 0.01) chips.push(`Lichter −${pct(p.highlights)}`);
+  if (p.contrast   > 0.01) chips.push(`Kontrast +${pct(p.contrast)}`);
+  if (p.vibrance   > 0.01) chips.push(`Vibrance +${pct(p.vibrance)}`);
+  if (p.definition > 0.01) chips.push(`Schärfe +${pct(p.definition)}`);
+  if ((p.wb_gains || []).some(g => Math.abs(g - 1) > 0.005)) chips.push('Weißabgleich');
+  return chips;
+};
+
+const renderEnhanceUI = (img) => {
+  const on = !!img.enhanced;
+  const strength = img.enhance_strength || 100;
+
+  $('wand-btn').classList.toggle('on', on);
+  $('enhance-strength').value = strength;
+  $('enhance-pct').textContent = `${strength}%`;
+  ['enhance-strength', 'enhance-pct', 'compare-btn'].forEach(id => {
+    $(id).style.display = on ? '' : 'none';
+  });
+
+  $('enhance-hint').textContent = on
+    ? 'Regler ändert die Stärke — 0 % entfernt die Verbesserung wieder.'
+    : 'Ein Klick analysiert das Bild und räumt Tonwerte, Brillanz und Farbe auf.';
+  $('enhance-chips').innerHTML = (on ? enhanceParamChips(img.enhance_params) : [])
+    .map(c => `<span class="enhance-chip">${ArtRium.escHtml(c)}</span>`).join('');
+};
+
+const setEnhanceBusy = (busy) => {
+  $('wand-btn').classList.toggle('busy', busy);
+  $('wand-btn').disabled = busy;
+  $('enhance-strength').disabled = busy;
+};
+
+/** Commit `strength` (0 = remove) and adopt the returned row everywhere. */
+const applyEnhance = async (strength) => {
+  const img = state.modal.image;
+  const idx = state.modal.index;
+  setEnhanceBusy(true);
+  try {
+    const r = await apiFetch(`/api/images/${img.id}/enhance`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ strength }),
+    });
+    const updated = await r.json();
+    // state.modal.image IS the array element, so this keeps the grid, the
+    // modal and any later navigation on one object.
+    Object.assign(img, updated);
+    $('modal-img').src = withAuth(updated.primary_url);
+    renderEnhanceUI(updated);
+    refreshGridItem(idx, updated);
+    ArtRium.toast(updated.enhanced ? 'Verbessert' : 'Verbesserung entfernt');
+  } catch (e) {
+    ArtRium.toast('Verbessern fehlgeschlagen: ' + e.message, true);
+    renderEnhanceUI(img);   // put the slider back where the row actually is
+  } finally {
+    setEnhanceBusy(false);
+  }
+};
+
+/** The wand itself: a toggle, like Apple's Auto button. */
+const onWand = () => {
+  const img = state.modal.image;
+  if (!img) return;
+  applyEnhance(img.enhanced ? 0 : parseInt($('enhance-strength').value, 10) || 100);
+};
+
+const previewEnhance = (strength) => {
+  const img = state.modal.image;
+  if (!img) return;
+  clearTimeout(enhancePreviewTimer);
+  // Debounced: a drag fires `input` per pixel, and every one of those would
+  // otherwise be a render request.
+  enhancePreviewTimer = setTimeout(() => {
+    $('modal-img').src = withAuth(`/api/images/${img.id}/enhance/preview?strength=${strength}`);
+  }, 130);
+};
+
+const showRendition = (which) => {
+  const img = state.modal.image;
+  if (!img) return;
+  $('modal-img').src = withAuth(which === 'original' ? img.url : (img.primary_url || img.url));
+};
+
+const initEnhanceControls = () => {
+  const slider = $('enhance-strength');
+  slider.addEventListener('input', () => {
+    $('enhance-pct').textContent = `${slider.value}%`;
+    previewEnhance(slider.value);
+  });
+  // `change` fires on release (and on keyboard commit), which is the point
+  // where a real render is worth paying for.
+  slider.addEventListener('change', () => applyEnhance(parseInt(slider.value, 10)));
+
+  // Press-and-hold to see the untouched original. Pointer events cover mouse
+  // and touch in one path; `contextmenu` is suppressed so a long press on
+  // mobile compares instead of opening the image menu.
+  const cmp = $('compare-btn');
+  cmp.addEventListener('pointerdown', (e) => { e.preventDefault(); showRendition('original'); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
+    cmp.addEventListener(ev, () => showRendition('primary'))
+  );
+  cmp.addEventListener('contextmenu', (e) => e.preventDefault());
 };
 
 // ── Stars ──
@@ -1274,6 +1461,17 @@ const refreshGridItem = (idx, img) => {
   if (titleEl) {
     titleEl.className = 'grid-title' + (img.title ? '' : ' placeholder');
     titleEl.textContent = img.title || 'No title';
+  }
+  // The thumbnail file is re-cut in place when the enhancement changes, so the
+  // src only differs by its version marker — without reassigning it the grid
+  // would keep showing the previous rendition from cache.
+  const thumbEl = el.querySelector('img');
+  if (thumbEl && img.thumb_url) {
+    // Compare the attribute, not `.src`: the latter resolves to an absolute
+    // URL and would never match, re-fetching the thumbnail on every rating
+    // or title save too.
+    const next = withAuth(img.thumb_url);
+    if (thumbEl.getAttribute('src') !== next) thumbEl.src = next;
   }
 };
 
@@ -1477,6 +1675,7 @@ document.addEventListener('keydown', e => {
 // ══════════════════════════════════════════════════════════
 window.addEventListener('load', () => {
   $('search-input').addEventListener('input', onSearchInput);
+  initEnhanceControls();
   fetchImages(true);
   loadLoraLabels();
   if ('serviceWorker' in navigator) {

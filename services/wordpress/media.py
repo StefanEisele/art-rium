@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import settings
 from core.imaging import prepare_for_vlm, prepare_for_wp
 from core.models import Image
+from services.image.rendition import resolve_image_path
 from services.ollama.analysis import analyze_image
 from services.wordpress.client import request_json, upload_binary
 
@@ -82,7 +83,11 @@ async def upload_image_to_wp(image: Image, db: AsyncSession) -> dict:
                 "was_already_uploaded": True,
             }
 
-        src = settings.storage_dir / image.filepath
+        # The enhanced rendition when there is one — WP is a publishing target,
+        # so it gets the version the user signed off on. Both the uploaded
+        # binary and the VLM payload derive from this same source, so the alt
+        # text describes the picture readers will actually see.
+        src = resolve_image_path(image)
         if not src.exists():
             raise FileNotFoundError(f"Source image missing on disk: {src}")
 

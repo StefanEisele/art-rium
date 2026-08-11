@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.models import Image, InstagramPost, InstagramPostMedia, Video
+from services.image.rendition import primary_filename, primary_filepath
 
 MediaKind = Literal["image", "video"]
 
@@ -95,7 +96,13 @@ async def load_media_refs(post: InstagramPost, db: AsyncSession) -> list[MediaRe
         if m.kind == "image":
             img = images.get(m.image_id)
             if img:
-                refs.append(MediaRef("image", img.id, img.filename, img.filepath))
+                # Same reasoning as the video branch below: reading
+                # img.filename/img.filepath straight off the row would publish
+                # the unenhanced original. /share/image resolves either name
+                # out of images_dir, so the enhanced sibling needs no routing.
+                refs.append(MediaRef(
+                    "image", img.id, primary_filename(img), primary_filepath(img),
+                ))
         elif m.kind == "video":
             vid = videos.get(m.video_id)
             if vid and vid.status == "done" and vid.filename and vid.filepath:

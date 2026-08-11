@@ -56,6 +56,15 @@ class Image(Base):
     tags: Mapped[list[str] | None] = mapped_column(ARRAY(String))
     rating: Mapped[int | None] = mapped_column(SmallInteger)       # 1–5, personal curation
     notes: Mapped[str | None] = mapped_column(Text)
+    # Auto-enhance ("Zauberstab", services/image/enhance.py). Like the video
+    # grain pass, this writes a *sibling* file and never overwrites the
+    # original, and is always re-rendered from the original so re-running at a
+    # different strength replaces the correction instead of stacking it.
+    # Precedence for publishing lives in services/image/rendition.py.
+    enhance_strength: Mapped[int | None] = mapped_column(SmallInteger)  # 0–150 UI scale; null = not enhanced
+    enhanced_filename: Mapped[str | None] = mapped_column(String(512))  # basename, sibling of `filename`
+    enhanced_filepath: Mapped[str | None] = mapped_column(Text)         # relative to storage_dir
+    enhance_params: Mapped[dict | None] = mapped_column(JSONB)          # the Adjustments the analysis chose, for the UI
     # WordPress media library (set when uploaded via /api/wordpress/media/upload)
     wp_media_id: Mapped[int | None] = mapped_column(Integer)
     wp_source_url: Mapped[str | None] = mapped_column(Text)

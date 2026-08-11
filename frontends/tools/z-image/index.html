@@ -757,8 +757,11 @@ const progress = {
     setText(DOM_IDS.progSteps, `${value} / ${max}`);
   },
 
-  setNode: (nodeId) => {
-    setText(DOM_IDS.progNode, ArtRium.NODE_LABELS[nodeId] || `Node ${nodeId}`);
+  // The server labels the node for us (services/comfy/node_labels.py) — it is
+  // the only side that knows which workflow this prompt used, and Z-Image,
+  // SDXL and Ernie number their nodes differently.
+  setNode: (nodeId, label) => {
+    setText(DOM_IDS.progNode, label || `Node ${nodeId}`);
   },
 };
 
@@ -773,10 +776,16 @@ const messageHandlers = {
 
   [EVENTS.progress]: (data) => {
     progress.setSteps(data.value, data.max);
+    if (data.node) progress.setNode(data.node, data.label);
   },
 
   [EVENTS.executing]: (data) => {
-    if (data.node) progress.setNode(data.node);
+    // Entering a node: name it, and clear the previous node's step counter so
+    // a finished "20 / 20" does not sit next to the stage that follows it.
+    if (data.node) {
+      progress.setNode(data.node, data.label);
+      setText(DOM_IDS.progSteps, '');
+    }
   },
 
   [EVENTS.imageReady]: (data) => {

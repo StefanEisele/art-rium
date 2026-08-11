@@ -14,19 +14,10 @@ const ArtRium = (() => {
     apiKey:   'z_apikey',
   };
 
-  /** ComfyUI node-ID → human-readable label (used by dashboard and z-image). */
-  const NODE_LABELS = {
-    '39': 'Loading CLIP…',
-    '40': 'Loading VAE…',
-    '41': 'Preparing latent…',
-    '42': 'Zeroing conditions…',
-    '44': 'Sampling…',
-    '45': 'Encoding prompt…',
-    '46': 'Loading model…',
-    '47': 'Setting sampler…',
-    '51': 'Loading LoRA…',
-    '9':  'Decoding image…',
-  };
+  // Stage labels for ComfyUI progress events used to live here as a node-ID
+  // map, which only ever read correctly for the Z-Image workflow — ids are
+  // workflow-local, so SDXL and Ernie showed "Node 12". The server now sends
+  // the label with the event (services/comfy/node_labels.py).
 
   // ── Client-ID / API-key storage ────────────────────────────────────────────
 
@@ -204,7 +195,7 @@ const ArtRium = (() => {
   // ── Public API ─────────────────────────────────────────────────────────────
 
   return {
-    STORAGE_KEYS, NODE_LABELS,
+    STORAGE_KEYS,
     getClientId, getApiKey, saveApiKey, clearApiKey,
     getAuthHeaders, withAuth, apiFetch, makeApiFetch,
     escHtml, toast, setDot, connectWs,

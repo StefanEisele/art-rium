@@ -39,6 +39,7 @@ from core.db import AsyncSessionLocal, get_db
 from core.models import Song
 from core.tasks import safe_create_task
 from services.comfy.client import poll_history, post_workflow, queue_info
+from workers.comfy_listener import get_listener
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/music", dependencies=[Depends(require_auth)])
@@ -236,6 +237,9 @@ async def _run_generation(song_id: uuid.UUID, req: GenerateMusicRequest, seed: i
         async with httpx.AsyncClient(timeout=60) as client:
             prompt_id = await post_workflow(client, wf)
             logger.info("Music job %s → ComfyUI prompt %s", song_id, prompt_id)
+            listener = get_listener()
+            if listener:
+                listener.register_node_labels(prompt_id, wf)
             await _save_comfy_prompt_id(song_id, prompt_id)
 
             _set_progress(song_key, "queued", "Waiting in ComfyUI queue…", 15)
@@ -333,20 +337,26 @@ async def get_job_progress(
             prog["pct"]     = 15
         prog["queue"] = qi
 
-    # Live per-sampler-step pct from the shared ComfyUI WebSocket listener.
-    # Scales the running phase between 40 % and 85 %, then "finalizing"
-    # (saving the MP3) covers the last stretch.
+    # Live stage + per-sampler-step pct from the shared ComfyUI WebSocket
+    # listener. Sampling scales the running phase between 40 % and 85 %; the
+    # stages around it (loading models, decoding, writing the MP3) report no
+    # counter, so they only name themselves. "finalizing" covers the rest.
     listener = getattr(request.app.state, "comfy_listener", None)
     step = listener.get_step_progress(song.comfy_prompt_id) if listener else None
-    if step and step.get("max") and prog["phase"] in ("running", "processing"):
+    if step and prog["phase"] in ("running", "processing"):
         v = int(step.get("value") or 0)
-        m = int(step.get("max")  or 0)
+        m = int(step.get("max")   or 0)
+        label = step.get("label")
         if m > 0:
             ratio = max(0.0, min(1.0, v / m))
             prog["phase"]   = "running"
             prog["pct"]     = int(40 + ratio * 45)
-            prog["message"] = f"Sampling step {v}/{m}…"
+            prog["message"] = f"{label or 'Sampling…'} step {v}/{m}"
             prog["step"]    = {"value": v, "max": m}
+            prog["detail"]  = prog["message"]
+        elif label:
+            prog["phase"]  = "running"
+            prog["detail"] = label
 
     return prog
 

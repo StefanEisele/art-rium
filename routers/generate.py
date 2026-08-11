@@ -157,6 +157,10 @@ async def generate(req: GenerateRequest, request: Request):
             loras=loras,
             workflow_name=workflow_name,
         )
+        # Node ids differ per model (Z-Image / SDXL / Ernie), so the stage
+        # names shown while this prompt runs are derived from the workflow
+        # actually submitted rather than guessed client-side.
+        listener.register_node_labels(prompt_id, workflow)
         prompt_ids.append(prompt_id)
         logger.info(f"Queued [{i+1}/{total}] prompt={prompt_id}")
 

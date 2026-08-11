@@ -411,7 +411,9 @@ const handleMsg = (msg) => {
     strip.setSteps(`${data.value} / ${data.max}`);
   } else if (type === 'executing') {
     strip.show();
-    if (data.node) strip.setLabel(ArtRium.NODE_LABELS[data.node] || 'Generating…');
+    // `label` comes from the server, which knows the submitted workflow —
+    // node ids on their own are workflow-local and unreadable here.
+    if (data.node) strip.setLabel(data.label || 'Generating…');
   } else if (type === 'image_ready') {
     strip.done();
   } else if (type === 'execution_error') {

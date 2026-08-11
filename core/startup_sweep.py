@@ -31,7 +31,14 @@ from sqlalchemy import select
 
 from core.config import settings
 from core.db import AsyncSessionLocal
-from core.models import ImprovSession, PostCompanion, Song, Video, VideoClip
+from core.models import (
+    AUDIO_WORKFLOWS,
+    ImprovSession,
+    PostCompanion,
+    Song,
+    Video,
+    VideoClip,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +138,7 @@ async def backfill_review_clips() -> None:
                         width=meta.get("width"),
                         height=meta.get("height"),
                         fps=meta.get("fps"),
-                        has_audio=(workflow == "ltx_i2v"),
+                        has_audio=(workflow in AUDIO_WORKFLOWS),
                     ))
                     n_clips += 1
             video.status = "done"

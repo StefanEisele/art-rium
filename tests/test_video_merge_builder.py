@@ -52,7 +52,7 @@ class TestBuildMergeCommand:
             "ffmpeg",
             [
                 MergeInput(path=Path("wan.mp4"), has_audio=False, duration=3.25),
-                MergeInput(path=Path("ltx.mp4"), has_audio=True),
+                MergeInput(path=Path("minimax.mp4"), has_audio=True),
             ],
             Path("out.mp4"), 960, 960, 24,
         )
@@ -71,7 +71,7 @@ class TestBuildMergeCommand:
                 "ffmpeg",
                 [
                     MergeInput(path=Path("wan.mp4"), has_audio=False),  # no duration
-                    MergeInput(path=Path("ltx.mp4"), has_audio=True),
+                    MergeInput(path=Path("minimax.mp4"), has_audio=True),
                 ],
                 Path("out.mp4"), 960, 960, 24,
             )

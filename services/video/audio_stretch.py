@@ -1,13 +1,14 @@
-"""Time-stretch LTX-2.3's native audio to match a RIFE-interpolated clip.
+"""Time-stretch a video model's natively generated audio to match a
+RIFE-interpolated clip.
 
 RIFE VFI multiplies frame count while VHS_VideoCombine's frame_rate stays
-constant, so a RIFE'd LTX segment's video track ends up `rife_multiplier`x
-longer in real time than its native audio track. But the *source* file we
-receive isn't just the short native audio — VHS_VideoCombine itself already
-pads it with trailing silence out to (roughly) the video's length before we
-ever see it (`apad=whole_dur=...` in VideoHelperSuite's combine_video). So
-the real generated audio only occupies the first `native_length/fps` seconds
-of the source's audio stream; the rest is dead air.
+constant, so a RIFE'd segment's video track ends up `rife_multiplier`x
+longer in real time than the audio the model generated alongside it. But the
+*source* file we receive isn't just the short native audio — VHS_VideoCombine
+itself already pads it with trailing silence out to (roughly) the video's
+length before we ever see it (`apad=whole_dur=...` in VideoHelperSuite's
+combine_video). So the real generated audio only occupies the first
+`native_length/fps` seconds of the source's audio stream; the rest is dead air.
 
 This module first trims that padding away, then time-stretches the *real*
 audio via ffmpeg's `rubberband` filter (Rubber Band Library — a phase-vocoder
@@ -15,6 +16,11 @@ with transient detection, tuned here for percussive/transient content like
 footsteps and clicks, which held up far better by ear than plain `atempo`
 resampling in an A/B listening test), and finally pads/trims the result to
 match the video exactly.
+
+Used by the MiniMax H3 generation path (the only workflow with generated
+audio) and by the SEEDVR2 upscale pass when it interpolates — both produce
+exactly this shape. The maths is model-agnostic, needing only how long the
+real audio is before interpolation.
 
 Mirrors the shape of services/video/soundtrack.py and services/improv/mux.py:
 one async entry point + pure cmd builders + a thin _run_ffmpeg wrapper.
@@ -37,7 +43,7 @@ def build_rubberband_filter(ratio: float, *, detector: str = "percussive") -> st
     atempo, a single stage covers any ratio in [0.01, 100] — no chaining
     needed. `detector=percussive` preserves transient attacks (footsteps,
     clicks) noticeably better than the default compound detector for
-    LTX's generated sound effects.
+    generated sound effects.
 
     Raises ValueError for a non-positive ratio (nothing sane to build).
     """
@@ -78,7 +84,7 @@ def build_stretch_cmd(
     ]
 
 
-async def stretch_ltx_audio(
+async def stretch_native_audio(
     src: Path,
     dest: Path,
     *,
@@ -86,26 +92,49 @@ async def stretch_ltx_audio(
     fps: int,
     ffmpeg_path: str = "ffmpeg",
 ) -> None:
-    """Re-sync `src` (a RIFE'd LTX segment: correct-length video, native
+    """Re-sync `src` (a RIFE'd segment: correct-length video, native
     short-length audio) into `dest`, with audio stretched to match.
 
     `native_length`/`fps` give the *exact* pre-RIFE audio duration analytically
-    (that's what LTXVEmptyLatentAudio was built at — no need to probe it). The
-    video's actual RIFE'd duration is probed rather than computed from the
+    (that's the frame count the AV latent was built at — no need to probe it).
+    Raises RuntimeError if ffmpeg fails or the probe comes back empty.
+    """
+    await stretch_audio_to_video(
+        src, dest,
+        native_audio_duration=native_length / fps,
+        ffmpeg_path=ffmpeg_path,
+    )
+
+
+async def stretch_audio_to_video(
+    src: Path,
+    dest: Path,
+    *,
+    native_audio_duration: float,
+    ffmpeg_path: str = "ffmpeg",
+) -> None:
+    """Same re-sync, for callers that know the real audio's length in seconds
+    rather than in latent frames.
+
+    That is the upscale pass's situation: it interpolates a *finished* clip, so
+    the audio it starts from is however long that file was — a probe, not a
+    frame count the caller chose.
+
+    The video's actual RIFE'd duration is probed rather than computed from the
     RIFE multiplier, since RIFE VFI's real output frame count isn't a clean
-    multiply — probing self-corrects for that. Raises RuntimeError if ffmpeg
-    fails or the probe comes back empty.
+    multiply — probing self-corrects for that.
     """
     video_duration = await probe_video_duration(src)
     if video_duration <= 0:
         raise RuntimeError(f"Could not probe video duration of {src}")
-    native_audio_duration = native_length / fps
+    if native_audio_duration <= 0:
+        raise RuntimeError(f"Non-positive native audio duration: {native_audio_duration!r}")
     ratio = native_audio_duration / video_duration
     cmd = build_stretch_cmd(
         ffmpeg_path, src, dest,
         ratio=ratio, native_audio_duration=native_audio_duration, target_duration=video_duration,
     )
-    await _run_ffmpeg(cmd, label="ltx_audio_stretch")
+    await _run_ffmpeg(cmd, label="native_audio_stretch")
 
 
 async def _run_ffmpeg(cmd: list[str], *, label: str) -> None:

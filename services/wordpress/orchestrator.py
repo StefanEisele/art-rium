@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.imaging import prepare_for_vlm
-from core.models import Article, Image, Video
+from core.models import ANIMATE_WORKFLOWS, Article, Image, Video
 from core.video_thumb import extract_video_frames
 from services.ollama.articles import write_article, write_modal_article, write_rich_article
 from services.wordpress.client import request_json
@@ -421,11 +421,11 @@ async def generate_rich_articles_for_series(
 def _video_kind_label(video: Video) -> str:
     """Human-readable kind label for the LLM prompt.
 
-    Animate videos (workflow i2v_multi / flf2v) get described as 'animate clip';
+    Animate videos (i2v_multi / minimax_i2v / flf2v) get described as 'animate clip';
     Improv mixes get described by their mix kind. Anything else falls back to
     a generic label."""
     wf = video.workflow or ""
-    if wf in ("i2v_multi", "flf2v"):
+    if wf in ANIMATE_WORKFLOWS:
         return "animate clip"
     if wf == "improv_synth":
         return "piano improvisation (synth mix)"

@@ -2,7 +2,7 @@
 Cross-job clip merge — concatenate library clips (possibly from different
 workflows) into one video.
 
-Clips from i2v_multi / flf2v (Wan, silent, h265 10-bit) and ltx_i2v (h264,
+Clips from i2v_multi / flf2v (Wan, silent, h265 10-bit) and minimax_i2v (h264,
 native audio) may differ in resolution, fps and audio presence, so every
 input is normalized in one ffmpeg pass:
 

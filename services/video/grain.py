@@ -143,7 +143,7 @@ def _grain_cmd(ffmpeg: str, src: Path, out: Path, strength: int) -> list[str]:
         ffmpeg, "-y",
         "-i", str(src),
         *_encode_args(strength),
-        # Audio (an attached soundtrack, or LTX's native track) is passed
+        # Audio (an attached soundtrack, or the model's native track) is passed
         # through untouched; this pass only ever re-encodes the picture.
         "-c:a", "copy",
         "-movflags", "+faststart",

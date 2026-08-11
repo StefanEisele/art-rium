@@ -3,6 +3,7 @@ Ollama chat transport — the generic POST /api/chat wrapper used by every
 higher-level Ollama call (analysis, article writers), plus basic
 health/VRAM-management helpers that talk to Ollama directly.
 """
+import asyncio
 import base64
 import json
 import logging
@@ -15,6 +16,15 @@ import httpx
 from core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Ollama ≥0.17 sizes the default context window from total VRAM (32k on this
+# machine) and multiplies it by the parallel-slot count, so a model loaded
+# without an explicit num_ctx balloons to its full trained context — the 3B
+# titler then holds 13 GB of KV cache and starves ComfyUI. 16k covers the
+# largest real payload (20 VLM images at 512px ≈ 8k tokens plus prompt text)
+# at ~1.3 GB of KV. Callers that need a different window pass their own
+# num_ctx, which wins over this default.
+DEFAULT_NUM_CTX = 16384
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 
@@ -98,9 +108,8 @@ async def _chat_json(
         "messages": messages,
         "format":   "json",
         "stream":   False,
+        "options":  {"num_ctx": DEFAULT_NUM_CTX, **(options or {})},
     }
-    if options is not None:
-        payload["options"] = options
     if keep_alive is not None:
         payload["keep_alive"] = keep_alive
     if think is not None:
@@ -214,3 +223,37 @@ async def unload_model(model: str, timeout: float = 30.0) -> None:
             )
     except Exception as exc:
         logger.warning("Ollama: unload of %s failed (%s) — proceeding anyway", model, exc)
+
+
+async def wait_until_unloaded(timeout: float = 30.0, poll: float = 0.25) -> bool:
+    """Block until Ollama reports no model resident. Returns True if the card
+    came free, False on timeout.
+
+    `unload_model` only waits for Ollama to *accept* the eviction, not to carry
+    it out: measured on this box, the POST returns after ~250 ms while the
+    runner subprocess still holds its VRAM for a few hundred ms more. Whoever
+    grabs the GPU next — ComfyUI loading a 19.5 GB model — must not start
+    inside that window, so callers that are about to hand the card over need a
+    real confirmation rather than a best-effort request.
+
+    Best-effort like the rest of this module: a probe that cannot reach Ollama
+    reports success, because a dead Ollama is holding nothing.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{settings.ollama_host}/api/ps")
+            resident = [m.get("name") for m in r.json().get("models", [])]
+        except Exception as exc:
+            logger.warning("Ollama: /api/ps probe failed (%s) — assuming free", exc)
+            return True
+        if not resident:
+            return True
+        if asyncio.get_event_loop().time() >= deadline:
+            logger.warning(
+                "Ollama: still holding %s after %.0fs — proceeding anyway",
+                ", ".join(str(m) for m in resident), timeout,
+            )
+            return False
+        await asyncio.sleep(poll)

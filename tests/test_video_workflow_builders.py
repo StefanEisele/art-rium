@@ -3,6 +3,7 @@ Unit tests for the flf2v per-transition workflow builder (pure node-graph
 wiring, no ComfyUI) and the transition-prompt VLM wrapper's pad/truncate
 logic (mocked _chat_json, no Ollama).
 """
+import asyncio
 import uuid
 
 import pytest
@@ -10,15 +11,27 @@ import pytest
 from routers import video as video_module
 from routers.video import (
     _build_flf2v_single_workflow,
-    _build_ltx_single_workflow,
+    _build_minimax_single_workflow,
     _grain_source,
     _is_graining,
+    _is_upscaling,
     _render_version,
+    _upscale_source,
+    _validate_upscale_target,
+    adapt_minimax_canvas,
+    align_minimax_length,
+)
+from services.video.upscale import (
+    build_upscale_workflow,
+    clamp_resolution,
+    clamp_rife,
+    estimate_seconds,
+    output_dimensions,
 )
 from services.ollama import analysis as analysis_module
 from services.ollama.analysis import (
     generate_i2v_motion_prompts,
-    generate_ltx_motion_prompts,
+    generate_minimax_motion_prompts,
     generate_transition_prompts,
 )
 
@@ -92,48 +105,152 @@ class TestBuildFlf2vSingleWorkflow:
         assert wf["t0_pos"]["inputs"]["text"] == "a specific transition prompt"
 
 
-class TestBuildLtxSingleWorkflow:
+class TestAlignMinimaxLength:
+    """MiniMax H3 only accepts frame counts on a 17k+5 grid (mirrors
+    align_frame_count in comfy_extras/nodes_minimax_h3.py)."""
+
+    @pytest.mark.parametrize("requested,expected", [
+        (124, 124),   # already on the grid (the node's own default, ~5s)
+        (100, 107),   # snaps up
+        (5, 5),       # the grid's floor
+        (1, 5),       # below the floor is lifted to it
+        (363, 379),   # past the trained range still lands on the grid
+    ])
+    def test_snaps_up_onto_the_grid(self, requested, expected):
+        assert align_minimax_length(requested) == expected
+
+    def test_every_result_satisfies_the_model_constraint(self):
+        assert all(align_minimax_length(n) % 17 == 5 for n in range(1, 400))
+
+
+class TestAdaptMinimaxCanvas:
+    """The conditioning node does not clamp its own width/height, so an
+    off-canvas request would really be sampled off-canvas."""
+
+    @pytest.mark.parametrize("size", [(768, 768), (1344, 768), (768, 1344), (1024, 768)])
+    def test_native_canvases_pass_through_untouched(self, size):
+        assert adapt_minimax_canvas(*size) == size
+
+    @pytest.mark.parametrize("size", [(864, 480), (480, 864)])
+    def test_small_canvases_are_not_enlarged(self, size):
+        # The UI ships these two deliberately: below the model's native 768px
+        # short edge, to buy back sampling time. An adapter that "helpfully"
+        # scaled them up to native would make that choice impossible to express.
+        assert adapt_minimax_canvas(*size) == size
+
+    def test_oversized_landscape_is_pulled_onto_the_canvas(self):
+        # 1920x1088 is ~2x the model's pixel budget; the aspect ratio survives.
+        w, h = adapt_minimax_canvas(1920, 1088)
+        assert (w, h) == (1344, 768)
+
+    def test_oversized_portrait_is_pulled_onto_the_canvas(self):
+        assert adapt_minimax_canvas(1088, 1920) == (768, 1344)
+
+    def test_result_is_always_a_multiple_of_32_within_the_pixel_cap(self):
+        for w, h in [(960, 960), (1280, 704), (704, 1280), (1500, 500), (500, 1500)]:
+            aw, ah = adapt_minimax_canvas(w, h)
+            assert aw % 32 == 0 and ah % 32 == 0
+            # Rounding to 32 can nudge one axis a step past the nominal cap.
+            assert aw * ah <= 768 * 1344 * 1.05
+
+
+class TestBuildMinimaxSingleWorkflow:
     def test_default_no_rife_node_wired_straight_from_decode(self):
-        wf, save_id, _ = _build_ltx_single_workflow(
-            "img.png", "a prompt", 25, 960, 960, 24, "prefix",
+        wf, save_id, _ = _build_minimax_single_workflow(
+            "img.png", "a prompt", 124, 768, 768, "prefix",
         )
-        assert "ltx_rife" not in wf
-        assert wf[save_id]["inputs"]["images"] == ["ltx_vdec", 0]
+        assert "mmx_rife" not in wf
+        assert wf[save_id]["inputs"]["images"] == ["mmx_vdec", 0]
 
     def test_rife_multiplier_inserts_rife_node(self):
-        wf, save_id, _ = _build_ltx_single_workflow(
-            "img.png", "a prompt", 25, 960, 960, 24, "prefix", 3,
+        wf, save_id, _ = _build_minimax_single_workflow(
+            "img.png", "a prompt", 124, 768, 768, "prefix", 3,
         )
-        assert wf["ltx_rife"]["class_type"] == "RIFE VFI"
-        assert wf["ltx_rife"]["inputs"]["multiplier"] == 3
-        assert wf["ltx_rife"]["inputs"]["frames"] == ["ltx_vdec", 0]
-        assert wf[save_id]["inputs"]["images"] == ["ltx_rife", 0]
+        assert wf["mmx_rife"]["class_type"] == "RIFE VFI"
+        assert wf["mmx_rife"]["inputs"]["multiplier"] == 3
+        assert wf["mmx_rife"]["inputs"]["frames"] == ["mmx_vdec", 0]
+        assert wf[save_id]["inputs"]["images"] == ["mmx_rife", 0]
 
     def test_audio_always_wired_from_native_decode_regardless_of_rife(self):
-        # Native LTX audio is intentionally left at its pre-RIFE length — the
-        # caller (services.video.audio_stretch) re-syncs it afterward.
-        wf, save_id, _ = _build_ltx_single_workflow(
-            "img.png", "a prompt", 25, 960, 960, 24, "prefix", 4,
+        # The generated audio is intentionally left at its pre-RIFE length —
+        # the caller (services.video.audio_stretch) re-syncs it afterward.
+        wf, save_id, _ = _build_minimax_single_workflow(
+            "img.png", "a prompt", 124, 768, 768, "prefix", 4,
         )
-        assert wf[save_id]["inputs"]["audio"] == ["ltx_adec", 0]
+        assert wf[save_id]["inputs"]["audio"] == ["mmx_adec", 0]
 
-    def test_frame_count_snapped_to_8n_plus_1_and_returned(self):
-        _, _, length = _build_ltx_single_workflow(
-            "img.png", "prompt", 30, 960, 960, 24, "prefix",
+    def test_muxer_never_trims_the_video_back_to_the_audio(self):
+        # RIFE lengthens the video while the generated audio stays short (we
+        # stretch it afterwards). If VHS trimmed to the audio here, the whole
+        # interpolation pass would be silently discarded.
+        wf, save_id, _ = _build_minimax_single_workflow(
+            "img.png", "a prompt", 124, 768, 768, "prefix", 3,
         )
-        assert length == 33  # (30-1+4)//8*8+1
+        assert wf[save_id]["inputs"]["trim_to_audio"] is False
 
-    def test_frame_count_already_valid_is_unchanged(self):
-        _, _, length = _build_ltx_single_workflow(
-            "img.png", "prompt", 49, 960, 960, 24, "prefix",
+    def test_video_and_audio_decode_the_same_av_latent(self):
+        # H3's defining property: one sampler pass yields both streams, so they
+        # are in sync without any alignment step.
+        wf, _, _ = _build_minimax_single_workflow(
+            "img.png", "a prompt", 124, 768, 768, "prefix",
         )
-        assert length == 49
+        assert wf["mmx_vdec"]["inputs"]["samples"] == ["mmx_ks", 0]
+        assert wf["mmx_adec"]["inputs"]["samples"] == ["mmx_ks", 0]
+        assert wf["mmx_vdec"]["inputs"]["vae"] == ["mmx_vae", 0]
+        assert wf["mmx_adec"]["inputs"]["vae"] == ["mmx_avae", 0]
 
-    def test_prompt_lands_in_positive_clip_encode(self):
-        wf, _, _ = _build_ltx_single_workflow(
-            "img.png", "a specific ltx prompt", 25, 960, 960, 24, "prefix",
+    def test_frame_count_is_snapped_and_returned(self):
+        wf, _, length = _build_minimax_single_workflow(
+            "img.png", "prompt", 100, 768, 768, "prefix",
         )
-        assert wf["ltx_pos"]["inputs"]["text"] == "a specific ltx prompt"
+        assert length == 107
+        # The node must be asked for the same length the caller was told about,
+        # or the audio-stretch maths is computed against the wrong duration.
+        assert wf["mmx_i2v"]["inputs"]["length"] == 107
+
+    def test_canvas_is_adapted_consistently_across_the_graph(self):
+        wf, _, _ = _build_minimax_single_workflow(
+            "img.png", "prompt", 124, 1920, 1088, "prefix",
+        )
+        assert wf["mmx_i2v"]["inputs"]["width"] == 1344
+        assert wf["mmx_i2v"]["inputs"]["height"] == 768
+        # The pre-scale must target the same canvas, otherwise the node's own
+        # aspect-ignoring stretch kicks in and distorts the frame.
+        assert wf["mmx_scale"]["inputs"]["width"] == 1344
+        assert wf["mmx_scale"]["inputs"]["height"] == 768
+        assert wf["mmx_scale"]["inputs"]["crop"] == "center"
+
+    def test_source_image_reaches_the_node_via_the_center_crop(self):
+        wf, _, _ = _build_minimax_single_workflow(
+            "img.png", "prompt", 124, 768, 768, "prefix",
+        )
+        assert wf["mmx_load"]["inputs"]["image"] == "img.png"
+        assert wf["mmx_scale"]["inputs"]["image"] == ["mmx_load", 0]
+        assert wf["mmx_i2v"]["inputs"]["first_frame"] == ["mmx_scale", 0]
+
+    def test_prompt_lands_in_the_conditioning_node(self):
+        wf, _, _ = _build_minimax_single_workflow(
+            "img.png", "a specific minimax prompt", 124, 768, 768, "prefix",
+        )
+        assert wf["mmx_i2v"]["inputs"]["prompt"] == "a specific minimax prompt"
+
+    def test_sampling_is_guidance_free_off_the_conditioning_output(self):
+        # BasicGuider takes positive only — H3 has no negative prompt / cfg.
+        wf, _, _ = _build_minimax_single_workflow(
+            "img.png", "prompt", 124, 768, 768, "prefix",
+        )
+        assert wf["mmx_guider"]["class_type"] == "BasicGuider"
+        assert wf["mmx_guider"]["inputs"]["conditioning"] == ["mmx_i2v", 0]
+        assert "negative" not in wf["mmx_guider"]["inputs"]
+        assert wf["mmx_ks"]["inputs"]["latent_image"] == ["mmx_i2v", 1]
+
+    def test_save_runs_at_the_models_fixed_frame_rate(self):
+        # The builder takes no fps at all — the muxer must run at the rate the
+        # audio was sampled against, or the two drift apart.
+        wf, save_id, _ = _build_minimax_single_workflow(
+            "img.png", "prompt", 124, 768, 768, "prefix",
+        )
+        assert wf[save_id]["inputs"]["frame_rate"] == 24
 
 
 class TestGenerateTransitionPrompts:
@@ -253,9 +370,9 @@ class TestGenerateI2vMotionPrompts:
         assert progress == [(1, 3), (2, 3), (3, 3)]
 
 
-class TestGenerateLtxMotionPrompts:
+class TestGenerateMinimaxMotionPrompts:
     """Mirrors TestGenerateI2vMotionPrompts — same per-image fan-out helper,
-    different system prompt file (LTX-2.3's audio-aware variant)."""
+    different system prompt file (MiniMax H3's audio-aware variant)."""
 
     async def test_one_call_per_image_with_single_jpg_each(self, monkeypatch):
         calls = []
@@ -264,22 +381,22 @@ class TestGenerateLtxMotionPrompts:
             return {"animation": f"prompt {len(calls)}"}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        result = await generate_ltx_motion_prompts([b"1", b"2", b"3"])
+        result = await generate_minimax_motion_prompts([b"1", b"2", b"3"])
         assert result == ["prompt 1", "prompt 2", "prompt 3"]
         assert len(calls) == 3
         assert all(kw["jpgs"] == [img] for kw, img in zip(calls, [b"1", b"2", b"3"]))
         assert "image 2 of 3" in calls[1]["user_text"]
 
-    async def test_uses_ltx_system_prompt_not_wan(self, monkeypatch):
+    async def test_uses_minimax_system_prompt_not_wan(self, monkeypatch):
         systems = []
         async def fake_chat_json(**kwargs):
             systems.append(kwargs["system"])
             return {"animation": "ok"}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        await generate_ltx_motion_prompts([b"1"])
+        await generate_minimax_motion_prompts([b"1"])
         from services.ollama.chat import _read_prompt
-        assert systems[0] == _read_prompt("video-ltx-motion.md")
+        assert systems[0] == _read_prompt("video-minimax-motion.md")
         assert systems[0] != _read_prompt("video-i2v-motion.md")
 
     async def test_failed_image_yields_empty_slot(self, monkeypatch):
@@ -291,7 +408,7 @@ class TestGenerateLtxMotionPrompts:
             return {"animation": f"prompt {len(calls)}"}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        result = await generate_ltx_motion_prompts([b"1", b"2", b"3"])
+        result = await generate_minimax_motion_prompts([b"1", b"2", b"3"])
         assert result == ["prompt 1", "", "prompt 3"]
 
     async def test_all_calls_failing_raises(self, monkeypatch):
@@ -300,29 +417,38 @@ class TestGenerateLtxMotionPrompts:
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
         with pytest.raises(RuntimeError):
-            await generate_ltx_motion_prompts([b"1", b"2"])
+            await generate_minimax_motion_prompts([b"1", b"2"])
 
     async def test_empty_image_list_raises(self):
         with pytest.raises(RuntimeError):
-            await generate_ltx_motion_prompts([])
+            await generate_minimax_motion_prompts([])
 
     async def test_reads_prompt_file_without_raising(self):
         from services.ollama.chat import _read_prompt
-        text = _read_prompt("video-ltx-motion.md")
+        text = _read_prompt("video-minimax-motion.md")
         assert text.strip()
 
-    async def test_caps_num_predict_low_enough_to_block_a_ramble(self, monkeypatch):
-        # The cap is the backstop behind the system prompt's length rule. It
-        # only works if it is anywhere near the 12-25 word target; the old
-        # value of 220 allowed ~165 words and so capped nothing.
+    async def test_multi_sentence_answers_survive_intact(self, monkeypatch):
+        # H3 clips run 5-15s, so the prompt is deliberately several sentences
+        # plus an Audio: line — truncating to the first sentence (as the
+        # retired LTX path did) would drop the whole soundtrack instruction.
+        answer = "Rust bleeds down the panel. The drip never stops. Audio: slow ticking in a wide hall."
+        async def fake_chat_json(**kwargs):
+            return {"animation": answer}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+
+        result = await generate_minimax_motion_prompts([b"1"])
+        assert result == [answer]
+
+    async def test_num_predict_leaves_room_for_the_audio_line(self, monkeypatch):
         seen = []
         async def fake_chat_json(**kwargs):
             seen.append(kwargs["options"])
             return {"animation": "ok"}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        await generate_ltx_motion_prompts([b"1"])
-        assert seen[0]["num_predict"] <= 100
+        await generate_minimax_motion_prompts([b"1"])
+        assert seen[0]["num_predict"] >= 180
 
 
 class TestGrainSource:
@@ -422,23 +548,427 @@ class TestGrainRenderingFlag:
             video_module._progress.pop(str(v.id), None)
 
 
+class TestUpscaleSource:
+    """The upscale pass reads the *cleanest* audio-bearing rendition. Reading
+    its own output would restore a reconstruction, and reading the grained file
+    would have a restorer treat film grain as detail to sharpen."""
+
+    def _video(self, **kw):
+        from core.models import Video
+        return Video(filepath="videos/clean.mp4", **kw)
+
+    def test_ignores_its_own_output(self):
+        v = self._video(upscale_filename="x_upscale.mp4", upscale_resolution=1080)
+        assert _upscale_source(v).name == "clean.mp4"
+
+    def test_never_reads_the_grained_file(self):
+        v = self._video(grain_filename="x_grain.mp4", grain_strength=40)
+        assert _upscale_source(v).name == "clean.mp4"
+
+    def test_prefers_the_muxed_variant_so_a_soundtrack_survives(self):
+        v = self._video(muxed_filename="x_muxed.mp4")
+        assert _upscale_source(v).name == "x_muxed.mp4"
+
+
+class TestGrainSourcePrefersTheUpscale:
+    """Grain belongs at the delivery resolution — grading the small render and
+    leaving the 1080p one ungrained would also leave _serialize preferring a
+    grained file built from the wrong picture."""
+
+    def _video(self, **kw):
+        from core.models import Video
+        return Video(filepath="videos/clean.mp4", **kw)
+
+    def test_upscale_wins_over_the_muxed_variant(self):
+        v = self._video(muxed_filename="x_muxed.mp4", upscale_filename="x_upscale.mp4")
+        assert _grain_source(v).name == "x_upscale.mp4"
+
+    def test_upscale_wins_over_the_original(self):
+        v = self._video(upscale_filename="x_upscale.mp4")
+        assert _grain_source(v).name == "x_upscale.mp4"
+
+
+class TestUpscaleRenderingFlag:
+    """Re-running at the same resolution leaves upscale_resolution unchanged,
+    so the client needs an in-flight signal of its own — see _is_graining."""
+
+    def _video(self):
+        from core.models import Video
+        return Video(id=uuid.UUID("66666666-7777-8888-9999-000000000000"))
+
+    def test_false_when_nothing_is_running(self):
+        v = self._video()
+        video_module._progress.pop(str(v.id), None)
+        assert _is_upscaling(v) is False
+
+    def test_true_while_an_upscale_is_in_flight(self):
+        v = self._video()
+        video_module._progress[str(v.id)] = {"phase": "upscaling", "message": "…", "pct": 30}
+        try:
+            assert _is_upscaling(v) is True
+            assert _is_graining(v) is False
+        finally:
+            video_module._progress.pop(str(v.id), None)
+
+
+class TestPreflightVram:
+    """Evicting Ollama is not proof the card came free: a cold load already
+    under way cannot be aborted, allocates VRAM progressively, and is not even
+    listed by /api/ps until it finishes. So the submission gate checks the one
+    fact that matters — how much is actually free."""
+
+    GB = 1024 ** 3
+
+    def _devices(self, free_gb, total_gb=16.0):
+        return [{
+            "name": "cuda:0 NVIDIA GeForce RTX 4060 Ti",
+            "vram_free": free_gb * self.GB,
+            "vram_total": total_gb * self.GB,
+        }]
+
+    def _no_waiting(self, monkeypatch, released: list | None = None):
+        """Stub both holders and collapse the wait, so a shortfall fails fast."""
+        monkeypatch.setattr(video_module, "_evict_ollama", lambda: _async_value(None))
+        monkeypatch.setattr(
+            video_module, "_release_comfy_models",
+            lambda: _async_value(released.append(1) if released is not None else None),
+        )
+        monkeypatch.setattr(video_module, "_VRAM_WAIT_TIMEOUT", 0.0)
+        monkeypatch.setattr(video_module, "_VRAM_WAIT_POLL", 0.0)
+        monkeypatch.setattr(video_module, "_COMFY_FREE_SETTLE", 0.0)
+
+    async def test_passes_when_the_card_is_free(self, monkeypatch):
+        monkeypatch.setattr(video_module, "_comfy_devices",
+                            lambda: _async_value(self._devices(15.5)))
+        await video_module._preflight_comfyui("minimax_i2v")  # must not raise
+
+    async def test_a_free_card_is_not_disturbed(self, monkeypatch):
+        """Unloading costs a cold reload, so it must only happen on a shortfall."""
+        released = []
+        monkeypatch.setattr(video_module, "_comfy_devices",
+                            lambda: _async_value(self._devices(15.5)))
+        self._no_waiting(monkeypatch, released)
+        await video_module._preflight_comfyui("minimax_i2v")
+        assert released == []
+
+    async def test_a_shortfall_unloads_comfyui_before_waiting(self, monkeypatch):
+        """The regression this exists for: an upscale queued right after a
+        render found ~3 GB free, and ComfyUI — not Ollama — was holding it, so
+        the old loop re-evicted Ollama for 210 s and then gave up."""
+        released = []
+        monkeypatch.setattr(video_module, "_comfy_devices",
+                            lambda: _async_value(self._devices(3.4)))
+        self._no_waiting(monkeypatch, released)
+        with pytest.raises(RuntimeError, match="still busy"):
+            await video_module._preflight_comfyui("upscale")
+        assert released, "ComfyUI was never asked to unload"
+
+    async def test_refuses_a_minimax_run_on_a_half_full_card(self, monkeypatch):
+        # 14956 MB staged for the text encoder alone — half a card is not a
+        # slow run, it is a CUDA OOM that kills ComfyUI's worker thread.
+        monkeypatch.setattr(video_module, "_comfy_devices",
+                            lambda: _async_value(self._devices(8.0)))
+        self._no_waiting(monkeypatch)
+        with pytest.raises(RuntimeError, match="still busy"):
+            await video_module._preflight_comfyui("minimax_i2v")
+
+    async def test_the_same_card_is_fine_for_a_lighter_workflow(self, monkeypatch):
+        # Wan and the 3B upscaler do not need the whole card.
+        monkeypatch.setattr(video_module, "_comfy_devices",
+                            lambda: _async_value(self._devices(10.0)))
+        await video_module._preflight_comfyui("i2v_multi")
+
+    async def test_the_error_names_the_numbers(self, monkeypatch):
+        monkeypatch.setattr(video_module, "_comfy_devices",
+                            lambda: _async_value(self._devices(2.0)))
+        self._no_waiting(monkeypatch)
+        with pytest.raises(RuntimeError) as exc:
+            await video_module._preflight_comfyui("minimax_i2v")
+        msg = str(exc.value)
+        assert "2.1 GB free" in msg and "ollama ps" in msg
+
+    async def test_no_devices_does_not_block_the_job(self, monkeypatch):
+        # A ComfyUI build that reports no devices should not make video
+        # generation impossible — the gate is a safety net, not a gatekeeper.
+        monkeypatch.setattr(video_module, "_comfy_devices", lambda: _async_value([]))
+        await video_module._preflight_comfyui("minimax_i2v")
+
+
+async def _async_value(value):
+    return value
+
+
+class TestCancelTitlerWarmup:
+    """The startup warm-up is the reason the first MiniMax run after every
+    reboot OOMed: during its ~2.5 min cold load the model is not yet resident,
+    so evicting Ollama finds an empty card and reports success — and then the
+    warm-up loads 5.3 GB straight into ComfyUI's render. Evicting is not enough;
+    the loader itself has to be called off first."""
+
+    async def test_no_warmup_running_is_a_no_op(self):
+        analysis_module._warm_task = None
+        await analysis_module.cancel_titler_warmup()  # must not raise
+
+    async def test_a_finished_warmup_is_left_alone(self):
+        async def done():
+            return None
+        task = asyncio.create_task(done())
+        await task
+        analysis_module._warm_task = task
+        await analysis_module.cancel_titler_warmup()
+        assert not task.cancelled()
+
+    async def test_an_in_flight_warmup_is_cancelled_and_awaited(self):
+        started = asyncio.Event()
+
+        async def slow_warmup():
+            started.set()
+            await asyncio.sleep(30)          # stands in for the cold load
+
+        task = asyncio.create_task(slow_warmup())
+        await started.wait()
+        analysis_module._warm_task = task
+
+        await analysis_module.cancel_titler_warmup()
+        # Awaited, not merely signalled: returning while the load is still in
+        # flight would let it finish during the render, which is the bug.
+        assert task.done()
+        assert task.cancelled()
+
+    async def test_a_failing_warmup_does_not_propagate(self):
+        # The caller is about to render; a broken warm-up must not take the
+        # video job down with it.
+        async def boom():
+            raise RuntimeError("ollama exploded")
+
+        task = asyncio.create_task(boom())
+        await asyncio.sleep(0)
+        analysis_module._warm_task = task
+        await analysis_module.cancel_titler_warmup()
+
+
+class TestSongAndInterpolationAreMutuallyExclusive:
+    """Interpolation stretches whatever audio the file carries — right for a
+    model's own generated track, destructive for music. The guard has to hold
+    in BOTH directions, because attaching a song rewrites the upscale's source
+    and triggers a re-render that would run the stretch over the song."""
+
+    def _video(self, **kw):
+        from core.models import Video
+        return Video(
+            id=uuid.uuid4(), status="done", filename="clip.mp4",
+            filepath="videos/clip.mp4", **kw,
+        )
+
+    def test_interpolation_is_refused_when_a_song_is_attached(self):
+        from fastapi import HTTPException
+        v = self._video(soundtrack_song_id=uuid.uuid4())
+        with pytest.raises(HTTPException) as exc:
+            _validate_upscale_target(v, 1080, 3)
+        assert exc.value.status_code == 409
+
+    def test_a_plain_upscale_is_still_fine_with_a_song(self):
+        v = self._video(soundtrack_song_id=uuid.uuid4())
+        _validate_upscale_target(v, 1080, 1)  # must not raise
+
+    def test_interpolation_is_fine_without_a_song(self):
+        _validate_upscale_target(self._video(), 1080, 3)  # must not raise
+
+    def test_unsupported_multipliers_are_rejected_outright(self):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            _validate_upscale_target(self._video(), 1080, 5)
+        assert exc.value.status_code == 422
+
+
+class TestUpscaleOutputDimensions:
+    def test_minimax_landscape_reaches_1080p(self):
+        assert output_dimensions(864, 480, 1080) == (1944, 1080)
+
+    def test_minimax_portrait_reaches_1080_on_the_short_edge(self):
+        assert output_dimensions(480, 864, 1080) == (1080, 1944)
+
+    def test_aspect_ratio_is_preserved(self):
+        w, h = output_dimensions(864, 480, 720)
+        assert abs(w / h - 864 / 480) < 0.01
+
+    def test_a_source_already_at_the_target_is_left_alone(self):
+        # SEEDVR2 would happily downscale; this pass exists to add pixels.
+        assert output_dimensions(1920, 1080, 720) == (1920, 1080)
+
+    def test_dimensions_stay_even_for_yuv420p(self):
+        w, h = output_dimensions(853, 481, 1080)
+        assert w % 2 == 0 and h % 2 == 0
+
+
+class TestClampResolution:
+    def test_garbage_reads_as_the_default(self):
+        assert clamp_resolution(None) == 1080
+        assert clamp_resolution("nonsense") == 1080
+
+    def test_out_of_range_values_are_clamped(self):
+        assert clamp_resolution(99) == 480
+        assert clamp_resolution(4000) == 1440
+
+
+class TestEstimateSeconds:
+    def test_matches_the_measured_reference_run(self):
+        # 56 frames at 24 fps = 2.33 s of source → 1944×1080 took 438 s.
+        est = estimate_seconds(2.333, 1944, 1080)
+        assert 330 <= est <= 550
+
+    def test_scales_with_duration(self):
+        short = estimate_seconds(2.0, 1944, 1080)
+        long = estimate_seconds(8.0, 1944, 1080)
+        assert 3.5 < long / short < 4.5
+
+    def test_unknown_duration_yields_no_estimate(self):
+        # probe_video_duration returns 0.0 when ffprobe fails; a fabricated
+        # number would be worse than none, since the UI shows it as a promise.
+        assert estimate_seconds(0.0, 1944, 1080) == 0
+
+
+class TestBuildUpscaleWorkflow:
+    def _build(self, **kw):
+        from pathlib import Path
+        kw.setdefault("resolution", 1080)
+        kw.setdefault("filename_prefix", "artrium_up_test")
+        kw.setdefault("has_audio", True)
+        return build_upscale_workflow(Path("D:/storage/videos/clip.mp4"), **kw)
+
+    def test_reads_the_source_by_absolute_path(self):
+        wf, _ = self._build()
+        assert wf["sv_load"]["inputs"]["video"].endswith("clip.mp4")
+
+    def test_frame_rate_comes_from_the_file_not_a_constant(self):
+        # A RIFE'd clip's stored fps describes the model's rate, not the
+        # file's — taking it from the row would desync every interpolated clip.
+        wf, save = self._build()
+        assert wf[save]["inputs"]["frame_rate"] == ["sv_info", 0]
+        assert wf["sv_info"]["inputs"]["video_info"] == ["sv_load", 3]
+
+    def test_audio_bypasses_the_model_entirely(self):
+        wf, save = self._build()
+        assert wf[save]["inputs"]["audio"] == ["sv_load", 2]
+
+    def test_a_silent_source_leaves_the_audio_slot_unconnected(self):
+        # VHS raises when asked to extract audio from a stream-less file, so a
+        # silent clip must not be wired up at all.
+        wf, save = self._build(has_audio=False)
+        assert "audio" not in wf[save]["inputs"]
+
+    def test_batch_size_follows_the_nodes_4n_plus_1_rule(self):
+        wf, _ = self._build()
+        assert (wf["sv_up"]["inputs"]["batch_size"] - 1) % 4 == 0
+
+    def test_vae_tiling_is_on_because_batch_5_ooms_without_it(self):
+        wf, _ = self._build()
+        vae = wf["sv_vae"]["inputs"]
+        assert vae["encode_tiled"] is True and vae["decode_tiled"] is True
+
+    def test_runs_on_the_first_gpu_only(self):
+        # The 2070 (sm_75) has no bf16 conv3d kernel, which the VAE needs
+        # whatever the checkpoint dtype — cuda:1 fails outright.
+        wf, _ = self._build()
+        assert wf["sv_dit"]["inputs"]["device"] == "cuda:0"
+        assert wf["sv_vae"]["inputs"]["device"] == "cuda:0"
+
+    def test_resolution_is_clamped_on_the_way_in(self):
+        wf, _ = self._build(resolution=99999)
+        assert wf["sv_up"]["inputs"]["resolution"] == 1440
+
+    def test_muxer_never_trims_the_video_back_to_the_audio(self):
+        # A RIFE'd source is legitimately longer than its native audio track.
+        wf, save = self._build()
+        assert wf[save]["inputs"]["trim_to_audio"] is False
+
+    def test_every_link_points_at_a_node_that_exists(self):
+        wf, _ = self._build()
+        for node in wf.values():
+            for value in node["inputs"].values():
+                if isinstance(value, list) and value and isinstance(value[0], str):
+                    assert value[0] in wf, f"dangling link to {value[0]}"
+
+    def test_no_rife_node_at_all_when_interpolation_is_off(self):
+        wf, save = self._build(rife_multiplier=1)
+        assert "sv_rife" not in wf
+        assert wf[save]["inputs"]["images"] == ["sv_up", 0]
+
+    def test_rife_sits_after_the_restore_not_before_it(self):
+        # The entire point of the ordering: SEEDVR2 restores only the source's
+        # real frames, so its cost stays independent of the multiplier.
+        wf, save = self._build(rife_multiplier=3)
+        assert wf["sv_rife"]["inputs"]["frames"] == ["sv_up", 0]
+        assert wf["sv_up"]["inputs"]["image"] == ["sv_load", 0]
+        assert wf[save]["inputs"]["images"] == ["sv_rife", 0]
+
+    def test_interpolated_output_still_links_every_node(self):
+        wf, _ = self._build(rife_multiplier=4)
+        for node in wf.values():
+            for value in node["inputs"].values():
+                if isinstance(value, list) and value and isinstance(value[0], str):
+                    assert value[0] in wf, f"dangling link to {value[0]}"
+
+    def test_an_unsupported_multiplier_falls_back_to_off(self):
+        wf, _ = self._build(rife_multiplier=7)
+        assert "sv_rife" not in wf
+
+    def test_frame_rate_is_untouched_by_interpolation(self):
+        # RIFE lengthens real time by multiplying frames at a fixed rate;
+        # raising frame_rate too would keep the duration and only add
+        # smoothness, which is not what the generation path does either.
+        wf, save = self._build(rife_multiplier=3)
+        assert wf[save]["inputs"]["frame_rate"] == ["sv_info", 0]
+
+
+class TestUpscaleRifeClamp:
+    def test_garbage_reads_as_off(self):
+        assert clamp_rife(None) == 1
+        assert clamp_rife("nonsense") == 1
+
+    def test_unsupported_factors_read_as_off(self):
+        # Off is the safe fallback: it never silently changes the clip length.
+        assert clamp_rife(0) == 1
+        assert clamp_rife(5) == 1
+
+    def test_supported_factors_pass_through(self):
+        assert [clamp_rife(m) for m in (1, 2, 3, 4)] == [1, 2, 3, 4]
+
+
+class TestEstimateWithInterpolation:
+    """The estimate has to show that interpolation is nearly free here — that
+    is the user-visible consequence of running RIFE after the restore."""
+
+    def test_interpolation_barely_moves_the_estimate(self):
+        base = estimate_seconds(5.0, 1944, 1080, 1)
+        triple = estimate_seconds(5.0, 1944, 1080, 3)
+        assert triple > base                      # not free
+        assert triple < base * 1.2                # but nowhere near 3x
+
+    def test_matches_the_measured_rife_run(self):
+        # 124 frames at 24 fps = 5.17 s, 2.09 MPx, RIFE 3x measured at 50 s.
+        rife_only = (estimate_seconds(5.17, 1944, 1080, 3)
+                     - estimate_seconds(5.17, 1944, 1080, 1))
+        assert 35 <= rife_only <= 70
+
+
 class TestMotionPromptRejection:
     """The small titler VLM (qwen2.5vl:3b) under a long system prompt returns
     one of the worked examples verbatim, or repeats one answer across every
     image. Either way the prompt describes a different picture than the one
-    it is attached to, which is what makes LTX drift and cut mid-clip."""
+    it is attached to, which is what makes the video model drift and cut mid-clip."""
 
     async def test_example_copied_from_system_prompt_is_retried(self, monkeypatch):
         from services.ollama.chat import _read_prompt
 
         # An 8-word run lifted straight out of the shipped system prompt.
-        leaked = " ".join(_read_prompt("video-ltx-motion.md").split()[20:40])
+        leaked = " ".join(_read_prompt("video-minimax-motion.md").split()[20:40])
         answers = iter([leaked, "The rope frays slowly, fibres ticking, the frame static."])
         async def fake_chat_json(**kwargs):
             return {"animation": next(answers)}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        result = await generate_ltx_motion_prompts([b"1"])
+        result = await generate_minimax_motion_prompts([b"1"])
         assert result == ["The rope frays slowly, fibres ticking, the frame static."]
 
     async def test_prompt_repeated_across_images_is_retried(self, monkeypatch):
@@ -449,7 +979,7 @@ class TestMotionPromptRejection:
             return {"animation": next(answers)}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        result = await generate_ltx_motion_prompts([b"1", b"2"])
+        result = await generate_minimax_motion_prompts([b"1", b"2"])
         assert result[0] == dupe
         assert result[1] == "The glass sags inward with a low groan, frame static."
 
@@ -461,7 +991,7 @@ class TestMotionPromptRejection:
             return {"animation": dupe}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        result = await generate_ltx_motion_prompts([b"1", b"2"])
+        result = await generate_minimax_motion_prompts([b"1", b"2"])
         assert result == [dupe, dupe]
 
     async def test_distinct_prompts_are_not_retried(self, monkeypatch):
@@ -471,25 +1001,15 @@ class TestMotionPromptRejection:
             return {"animation": f"The number {len(calls)} object drifts upward with a faint hum."}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        await generate_ltx_motion_prompts([b"1", b"2", b"3"])
+        await generate_minimax_motion_prompts([b"1", b"2", b"3"])
         assert len(calls) == 3  # no wasted retries on good output
 
 
-class TestOneBeatEnforcement:
-    """A one-beat prompt is what stops LTX cutting mid-clip, so the sentence
-    limit is enforced in code rather than trusted to the system prompt."""
-
-    async def test_extra_sentences_are_trimmed_away(self, monkeypatch):
-        async def fake_chat_json(**kwargs):
-            return {"animation": (
-                "The woman walks through the corridor, her footsteps echoing. "
-                "The sound of her boots claps against the floor. "
-                "The camera remains static."
-            )}
-        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
-
-        result = await generate_ltx_motion_prompts([b"1"])
-        assert result == ["The woman walks through the corridor, her footsteps echoing."]
+class TestOneShotEnforcement:
+    """One unbroken shot is what stops the video model cutting mid-clip, so
+    shot-break language is rejected in code rather than trusted to the system
+    prompt. Sentence *count* is deliberately not policed: an H3 clip runs
+    5-15s and needs more than one sentence to fill."""
 
     async def test_camera_revealing_new_content_is_retried(self, monkeypatch):
         # A camera move that brings something new into frame reads to the
@@ -502,7 +1022,7 @@ class TestOneBeatEnforcement:
             return {"animation": next(answers)}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        result = await generate_ltx_motion_prompts([b"1"])
+        result = await generate_minimax_motion_prompts([b"1"])
         assert result == ["The nail drips slowly, a faint metallic tick, the frame static."]
 
     async def test_shot_break_retry_gets_a_targeted_nudge(self, monkeypatch):
@@ -516,13 +1036,14 @@ class TestOneBeatEnforcement:
             return {"animation": next(answers)}
         monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
 
-        await generate_ltx_motion_prompts([b"1"])
+        await generate_minimax_motion_prompts([b"1"])
         assert "reveal something new" in texts[1]
         assert "reused wording" not in texts[1]
 
-    async def test_wan_variant_keeps_its_own_length_and_language_rules(self, monkeypatch):
-        # Wan2.2's prompt file is tuned separately; the LTX-only one-sentence
-        # trim and shot-break ban must not silently apply to it.
+    async def test_wan_variant_keeps_its_own_language_rules(self, monkeypatch):
+        # Wan2.2's prompt file is tuned separately; the shot-break ban is opt-in
+        # per model family and must not silently apply to it ("then" here would
+        # be rejected under the MiniMax rules).
         multi = ("The paint drips, then the camera pans. "
                  "A second sentence survives here.")
         calls = []
@@ -534,20 +1055,6 @@ class TestOneBeatEnforcement:
         result = await generate_i2v_motion_prompts([b"1"])
         assert result == [multi]
         assert len(calls) == 1  # not retried
-
-
-class TestFirstSentence:
-    def test_keeps_single_sentence_unchanged(self):
-        assert analysis_module.first_sentence("The rope frays slowly.") == "The rope frays slowly."
-
-    def test_drops_trailing_sentences(self):
-        assert analysis_module.first_sentence("One thing. Two thing.") == "One thing."
-
-    def test_handles_missing_terminator(self):
-        assert analysis_module.first_sentence("no full stop here") == "no full stop here"
-
-    def test_empty_stays_empty(self):
-        assert analysis_module.first_sentence("   ") == ""
 
 
 class TestSalvageTruncatedAnimation:

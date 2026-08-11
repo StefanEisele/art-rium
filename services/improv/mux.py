@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 _LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
 # "synth" ambient-bed defaults — piano reads as the lead, the source video's
-# own generated audio (e.g. LTX-2.3's native track) sits quietly underneath.
+# own generated audio (e.g. MiniMax H3's native track) sits quietly underneath.
 BED_VOLUME_DEFAULT = 0.35
 PIANO_VOLUME_DEFAULT = 1.0
 BED_VOLUME_MIN = 0.1
@@ -88,7 +88,7 @@ async def mux_session(
     width (e.g. 0.24 = 24%). Clamped to [0.10, 0.50].
 
     `include_bed` opts the "synth" output into blending the source video's
-    own audio (e.g. LTX-2.3's native generated track) in quietly underneath
+    own audio (e.g. MiniMax H3's native generated track) in quietly underneath
     the piano, both audible — piano at `PIANO_VOLUME_DEFAULT`, bed at
     `bed_volume` (clamped to [BED_VOLUME_MIN, BED_VOLUME_MAX]). Only takes
     effect when the source actually has an audio stream; otherwise this is a

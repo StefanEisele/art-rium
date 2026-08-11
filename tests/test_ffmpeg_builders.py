@@ -146,6 +146,19 @@ class TestImprovSourceRendition:
         v = self._video(muxed_filename="x_muxed.mp4", grain_filename="x_grain.mp4")
         assert source_path(v, use_grain=False).name == "clean.mp4"
 
+    def test_the_upscale_is_not_opt_out_the_way_grain_is(self):
+        # Resolution is not a look. Declining grain must not also hand ffmpeg
+        # the small generation canvas of a clip the user chose to enlarge.
+        v = self._video(upscale_filename="x_upscale.mp4", upscale_resolution=1080)
+        assert source_path(v, use_grain=False).name == "x_upscale.mp4"
+        assert source_filename(v, use_grain=False) == "x_upscale.mp4"
+
+    def test_grain_still_wins_over_the_upscale_it_was_built_from(self):
+        # The grain pass reads the upscaled file, so the grained rendition is
+        # already at the upscaled size.
+        v = self._video(upscale_filename="x_upscale.mp4", grain_filename="x_grain.mp4")
+        assert source_path(v, use_grain=True).name == "x_grain.mp4"
+
 
 class TestSoundtrackMuxCmd:
     def test_maps_video_from_first_audio_from_second(self):
@@ -208,7 +221,7 @@ class TestGrainPreviewWindow:
 
 class TestGrainCmds:
     def test_full_render_copies_audio_through(self):
-        # A soundtrack mux or LTX's native track must survive the re-encode.
+        # A soundtrack mux or a model's native track must survive the re-encode.
         cmd = _grain_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), 30)
         assert cmd[cmd.index("-c:a") + 1] == "copy"
         assert cmd[-1] == str(Path("out.mp4"))

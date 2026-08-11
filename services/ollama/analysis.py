@@ -2,6 +2,7 @@
 Ollama VLM analysis — per-image alt-text/SEO metadata, title suggestions
 (image + video), and the titler warm-up call.
 """
+import asyncio
 import base64
 import json
 import logging
@@ -11,7 +12,7 @@ from collections.abc import Callable
 import httpx
 
 from core.config import settings
-from services.ollama.chat import _chat_json, _read_prompt
+from services.ollama.chat import DEFAULT_NUM_CTX, _chat_json, _read_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,33 @@ async def analyze_image(
 _TITLER_SYSTEM = "You are an art curator specialising in contemporary media art."
 _TITLER_KEEP_ALIVE = "30m"  # keep VLM resident in VRAM after each call — cold-load is ~2.5 min
 
+# The in-flight startup warm-up, so a GPU-hungry job can call it off.
+_warm_task: asyncio.Task | None = None
+
+
+async def cancel_titler_warmup() -> None:
+    """Abort an in-flight startup warm-up and wait for it to actually stop.
+
+    Without this, evicting Ollama before a video render is not enough. The
+    warm-up launched from main.py's lifespan takes ~2.5 min on a cold boot, and
+    for most of that time the model is *not yet resident* — so an eviction sees
+    an empty card, reports success, and then the still-running warm-up loads
+    5.3 GB straight into the render. Measured: card clear at the guard, titler
+    back 3 s later, mid-way through ComfyUI's MiniMax load.
+
+    This is why the failure only ever showed up right after a reboot: at any
+    other time no warm-up is running and the eviction alone is sufficient.
+    """
+    task = _warm_task
+    if task is None or task.done():
+        return
+    logger.info("Cancelling in-flight titler warm-up — a GPU job needs the card")
+    task.cancel()
+    try:
+        await task
+    except (asyncio.CancelledError, Exception):  # noqa: B014 - never block the caller
+        pass
+
 
 async def warm_titler_model(timeout: float = 600.0) -> None:
     """
@@ -82,7 +110,12 @@ async def warm_titler_model(timeout: float = 600.0) -> None:
 
     Uses a tiny synthetic JPG so the vision tower warms up too, with
     num_predict=1 to keep wall time near the pure load cost.
+
+    Registers itself in `_warm_task` so `cancel_titler_warmup` can call it off:
+    a warm-up that finishes *during* a video render is worse than no warm-up.
     """
+    global _warm_task
+    _warm_task = asyncio.current_task()
     from io import BytesIO
     from PIL import Image as PILImage
 
@@ -95,7 +128,10 @@ async def warm_titler_model(timeout: float = 600.0) -> None:
         "messages":   [{"role": "user", "content": "ok", "images": [base64.b64encode(jpg).decode("ascii")]}],
         "stream":     False,
         "keep_alive": _TITLER_KEEP_ALIVE,
-        "options":    {"num_predict": 1, "temperature": 0.0},
+        # Same num_ctx as _chat_json so the warm-up load already has the
+        # window every later call asks for — a mismatch would trigger a
+        # full model reload on the first real request.
+        "options":    {"num_predict": 1, "temperature": 0.0, "num_ctx": DEFAULT_NUM_CTX},
     }
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -259,7 +295,7 @@ async def generate_transition_prompts(
     return cleaned
 
 
-# ── i2v animation prompts — surreal per-image motion (Wan2.2 / LTX) ──────────
+# ── i2v animation prompts — surreal per-image motion (Wan2.2 / MiniMax H3) ───
 
 
 def _extract_animation(parsed: dict) -> str:
@@ -336,22 +372,6 @@ def _word_ngrams(text: str, n: int = _LEAK_NGRAM) -> set[tuple[str, ...]]:
     return {tuple(words[i:i + n]) for i in range(len(words) - n + 1)}
 
 
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
-
-
-def first_sentence(prompt: str) -> str:
-    """Keep only the opening sentence.
-
-    A one-beat prompt is what stops the video model cutting, and sentence two
-    is where a second beat lands. The system prompt asks for one sentence and
-    the model mostly complies, but "mostly" is not a guarantee the generator
-    can rely on — this makes it one deterministically, at no extra model call.
-    Anything lost is a further beat we did not want.
-    """
-    parts = [p for p in _SENTENCE_SPLIT.split(prompt.strip()) if p.strip()]
-    return parts[0].strip() if parts else ""
-
-
 # Language that announces a second shot. "Revealing"/"reveals" matter most:
 # a camera move that brings something new into frame is, to the video model,
 # a cut to a different view — the exact artefact being chased here.
@@ -407,8 +427,9 @@ _NUDGE_FRESH = (
 )
 _NUDGE_ONE_SHOT = (
     "\n\nYour previous answer had the camera reveal something new, or a second "
-    "thing happening after the first. Both read as a cut. Write one sentence "
-    "about a single thing already visible in the image moving, frame static."
+    "thing happening after the first. Both read as a cut. Rewrite it as one "
+    "unbroken shot: the same motion, already visible in the image, continuing "
+    "for the whole clip, with the frame held still."
 )
 _RETRY_NUDGES = {
     _REASON_EMPTY: _NUDGE_FRESH,
@@ -428,13 +449,12 @@ async def _generate_per_image_motion_prompts(
     timeout: float = 300.0,
     on_progress: Callable[[int, int], None] | None = None,
     llm_options: dict | None = None,
-    postprocess: Callable[[str], str] | None = None,
     ban_shot_breaks: bool = False,
 ) -> list[str]:
     """
     Shared per-image loop behind generate_i2v_motion_prompts (Wan2.2) and
-    generate_ltx_motion_prompts (LTX-2.3) — same VLM, same fan-out rationale,
-    different system prompt / instruction text per model family.
+    generate_minimax_motion_prompts (MiniMax H3) — same VLM, same fan-out
+    rationale, different system prompt / instruction text per model family.
 
     Given N images (each becomes its own independent i2v clip, in playback
     order), ask the titler VLM for one surreal animation prompt per image —
@@ -461,8 +481,7 @@ async def _generate_per_image_motion_prompts(
     once (see _reject_reason) rather than handed to the user, since such a
     prompt describes a different picture than the one it is attached to.
     *ban_shot_breaks* additionally re-asks on language that announces a second
-    shot; *postprocess* (e.g. first_sentence) tightens each response before it
-    is judged, so a fixable answer is fixed rather than spending a retry.
+    shot.
 
     Returns exactly len(jpgs) strings; an image whose call fails yields ""
     (logged), so the client just shows an empty textarea for that slot.
@@ -519,8 +538,6 @@ async def _generate_per_image_motion_prompts(
                 break
 
             prompt = _extract_animation(parsed)
-            if postprocess is not None:
-                prompt = postprocess(prompt)
             reason = _reject_reason(
                 prompt, system_ngrams, prompts, ban_shot_breaks=ban_shot_breaks,
             )
@@ -565,41 +582,45 @@ async def generate_i2v_motion_prompts(
     )
 
 
-async def generate_ltx_motion_prompts(
+async def generate_minimax_motion_prompts(
     jpgs: list[bytes],
     *,
     context: str = "",
     timeout: float = 300.0,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> list[str]:
-    """One surreal LTX-2.3-style animation+audio prompt per image — LTX-2.3
-    generates native audio synced to the prompt, so unlike the Wan variant
+    """One animation+audio prompt per image for MiniMax H3 — the model samples
+    a native stereo track jointly with the picture, so unlike the Wan variant
     this also describes the clip's soundscape. System prompt lives in
-    prompts/video-ltx-motion.md.
+    prompts/video-minimax-motion.md.
 
-    LTX-2.3 reads a multi-beat prompt as multiple shots and cuts between
-    them, so the system prompt asks for one 12-25 word sentence. num_predict
-    is the backstop against the model ignoring that: ~90 tokens leaves room
-    for that sentence plus its JSON wrapper (roughly 45 tokens) while making
-    a multi-sentence ramble impossible. The earlier value of 220 never bound
-    — measured output tops out near 75 tokens — so it capped nothing.
+    Deliberately longer than the Wan variant's single sentence: H3 clips run
+    5-15 seconds (its trained range), and one short sentence leaves that much
+    screen time underspecified — the model fills the gap by inventing beats,
+    which is how a cut appears. So the prompt asks for two or three sentences
+    of sustained motion plus a separate `Audio:` line, and `postprocess` is
+    left off so those sentences survive. num_predict=220 caps the length
+    without binding on a well-formed answer (measured output lands near 120
+    tokens including the JSON wrapper).
+
+    `ban_shot_breaks` still applies: "then", "suddenly", "revealing" and
+    friends announce a second shot regardless of how long the clip is.
 
     A cap on JSON output truncates mid-string rather than shortening the
     answer, which is why _salvage_truncated_animation exists; without it a
     cap that ever bit would blank the slot instead of trimming it."""
     return await _generate_per_image_motion_prompts(
         jpgs,
-        system_file="video-ltx-motion.md",
+        system_file="video-minimax-motion.md",
         instruction=(
-            "Write ONE sentence of 12-25 words animating THIS image — one "
-            "moving thing, its sound, one camera treatment. No second action."
+            "Write the motion and audio for THIS image as ONE continuous shot, "
+            "following the system instructions."
         ),
-        label="generate_ltx_motion_prompts",
+        label="generate_minimax_motion_prompts",
         context=context,
         timeout=timeout,
         on_progress=on_progress,
-        llm_options={"temperature": 0.7, "num_predict": 90},
-        postprocess=first_sentence,
+        llm_options={"temperature": 0.7, "num_predict": 220},
         ban_shot_breaks=True,
     )
 

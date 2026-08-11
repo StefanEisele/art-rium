@@ -304,6 +304,17 @@ class InstagramPostMedia(Base):
 # Key-frame videos
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Workflows whose clips carry a generated audio track (the model samples sound
+# alongside the picture). Everything else — the Wan-based i2v_multi/flf2v — is
+# silent. "ltx_i2v" is retired but kept here so clips generated before the
+# MiniMax H3 switch keep reporting their audio to the merge/mux paths.
+AUDIO_WORKFLOWS = frozenset({"minimax_i2v", "ltx_i2v"})
+
+# Key-frame animation workflows, as opposed to improv mixes or merges. Used to
+# label a video for YouTube and for the article LLM.
+ANIMATE_WORKFLOWS = frozenset({"i2v_multi", "minimax_i2v", "ltx_i2v", "flf2v"})
+
+
 class Video(Base):
     __tablename__ = "videos"
     __table_args__ = (
@@ -327,20 +338,30 @@ class Video(Base):
         UUID(as_uuid=True), ForeignKey("songs.id", ondelete="SET NULL"), nullable=True
     )
     muxed_filename: Mapped[str | None] = mapped_column(String(512))   # in storage/videos/, sibling of `filename`
+    # Optional SEEDVR2 upscale pass (/tools/video detail modal). Runs before
+    # the grain pass — grain belongs at the delivery resolution, and feeding a
+    # grained picture to a restorer would have it reconstruct the noise.
+    upscale_resolution: Mapped[int | None] = mapped_column(SmallInteger)  # target SHORT edge in px; null = not upscaled
+    upscale_filename: Mapped[str | None] = mapped_column(String(512))     # in storage/videos/, sibling of `filename`
+    # RIFE interpolation applied *after* the restoration (1 = off). Ordered
+    # there so the upscale's cost stays independent of the factor — SEEDVR2
+    # only ever restores the source's real frames.
+    upscale_rife: Mapped[int | None] = mapped_column(SmallInteger)
     # Optional film-grain pass (/tools/video detail modal). Always re-rendered
-    # from the ungrained source (muxed_filename or filename) so repeated
-    # strength changes replace the grain instead of stacking it.
+    # from the ungrained source (upscale_filename or muxed_filename or
+    # filename) so repeated strength changes replace the grain instead of
+    # stacking it.
     grain_strength: Mapped[int | None] = mapped_column(SmallInteger)   # 1–100 UI scale; null = no grain
     grain_filename: Mapped[str | None] = mapped_column(String(512))    # in storage/videos/, sibling of `filename`
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
-    frame_count: Mapped[int | None] = mapped_column(Integer)  # representative/fallback frame count (flf2v: per-transition; i2v_multi/ltx_i2v: per-image)
-    n_images: Mapped[int | None] = mapped_column(Integer)     # total selected images (bounds workflow-dependent: i2v_multi 1–10, ltx_i2v 1–6, flf2v 2–20)
+    frame_count: Mapped[int | None] = mapped_column(Integer)  # representative/fallback frame count (flf2v: per-transition; i2v_multi/minimax_i2v: per-image)
+    n_images: Mapped[int | None] = mapped_column(Integer)     # total selected images (bounds workflow-dependent: i2v_multi 1–10, minimax_i2v 1–6, flf2v 2–20)
     fps: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="generating", index=True)
     error: Mapped[str | None] = mapped_column(Text)
     comfy_prompt_id: Mapped[str | None] = mapped_column(String(128))
-    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "ltx_i2v" | "flf2v"
+    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "minimax_i2v" | "flf2v" | "merge" (legacy rows may hold "ltx_i2v")
     # YouTube upload (set when pushed via services/youtube/client.py)
     youtube_video_id: Mapped[str | None] = mapped_column(String(32))    # e.g. "dQw4w9WgXcQ"
     youtube_url: Mapped[str | None] = mapped_column(Text)               # canonical watch URL
@@ -354,7 +375,7 @@ class Video(Base):
 class VideoClip(Base):
     """One generated segment clip of a Video job — a first-class library item.
 
-    Every workflow (i2v_multi / ltx_i2v / flf2v) persists each segment it
+    Every workflow (i2v_multi / minimax_i2v / flf2v) persists each segment it
     renders as a clip row; the job's clips form its "stack" in the UI. Clips
     from any number of jobs can then be merged (in any order) into a new
     Video row with workflow="merge". Files live under
@@ -378,7 +399,7 @@ class VideoClip(Base):
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     fps: Mapped[int | None] = mapped_column(Integer)
-    has_audio: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # ltx_i2v clips carry generated audio
+    has_audio: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # true for AUDIO_WORKFLOWS clips
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

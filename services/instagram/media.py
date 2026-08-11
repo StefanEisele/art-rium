@@ -34,16 +34,20 @@ def resolve_video_path(video: Video) -> Path:
     """Absolute path to the file Instagram should actually ingest for `video`.
 
     Post-processing writes sibling files rather than overwriting the original
-    (`filepath`): a soundtrack muxes into `muxed_filename`, and a grain pass
-    re-encodes whichever of those is current into `grain_filename`. So the
-    grained file, when present, is the most complete rendition and wins — see
-    routers/video.py::_serialize's `primary_name` for the same precedence used
-    by the video player, and keep the two in step. Every reel/companion
-    dispatch path must resolve through here, or a video gets published without
-    its soundtrack or without the grain the user applied.
+    (`filepath`): a soundtrack muxes into `muxed_filename`, a SEEDVR2 pass
+    upscales that into `upscale_filename`, and a grain pass re-encodes
+    whichever of those is current into `grain_filename`. Each pass reads the
+    one before it, so the last one present is the most complete rendition and
+    wins — see routers/video.py::_serialize's `primary_name` for the same
+    precedence used by the video player, and keep the two in step. Every
+    reel/companion dispatch path must resolve through here, or a video gets
+    published without its soundtrack, at the small generation canvas, or
+    without the grain the user applied.
     """
     if video.grain_filename:
         return settings.videos_dir / video.grain_filename
+    if video.upscale_filename:
+        return settings.videos_dir / video.upscale_filename
     if video.muxed_filename:
         return settings.videos_dir / video.muxed_filename
     return settings.storage_dir / video.filepath

@@ -371,7 +371,8 @@ const PICKER_LIMIT = 60;
 const MAX_IMAGES = 6;
 const MAX_VIDEOS = 6;
 
-const ANIMATE_WORKFLOWS = new Set(['i2v_multi', 'flf2v']);
+// 'ltx_i2v' is retired but still on rows generated before the MiniMax switch.
+const ANIMATE_WORKFLOWS = new Set(['i2v_multi', 'minimax_i2v', 'ltx_i2v', 'flf2v']);
 const IMPROV_WORKFLOWS  = new Set(['improv_synth', 'improv_hands', 'improv_pip']);
 
 function _videoKind(v) {

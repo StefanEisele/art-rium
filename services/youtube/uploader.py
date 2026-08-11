@@ -13,7 +13,7 @@ import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
-from core.models import Video
+from core.models import ANIMATE_WORKFLOWS, Video
 from services.youtube.client import upload_video
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,7 @@ def _title_for(video: Video) -> str:
         # "Improv mix (synth) of <source>" — use it verbatim.
         return prompt or "Piano improvisation — art-rium"
 
-    if wf in ("i2v_multi", "flf2v"):
+    if wf in ANIMATE_WORKFLOWS:
         head = (prompt[:60].rstrip() + "…") if len(prompt) > 60 else prompt
         return f"Animate — {head}" if head else "Animate — art-rium"
 
@@ -46,7 +46,9 @@ def _description_for(video: Video) -> str:
 
     if wf in ("improv_synth", "improv_hands", "improv_pip"):
         lines.append("Piano improvisation recorded as part of the art-rium project.")
-    elif wf in ("i2v_multi", "flf2v"):
+    elif wf == "minimax_i2v":
+        lines.append("Generative key-frame video produced with ComfyUI (MiniMax H3).")
+    elif wf in ANIMATE_WORKFLOWS:
         lines.append("Generative key-frame video produced with ComfyUI (Wan 2.2 14B).")
     else:
         lines.append("Video from the art-rium project.")

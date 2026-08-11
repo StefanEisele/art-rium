@@ -199,6 +199,12 @@
     .progress-wrap { display: flex; flex-direction: column; gap: 10px; }
     .progress-message { font-size: 13px; color: var(--text); font-weight: 600; }
     .progress-pct { font-size: 11px; color: var(--text-dim); font-weight: 600; margin-left: 6px; }
+    /* ComfyUI's own live stage ("Sampling… step 7/20"), under the phase message.
+       Reserves its line height so the card does not jump as stages come and go. */
+    .progress-detail {
+      font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+      min-height: 15px; line-height: 15px;
+    }
 
     .video-actions { display: flex; gap: 8px; }
 
@@ -255,46 +261,50 @@
     .soundtrack-chip .chip-btn.remove { color: var(--red); border-color: rgba(255,69,58,0.25); }
     .soundtrack-chip.muxing .label,
     .soundtrack-chip.muxing .glyph { animation: step-pulse 1.4s ease-in-out infinite; }
-    .soundtrack-badge {
-      position: absolute; top: 8px; left: 8px;
-      background: rgba(0,0,0,0.62); color: #fff;
-      border-radius: 4px; padding: 1px 7px; font-size: 13px;
-      pointer-events: none;
-    }
 
-    /* ── Grain chip: strength slider + preview/apply, mirrors the soundtrack chip ── */
-    .grain-chip {
+    /* ── Post-pass chips: one per derived rendition (upscale, grain) ──
+       Both mirror the soundtrack chip and differ only in their controls, so
+       they share every rule here and carry a modifier class for anything
+       specific. Rendered in production order: upscale first, grain on top. */
+    .post-chip {
       display: flex; flex-direction: column; gap: 8px;
       padding: 8px 10px; margin-top: 8px;
       background: var(--surface2); border: 1.5px solid var(--border);
       border-radius: 8px; font-size: 13px;
     }
-    .grain-chip .row { display: flex; align-items: center; gap: 8px; }
-    .grain-chip .label { color: var(--text-dim); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
-    .grain-chip .glyph { color: var(--accent); font-size: 15px; }
-    .grain-chip .value { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; min-width: 26px; text-align: right; }
-    .grain-chip input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 22px; }
-    .grain-chip .chip-btn {
+    .post-chip .row { display: flex; align-items: center; gap: 8px; }
+    .post-chip .row.wrap { flex-wrap: wrap; }
+    .post-chip .label { color: var(--text-dim); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; }
+    .post-chip .glyph { color: var(--accent); font-size: 15px; }
+    .post-chip .value { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; min-width: 26px; text-align: right; }
+    .post-chip .hint { color: var(--text-dim); font-size: 11px; }
+    .post-chip input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 22px; }
+    .post-chip .chip-btn {
       background: transparent; border: 1px solid var(--border);
       color: var(--text-dim); border-radius: 6px; padding: 4px 9px;
       font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit;
     }
-    .grain-chip .chip-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
-    .grain-chip .chip-btn:disabled { opacity: .45; cursor: default; }
-    .grain-chip .chip-btn.apply { color: var(--accent); border-color: rgba(224,122,58,0.35); background: rgba(224,122,58,0.06); flex: 1; }
-    .grain-chip .chip-btn.remove { color: var(--red); border-color: rgba(255,69,58,0.25); }
-    .grain-chip.working .label,
-    .grain-chip.working .glyph { animation: step-pulse 1.4s ease-in-out infinite; }
+    .post-chip .chip-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
+    .post-chip .chip-btn:disabled { opacity: .45; cursor: default; }
+    .post-chip .chip-btn.on { color: var(--accent); border-color: var(--accent); background: rgba(224,122,58,0.10); }
+    .post-chip .chip-btn.apply { color: var(--accent); border-color: rgba(224,122,58,0.35); background: rgba(224,122,58,0.06); flex: 1; }
+    .post-chip .chip-btn.remove { color: var(--red); border-color: rgba(255,69,58,0.25); }
+    .post-chip.working .label,
+    .post-chip.working .glyph { animation: step-pulse 1.4s ease-in-out infinite; }
     .grain-preview { margin-top: 2px; }
     .grain-preview video { width: 100%; border-radius: 6px; display: block; background: #000; }
     .grain-preview .hint { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
-    .grain-badge {
+    /* Badges stack in a column rather than offsetting each other with sibling
+       selectors — with three of them that would need a rule per combination. */
+    .badge-stack {
       position: absolute; top: 8px; left: 8px;
-      background: rgba(0,0,0,0.62); color: #fff;
-      border-radius: 4px; padding: 1px 7px; font-size: 12px;
+      display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
       pointer-events: none;
     }
-    .soundtrack-badge + .grain-badge { top: 32px; }
+    .badge-stack > div {
+      background: rgba(0,0,0,0.62); color: #fff;
+      border-radius: 4px; padding: 1px 7px; font-size: 12px;
+    }
 
     /* ── Song picker modal (vertical list, audio previews) ── */
     #song-picker-modal { display: none; position: fixed; inset: 0; z-index: 101; background: var(--bg); flex-direction: column; padding-top: env(safe-area-inset-top); }
@@ -343,7 +353,7 @@
           <span class="field-label">Mode</span>
           <div class="mode-chips" id="mode-chips">
             <button class="mode-chip active" data-mode="i2v_multi" onclick="setMode('i2v_multi',this)">Animate (i2v)</button>
-            <button class="mode-chip" data-mode="ltx_i2v" onclick="setMode('ltx_i2v',this)">LTX-2.3 (i2v)</button>
+            <button class="mode-chip" data-mode="minimax_i2v" onclick="setMode('minimax_i2v',this)">MiniMax H3 (i2v)</button>
             <button class="mode-chip" data-mode="flf2v" onclick="setMode('flf2v',this)">Transitions (FLF2V)</button>
           </div>
         </div>
@@ -392,19 +402,20 @@
             <div id="story-status" style="display:none">
               <div class="progress-track"><div class="progress-fill" id="story-fill" style="width:2%"></div></div>
               <div><span class="progress-message" id="story-msg"></span></div>
+              <div class="progress-detail" id="story-detail"></div>
               <div class="story-thumbs" id="story-thumbs"></div>
             </div>
           </div>
         </div>
 
-        <!-- Resolution (chips are re-rendered per-mode by renderResChips(), since LTX-2.3's
-             documented two-stage pipeline prefers a larger square than Wan2.2's) -->
+        <!-- Resolution (chips are re-rendered per-mode by renderResChips(), since MiniMax H3
+             renders on its own fixed canvas — a 768px short edge — rather than Wan2.2's sizes) -->
         <div class="field-row">
           <span class="field-label">Resolution</span>
           <div class="res-chips" id="res-chips"></div>
         </div>
 
-        <!-- FPS -->
+        <!-- FPS — locked to 24 in MiniMax mode (the model's audio latent is tied to that rate) -->
         <div class="field-row">
           <span class="field-label">FPS</span>
           <select class="field-select" id="fps-select">
@@ -412,12 +423,13 @@
             <option value="24" selected>24</option>
             <option value="30">30</option>
           </select>
+          <span id="fps-note" style="font-size:11px;color:var(--text-dim);display:none">fixed by MiniMax H3</span>
         </div>
 
-        <!-- RIFE multiplier (i2v_multi/flf2v/ltx_i2v) — chip set is re-rendered per-mode by
-             renderRifeChips() since ltx_i2v additionally offers a "1× (off)" default: RIFE
-             stretches real-time duration (more frames at the same fps), which for ltx_i2v also
-             requires stretching its native audio to match, so it opts in rather than defaulting on. -->
+        <!-- RIFE multiplier — chip set is re-rendered per-mode by renderRifeChips() since
+             minimax_i2v additionally offers a "1× (off)" default: RIFE stretches real-time
+             duration (more frames at the same fps), which for minimax_i2v also requires
+             stretching its native audio to match, so it opts in rather than defaulting on. -->
         <div class="field-row" id="rife-row">
           <span class="field-label">RIFE ×</span>
           <div class="res-chips" id="rife-chips"></div>
@@ -518,7 +530,7 @@ const state = {
   perImageSettings: new Map(),   // imageId → {prompt, frameCount}
   transitionSettings: new Map(), // "idA__idB" → {prompt, frameCount} — flf2v pairs
   width: 960, height: 960,
-  rifeMultiplier: 3,             // i2v_multi/flf2v/ltx_i2v: RIFE VFI interpolation factor (1=off | 2 | 3 | 4)
+  rifeMultiplier: 3,             // RIFE VFI interpolation factor (1=off | 2 | 3 | 4)
   pingpong: false,               // i2v_multi: VHS_VideoCombine pingpong flag
   endOnKeyframe: false,          // flf2v: append raw end key frame (pixel-exact landing, cut risk)
   pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
@@ -539,11 +551,36 @@ const withAuth = url => ArtRium.withAuth(url, state.apiKey);
 const PICKER_LIMIT = 30;
 // All three workflows share the per-clip generate→review→merge pattern.
 // isPerImageMode() only distinguishes the *per-image* prompt UI (i2v_multi/
-// ltx_i2v) from the *per-transition* prompt UI (flf2v) — see
+// minimax_i2v) from the *per-transition* prompt UI (flf2v) — see
 // renderPerImageSection() / renderPerTransitionSection().
-const isPerImageMode = () => state.mode === 'i2v_multi' || state.mode === 'ltx_i2v';
+const isMinimax = () => state.mode === 'minimax_i2v';
+const isPerImageMode = () => state.mode === 'i2v_multi' || isMinimax();
 const maxImagesForMode = () =>
-  state.mode === 'i2v_multi' ? 10 : state.mode === 'ltx_i2v' ? 6 : 20;
+  state.mode === 'i2v_multi' ? 10 : isMinimax() ? 6 : 20;
+
+// Frame-count bounds per mode. MiniMax H3 runs at a fixed 24fps on a 17k+5
+// frame grid; the model is trained for ~124–362 frames (≈5–15s), but this
+// machine cannot reach that. Measured on the 16GB RTX 4060 Ti: 1344×768 × 56
+// frames (58M pixel-frames) renders fine, while 768×768 × 124 (73M) dies with
+// a CUDA OOM that takes ComfyUI's whole prompt worker down with it — a stuck
+// queue, not a failed job. So the ceiling here is a VRAM budget, not the
+// model's spec, and it moves with the chosen resolution.
+const MINIMAX_PIXEL_FRAME_BUDGET = 58e6;
+const FRAME_BOUNDS_WAN = {min: 5, max: 81, step: 1, def: 49};
+
+// Default clip length for MiniMax, in frames. 90 sits on the model's 17k+5
+// grid (17*5+5) and is 3.75 s at its fixed 24 fps — a working default rather
+// than the longest render the VRAM budget happens to allow, which at 864x480
+// is 124 frames and roughly a third longer to wait for.
+const MINIMAX_DEFAULT_FRAMES = 90;
+
+function frameBounds() {
+  if (!isMinimax()) return FRAME_BOUNDS_WAN;
+  let max = Math.floor(MINIMAX_PIXEL_FRAME_BUDGET / (state.width * state.height));
+  while (max % 17 !== 5) max--;                  // land on the model's grid
+  max = Math.max(22, max);
+  return {min: 22, max, step: 17, def: Math.min(max, MINIMAX_DEFAULT_FRAMES)};
+}
 
 // ── Mode ──────────────────────────────────────────────────────────────────────
 function setMode(mode, el) {
@@ -557,13 +594,13 @@ function setMode(mode, el) {
     ArtRium.toast(`Trimmed to ${maxN} images for this mode`);
   }
   // RIFE stretches real-time duration (more frames at the same fps); for
-  // ltx_i2v that also means stretching its native audio to match (server-side),
-  // so switching into it resets to "1× (off)" rather than carrying over a Wan
-  // default — and switching back to a Wan mode restores 3×.
-  const enteringLtx = mode === 'ltx_i2v' && prevMode !== 'ltx_i2v';
-  const leavingLtx  = mode !== 'ltx_i2v' && prevMode === 'ltx_i2v';
-  if (enteringLtx) state.rifeMultiplier = 1;
-  else if (leavingLtx) state.rifeMultiplier = 3;
+  // minimax_i2v that also means stretching its native audio to match
+  // (server-side), so switching into it resets to "1× (off)" rather than
+  // carrying over a Wan default — and switching back to a Wan mode restores 3×.
+  const enteringMmx = mode === 'minimax_i2v' && prevMode !== 'minimax_i2v';
+  const leavingMmx  = mode !== 'minimax_i2v' && prevMode === 'minimax_i2v';
+  if (enteringMmx) state.rifeMultiplier = 1;
+  else if (leavingMmx) state.rifeMultiplier = 3;
   renderStrip();
   renderResChips();
   renderRifeChips();
@@ -575,25 +612,33 @@ function _updateModeFields() {
   $('pingpong-row').style.display = state.mode === 'i2v_multi' ? '' : 'none';
   $('endkf-row').style.display    = state.mode === 'flf2v' ? '' : 'none';
   $('story-section').style.display = state.mode === 'flf2v' ? '' : 'none';
+  // MiniMax H3 samples its audio jointly with the picture at a fixed 24fps;
+  // any other rate would desync the two, so the selector is pinned there.
+  const fpsSel = $('fps-select');
+  if (isMinimax()) fpsSel.value = '24';
+  fpsSel.disabled = isMinimax();
+  $('fps-note').style.display = isMinimax() ? '' : 'none';
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────────
-// LTX-2.3's own documented two-stage pipeline (half-res sample pass + 2x latent
-// upscale) targets a larger square than Wan2.2 (1280×1280 vs 960×960); 16:9/9:16
-// are already correct for both model families, so only the square chip differs.
-// 1080 itself isn't divisible by Wan's 16 or LTX's 64, so the 1080p tier
-// submits 1088 (both models' nearest clean multiple — matches the existing
-// default width/height) while still labelling the chip "1080" for clarity.
+// 1080 isn't divisible by Wan's 16, so the 1080p tier submits 1088 (its nearest
+// clean multiple — matches the existing default width/height) while still
+// labelling the chip "1080" for clarity.
+//
+// MiniMax H3 is deliberately restricted to one small canvas in each
+// orientation. Its native 768px short edge costs ~45s per sampling step on this
+// 16GB card (a 2.3s clip takes 16 minutes); 864×480 is 40% of those pixels, and
+// the plan is to recover the resolution afterwards with a separate upscale pass
+// rather than pay for it during diffusion. Both axes are multiples of 32, which
+// the model requires.
 const RES_PRESETS = {
   wan: [[960, 960, '960×960'], [1280, 704, '1280×704'], [704, 1280, '704×1280'],
         [1920, 1088, '1920×1080'], [1088, 1920, '1080×1920']],
-  ltx: [[960, 960, '960×960 (fast)'], [1280, 1280, '1280×1280 (HQ)'],
-        [1280, 704, '1280×704'], [704, 1280, '704×1280'],
-        [1920, 1088, '1920×1080'], [1088, 1920, '1080×1920']],
+  minimax: [[864, 480, '864×480 (16:9)'], [480, 864, '480×864 (9:16)']],
 };
 
 function renderResChips() {
-  const presets = RES_PRESETS[state.mode === 'ltx_i2v' ? 'ltx' : 'wan'];
+  const presets = RES_PRESETS[isMinimax() ? 'minimax' : 'wan'];
   const stillValid = presets.some(([w, h]) => w === state.width && h === state.height);
   if (!stillValid) { state.width = presets[0][0]; state.height = presets[0][1]; }
   $('res-chips').innerHTML = presets.map(([w, h, label]) => {
@@ -606,16 +651,19 @@ function setRes(w, h, el) {
   state.width = w; state.height = h;
   document.querySelectorAll('#res-chips .res-chip').forEach(c => c.classList.remove('active'));
   el.classList.add('active');
+  // MiniMax's frame ceiling is a VRAM budget shared with the frame size, so a
+  // resolution change moves it — re-render so the spinners follow.
+  if (isMinimax()) renderPerImageSection();
 }
 
 // ── RIFE ──────────────────────────────────────────────────────────────────────
 const RIFE_PRESETS = {
   wan: [2, 3, 4],
-  ltx: [1, 2, 3, 4],
+  minimax: [1, 2, 3, 4],
 };
 
 function renderRifeChips() {
-  const mults = RIFE_PRESETS[state.mode === 'ltx_i2v' ? 'ltx' : 'wan'];
+  const mults = RIFE_PRESETS[isMinimax() ? 'minimax' : 'wan'];
   if (!mults.includes(state.rifeMultiplier)) state.rifeMultiplier = mults[0];
   $('rife-chips').innerHTML = mults.map(m => {
     const label = m === 1 ? '1× (off)' : `${m}×`;
@@ -679,17 +727,18 @@ function renderPerImageSection() {
   sec.style.display = '';
 
   // Snapshot current input values before clearing
+  const b = frameBounds();
   sec.querySelectorAll('.per-img-row').forEach(row => {
     const id = row.dataset.imgId;
     if (!id) return;
     state.perImageSettings.set(id, {
       prompt:     row.querySelector('.per-img-prompt')?.value || '',
-      frameCount: parseInt(row.querySelector('.per-img-frames')?.value) || 49,
+      frameCount: parseInt(row.querySelector('.per-img-frames')?.value) || b.def,
     });
   });
 
   sec.innerHTML = '';
-  // Surreal Wan2.2/LTX animation prompts — one VLM call per image, run as a
+  // Surreal Wan2.2/MiniMax animation prompts — one VLM call per image, run as a
   // polled background job (see pollSuggestI2vJob).
   const sug = document.createElement('button');
   sug.type = 'button';
@@ -700,6 +749,9 @@ function renderPerImageSection() {
   sec.appendChild(sug);
   state.selectedImages.forEach((img, idx) => {
     const saved = state.perImageSettings.get(img.id) || {};
+    // A frame count carried over from another mode can sit outside this mode's
+    // band (Wan's 49 is below MiniMax's minimum), so clamp on the way in.
+    const fc = Math.min(b.max, Math.max(b.min, saved.frameCount || b.def));
     const row = document.createElement('div');
     row.className = 'per-img-row';
     row.dataset.imgId = img.id;
@@ -712,11 +764,40 @@ function renderPerImageSection() {
       <textarea class="per-img-prompt" rows="2" placeholder="Animation prompt for image ${idx + 1}…">${_esc(saved.prompt || '')}</textarea>
       <div class="per-img-frames-row">
         <span class="field-label">Frames</span>
-        <input class="field-input per-img-frames" type="number" value="${saved.frameCount || 49}" min="5" max="81" step="1">
+        <input class="field-input per-img-frames" type="number" value="${fc}"
+               min="${b.min}" max="${b.max}" step="${b.step}" oninput="updateFramesHint(this)"
+               title="${isMinimax() ? `Max ${b.max} at ${state.width}×${state.height} — the 16GB card's VRAM budget, not the model's limit. Higher OOMs and hangs ComfyUI.` : ''}">
+        <span class="frames-hint" style="font-size:11px;color:var(--text-dim)">${durationHint(fc)}</span>
       </div>
     `;
     sec.appendChild(row);
   });
+}
+
+// MiniMax H3 only renders frame counts on a 17k+5 grid, so the number the user
+// types is snapped up before it reaches the model — show the duration that
+// actually results rather than the one they asked for.
+const alignMinimaxFrames = n => { let v = Math.max(5, n || 0); while (v % 17 !== 5) v++; return v; };
+
+function durationHint(frames) {
+  if (!isMinimax()) return '';
+  const snapped = alignMinimaxFrames(frames);
+  const capped = snapped > frameBounds().max ? ' — capped' : '';
+  return `→ ${snapped} f ≈ ${(snapped / 24).toFixed(1)}s${capped}`;
+}
+
+// The `max` attribute only binds the spinner arrows — a typed value sails
+// straight past it. Everything that reads a frame count goes through here, so
+// an over-budget number can't reach the GPU and hang ComfyUI.
+function readFrameCount(input) {
+  const b = frameBounds();
+  const raw = parseInt(input.value) || b.def;
+  return Math.min(b.max, Math.max(b.min, raw));
+}
+
+function updateFramesHint(input) {
+  const hint = input.parentElement.querySelector('.frames-hint');
+  if (hint) hint.textContent = durationHint(Math.min(frameBounds().max, parseInt(input.value) || 0));
 }
 
 function _esc(s) {
@@ -839,7 +920,7 @@ function _resetSuggestI2vButton() {
   btn.disabled = false; btn.textContent = '✨ Suggest prompts';
 }
 
-// Per-image LTX/Wan animation prompts run as a polled background job — N
+// Per-image MiniMax/Wan animation prompts run as a polled background job — N
 // serialized VLM calls (one per image) easily clear a minute and would 524
 // behind the Cloudflare tunnel's ~100s timeout if awaited inline. Mirrors
 // pollStoryJob's shape.
@@ -1062,6 +1143,7 @@ function pollStoryJob(jobId) {
     }
     $('story-fill').style.width = Math.max(2, Math.min(100, Number(job.pct) || 0)) + '%';
     $('story-msg').textContent = job.message || '';
+    $('story-detail').textContent = job.detail || '';
     renderStoryThumbs(job.frames || []);
 
     if (job.status === 'done' || job.status === 'failed') {
@@ -1202,15 +1284,16 @@ async function generate() {
     let body;
     if (isPerImageMode()) {
       const rows = Array.from($('per-img-section').querySelectorAll('.per-img-row'));
+      const b = frameBounds();
       body = {
         image_ids:       state.selectedImages.map(i => i.id),
-        workflow:        state.mode,   // 'i2v_multi' | 'ltx_i2v'
+        workflow:        state.mode,   // 'i2v_multi' | 'minimax_i2v'
         width:           state.width,
         height:          state.height,
-        fps:             parseInt($('fps-select').value) || 24,
-        frame_count:     49,
+        fps:             isMinimax() ? 24 : (parseInt($('fps-select').value) || 24),
+        frame_count:     b.def,
         prompts:         rows.map(r => r.querySelector('.per-img-prompt').value.trim()),
-        frame_counts:    rows.map(r => parseInt(r.querySelector('.per-img-frames').value) || 49),
+        frame_counts:    rows.map(r => readFrameCount(r.querySelector('.per-img-frames'))),
         rife_multiplier: state.rifeMultiplier,
         pingpong:        state.pingpong,
       };
@@ -1271,7 +1354,9 @@ function startProgressPolling(videoId) {
         await loadVideos();
       }
     } catch(_) {}
-  }, 4000);
+    // 2.5s rather than 4s: the payload now carries ComfyUI's live sampler
+    // step, which is only worth showing if it keeps up with the render.
+  }, 2500);
   state.progressIntervals.set(videoId, intervalId);
 }
 
@@ -1279,6 +1364,14 @@ function startProgressPolling(videoId) {
 function _postRenderVideo(v) {
   if (v.status === 'generating' || v.status === 'assembling') startProgressPolling(v.id);
   else if (_isClipJob(v)) renderClipStack(v.id);
+  // An upscale runs for many minutes, long enough that a reload mid-render is
+  // normal rather than exotic. The server knows it is still going; pick the
+  // poll back up so the card finishes on its own instead of showing
+  // "Upscaling…" until the next manual refresh.
+  if (v.upscale_rendering && !state.upscalingVideos.has(v.id)) {
+    state.upscalingVideos.add(v.id);
+    pollUpscale(v.id, null, 0);
+  }
 }
 
 // ── Clip stacks + cross-job merge ─────────────────────────────────────────────
@@ -1452,11 +1545,14 @@ function applyProgress(videoId, prog) {
   const fill = card.querySelector('.progress-fill');
   const msg  = card.querySelector('.progress-message');
   const pctEl = card.querySelector('.progress-pct');
+  const detailEl = card.querySelector('.progress-detail');
   if (!fill) return;
   const pct = Math.max(2, Math.min(100, Number(prog.pct) || 0));
   fill.style.width = pct + '%';
   if (msg) msg.textContent = prog.message || '';
   if (pctEl) pctEl.textContent = `${Math.round(pct)}%`;
+  // `detail` is ComfyUI's live node/step readout, absent between submissions.
+  if (detailEl) detailEl.textContent = prog.detail || '';
 
   const currentIdx = PHASE_ORDER[prog.phase] ?? 0;
   const failed = prog.phase === 'failed';
@@ -1494,8 +1590,10 @@ function _videoMeta(v) {
   if (v.workflow === 'merge') {
     return `Merged from ${n} clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
   }
-  if (v.workflow === 'ltx_i2v') {
-    return `${n} LTX clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps · 🔊`;
+  if (v.workflow === 'minimax_i2v' || v.workflow === 'ltx_i2v') {
+    // ltx_i2v is retired but still on older rows in the library.
+    const label = v.workflow === 'minimax_i2v' ? 'MiniMax' : 'LTX';
+    return `${n} ${label} clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps · 🔊`;
   }
   if (v.workflow === 'i2v_multi') {
     return `${n} i2v clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
@@ -1509,7 +1607,7 @@ function _videoMeta(v) {
 // six long prompts stays compact.
 function _promptCollapse(v) {
   if (!v.prompt) return '';
-  const perClip = v.workflow === 'i2v_multi' || v.workflow === 'ltx_i2v' || v.workflow === 'flf2v';
+  const perClip = ['i2v_multi', 'minimax_i2v', 'ltx_i2v', 'flf2v'].includes(v.workflow);
   const buckets = perClip ? v.prompt.split(' | ').filter(Boolean) : [v.prompt];
   if (!buckets.length) return '';
   const label = buckets.length > 1 ? `Prompts (${buckets.length})` : 'Prompt';
@@ -1568,8 +1666,12 @@ function makeVideoCard(v) {
   } else if (v.status === 'done' && v.url) {
     const videoUrl = withAuth(v.url);
     const thumbUrl = v.thumb_url ? withAuth(v.thumb_url) : null;
-    const stBadge = (v.has_soundtrack ? '<div class="soundtrack-badge">♪</div>' : '')
-                  + (v.has_grain ? `<div class="grain-badge">▒ ${v.grain_strength}</div>` : '');
+    const badges = [
+      v.has_soundtrack ? '<div>♪</div>' : '',
+      v.has_upscale ? `<div>⤢ ${v.upscale_resolution}p${v.upscale_rife > 1 ? ` ${v.upscale_rife}×` : ''}</div>` : '',
+      v.has_grain ? `<div>▒ ${v.grain_strength}</div>` : '',
+    ].join('');
+    const stBadge = badges ? `<div class="badge-stack">${badges}</div>` : '';
     if (thumbUrl) {
       body = `
         <div class="video-preview-wrap" id="wrap-${v.id}">
@@ -1595,6 +1697,7 @@ function makeVideoCard(v) {
         </div>
         <div class="progress-track"><div class="progress-fill" style="width:3%"></div></div>
         <div><span class="progress-message">Starting…</span><span class="progress-pct"></span></div>
+        <div class="progress-detail"></div>
       </div>`;
   } else if (v.status === 'failed') {
     body = `<div class="error-text">${v.error || 'Unknown error'}</div>`;
@@ -1631,6 +1734,7 @@ function makeVideoCard(v) {
     <div class="video-meta"><strong>${meta}</strong></div>
     ${_promptCollapse(v)}
     ${_soundtrackBlock(v)}
+    ${_upscaleBlock(v)}
     ${_grainBlock(v)}
     ${body}
     <div class="video-actions">${actions}</div>
@@ -1661,6 +1765,230 @@ function _soundtrackBlock(v) {
   </div>`;
 }
 
+// ── SEEDVR2 upscale ───────────────────────────────────────────────────────────
+// MiniMax renders on a deliberately small canvas because its cost scales with
+// pixels; this pass buys the resolution back afterwards, per video, on demand.
+// It runs for minutes per second of footage, so the chip fetches an estimate
+// from the server before the user commits rather than after.
+//
+// RIFE runs here rather than during generation, and that ordering is the whole
+// trick: the restorer only ever sees the model's real frames, so interpolation
+// stops multiplying the expensive stage. Measured, 124 frames at 1080p — 3x
+// costs the upscale nothing extra and RIFE itself 50 s, against ~32 extra
+// minutes when the interpolated frames go through SEEDVR2 instead.
+
+const UPSCALE_RESOLUTIONS = [720, 1080];
+const UPSCALE_DEFAULT = 1080;
+const UPSCALE_RIFE_OPTIONS = [1, 2, 3, 4];
+
+function _upscaleResolution(id) {
+  // A chip the user has already picked wins over the persisted value, so a
+  // card re-render doesn't snap the selection back.
+  if (state.upscaleDraft.has(id)) return state.upscaleDraft.get(id);
+  const v = state.videos.find(x => x.id === id);
+  return (v && v.upscale_resolution) || UPSCALE_DEFAULT;
+}
+
+function _upscaleRife(id) {
+  if (state.upscaleRifeDraft.has(id)) return state.upscaleRifeDraft.get(id);
+  const v = state.videos.find(x => x.id === id);
+  return (v && v.upscale_rife) || 1;
+}
+
+function fmtEta(seconds) {
+  if (!seconds) return '';
+  if (seconds < 90) return `~${Math.round(seconds)}s`;
+  return `~${Math.round(seconds / 60)} min`;
+}
+
+function _upscaleBlock(v) {
+  if (v.status !== 'done' || !v.filename) return '';
+  // `upscale_rendering` is the server's view, which survives a page reload;
+  // the local set covers the gap between clicking Run and the first poll.
+  if (v.upscale_rendering || state.upscalingVideos.has(v.id)) {
+    // The detail line is filled in by pollUpscale from /progress — SEEDVR2
+    // runs for many minutes, and "Upscaling…" alone says nothing about where
+    // in that it currently is.
+    return `<div class="post-chip working">
+      <div class="row"><span class="glyph">⤢</span><span class="label">Upscaling… (minutes)</span></div>
+      <div class="progress-detail" id="up-detail-${v.id}"></div>
+    </div>`;
+  }
+  const r = _upscaleResolution(v.id);
+  const rife = _upscaleRife(v.id);
+  const eta = state.upscaleEta.get(_etaKey(v.id, r, rife));
+  const chips = UPSCALE_RESOLUTIONS.map(res =>
+    `<button class="chip-btn ${res === r ? 'on' : ''}"
+             onclick="pickUpscaleResolution('${v.id}', ${res})">${res}p</button>`
+  ).join('');
+  // Interpolation time-stretches whatever audio is present, which re-syncs a
+  // model's own generated track but would wreck an attached song — so the row
+  // states the reason instead of offering a control that 409s.
+  const rifeRow = v.has_soundtrack
+    ? `<div class="row"><span class="label">Interpolation</span>
+         <span class="hint">unavailable while a song is attached</span></div>`
+    : `<div class="row wrap">
+         <span class="label">Interpolation</span>
+         ${UPSCALE_RIFE_OPTIONS.map(m =>
+           `<button class="chip-btn ${m === rife ? 'on' : ''}"
+                    onclick="pickUpscaleRife('${v.id}', ${m})">${m === 1 ? 'off' : m + '×'}</button>`
+         ).join('')}
+       </div>`;
+  return `<div class="post-chip" id="upscale-chip-${v.id}">
+    <div class="row wrap">
+      <span class="glyph">⤢</span>
+      <span class="label">Upscale</span>
+      ${chips}
+      <span class="hint" id="upscale-eta-${v.id}">${eta ? _etaText(eta) : ''}</span>
+    </div>
+    ${rifeRow}
+    <div class="row">
+      <button class="chip-btn apply" onclick="applyUpscale('${v.id}')">${v.has_upscale ? 'Re-run' : 'Run'}</button>
+      ${v.has_upscale ? `<button class="chip-btn remove" onclick="removeUpscale('${v.id}')">Remove</button>` : ''}
+    </div>
+  </div>`;
+}
+
+function _etaKey(id, res, rife) {
+  return `${id}:${res}:${rife}`;
+}
+
+function _etaText(eta) {
+  const rife = eta.rife_multiplier > 1 ? ` · ${eta.rife_multiplier}× frames` : '';
+  return `→ ${eta.width}×${eta.height}${rife} · ${fmtEta(eta.seconds)}`;
+}
+
+function pickUpscaleResolution(id, res) {
+  state.upscaleDraft.set(id, res);
+  _redrawUpscaleChip(id);
+  loadUpscaleEstimate(id, res, _upscaleRife(id));
+}
+
+function pickUpscaleRife(id, mult) {
+  state.upscaleRifeDraft.set(id, mult);
+  _redrawUpscaleChip(id);
+  loadUpscaleEstimate(id, _upscaleResolution(id), mult);
+}
+
+function _redrawUpscaleChip(id) {
+  // Swap the chip alone rather than re-rendering the card — updateVideoCard
+  // replaces the <video> element too, which would stop playback mid-look.
+  const v = state.videos.find(x => x.id === id);
+  const chip = document.getElementById(`upscale-chip-${id}`);
+  if (v && chip) chip.outerHTML = _upscaleBlock(v);
+}
+
+async function loadUpscaleEstimate(id, res, rife) {
+  // Fetched on intent rather than on render: it costs two ffprobe calls per
+  // video server-side, and a library page would fire one for every card.
+  const key = _etaKey(id, res, rife);
+  if (state.upscaleEta.has(key)) return state.upscaleEta.get(key);
+  try {
+    const r = await api(
+      `/api/video/jobs/${id}/upscale/estimate?resolution=${res}&rife_multiplier=${rife}`);
+    const d = await r.json();
+    state.upscaleEta.set(key, d);
+    const el = document.getElementById(`upscale-eta-${id}`);
+    if (el) el.textContent = _etaText(d);
+    return d;
+  } catch (e) { return null; }
+}
+
+async function applyUpscale(id) {
+  const resolution = _upscaleResolution(id);
+  const v0 = state.videos.find(x => x.id === id);
+  // A draft picked before a song was attached would otherwise survive into a
+  // request the server refuses — the chip hides the control, so the value
+  // has to be neutralised here rather than left to 409.
+  const rife = (v0 && v0.has_soundtrack) ? 1 : _upscaleRife(id);
+  // The estimate is what makes this decision informed, so it is worth waiting
+  // for before the confirm rather than showing a bare "are you sure".
+  const eta = await loadUpscaleEstimate(id, resolution, rife);
+  const cost = eta ? ` It should take ${fmtEta(eta.seconds)} and produce ${eta.width}×${eta.height}.` : '';
+  const interp = rife > 1 ? ` with ${rife}× interpolation` : '';
+  if (!confirm(`Upscale to ${resolution}p${interp}?${cost} The GPU is busy for the whole render.`)) return;
+  state.upscalingVideos.add(id);
+  try {
+    const r = await api(`/api/video/jobs/${id}/upscale`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({resolution, rife_multiplier: rife}),
+    });
+    updateVideoCard(await r.json());
+    pollUpscale(id, resolution, eta ? eta.seconds : 0);
+  } catch (e) {
+    state.upscalingVideos.delete(id);
+    ArtRium.toast('Upscale failed: ' + e.message, true);
+  }
+}
+
+async function removeUpscale(id) {
+  if (!confirm('Remove the upscale and go back to the original resolution?')) return;
+  try {
+    const r = await api(`/api/video/jobs/${id}/upscale`, {method: 'DELETE'});
+    state.upscaleDraft.delete(id);
+    state.upscaleRifeDraft.delete(id);
+    updateVideoCard(await r.json());
+    ArtRium.toast('Upscale removed');
+  } catch (e) {
+    ArtRium.toast('Remove failed: ' + e.message, true);
+  }
+}
+
+// ComfyUI's live stage for a running upscale, written into the chip. Separate
+// from the completion poll above because it is purely cosmetic: any failure
+// here leaves the previous text alone rather than disturbing the render watch.
+async function _showUpscaleStage(id) {
+  const el = document.getElementById(`up-detail-${id}`);
+  if (!el) return;
+  try {
+    const r = await api(`/api/video/jobs/${id}/progress`);
+    const prog = await r.json();
+    el.textContent = prog.detail || '';
+  } catch (_) {}
+}
+
+function pollUpscale(id, resolution, etaSeconds) {
+  // Same shape as pollGrain — status stays 'done' throughout, so completion
+  // needs `upscale_rendering` rather than the resolution field, which a re-run
+  // at the same resolution never changes. The give-up window is derived from
+  // the estimate: a fixed one would either abandon a long clip mid-render or
+  // leave a short one spinning for an hour after it failed.
+  //
+  // `resolution` is null when picking up a render that was already running at
+  // page load — the row does not yet say which resolution was asked for, so
+  // any finished upscale counts.
+  const startedAt = Date.now();
+  const limit = Math.min(4 * 3600e3, Math.max(30 * 60e3, (etaSeconds || 0) * 4000));
+  const interval = setInterval(async () => {
+    try {
+      const r = await api(`/api/video/jobs/${id}`);
+      const v = await r.json();
+      const matches = !resolution || v.upscale_resolution === resolution;
+      if (!v.upscale_rendering && v.has_upscale && matches) {
+        clearInterval(interval);
+        state.upscalingVideos.delete(id);
+        updateVideoCard(v);
+        ArtRium.toast(`Upscaled to ${v.upscale_resolution}p`);
+        return;
+      }
+      if (v.error) {
+        clearInterval(interval);
+        state.upscalingVideos.delete(id);
+        updateVideoCard(v);
+        ArtRium.toast('Upscale failed: ' + v.error, true);
+        return;
+      }
+      await _showUpscaleStage(id);
+    } catch (e) { /* transient network error — keep polling */ }
+    if (Date.now() - startedAt > limit) {
+      clearInterval(interval);
+      state.upscalingVideos.delete(id);
+      ArtRium.toast('Upscale took too long — refresh to see status', true);
+    }
+  }, 5000);
+}
+
 // ── Film grain ────────────────────────────────────────────────────────────────
 // Wan2.2 clips come out plastic-smooth. The grain pass re-encodes into a
 // sibling file, so any strength can be tried and undone. The preview grades
@@ -1680,13 +2008,13 @@ function _grainStrength(v) {
 function _grainBlock(v) {
   if (v.status !== 'done' || !v.filename) return '';
   if (state.grainingVideos.has(v.id)) {
-    return `<div class="grain-chip working">
+    return `<div class="post-chip working">
       <div class="row"><span class="glyph">▒</span><span class="label">Applying grain…</span></div>
     </div>`;
   }
   const s = _grainStrength(v);
   const prev = state.grainPreviewUrl.get(v.id);
-  return `<div class="grain-chip" id="grain-chip-${v.id}">
+  return `<div class="post-chip" id="grain-chip-${v.id}">
     <div class="row">
       <span class="glyph">▒</span>
       <span class="label">Grain</span>
@@ -1899,6 +2227,10 @@ state.muxingVideos = new Set();
 state.grainingVideos = new Set();   // videos with a grain render in flight
 state.grainDraft = new Map();       // videoId → strength currently on the slider
 state.grainPreviewUrl = new Map();  // videoId → last rendered preview URL
+state.upscalingVideos = new Set();  // videos with a SEEDVR2 render in flight
+state.upscaleDraft = new Map();     // videoId → target short edge currently picked
+state.upscaleRifeDraft = new Map(); // videoId → interpolation factor currently picked
+state.upscaleEta = new Map();       // "videoId:resolution:rife" → {width, height, seconds, …}
 
 async function openSongPicker(videoId) {
   state.songPickerVideoId = videoId;

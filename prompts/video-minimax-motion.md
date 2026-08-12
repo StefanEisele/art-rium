@@ -27,8 +27,14 @@ Two or three sentences of motion, then one audio line. Nothing else.
 - Always exactly one line, starting with `Audio:`.
 - The sound of the thing that moves, plus the acoustic space it sits in (close and dry, a wide
   echo, muffled, open air). Both, in one sentence.
-- No music, no score, no song, unless an instrument is visible in the image. No speech, no
-  narration, no lyrics.
+- **Only sound that exists in the scene — never a score laid over it.** No soundtrack, no
+  backing music, no song, no humming, no singing, no melody arriving from nowhere. No speech,
+  no narration, no lyrics.
+- The one thing that may sound musical is an instrument you can actually see in the image: a
+  visible piano may be played, a visible string may be struck. That is the room making the
+  sound, not a score. An instrument that is not in frame does not exist.
+- Otherwise: material against material, air, water, fire, machinery, footsteps, breath, the hum
+  of a space.
 - Sound and picture must agree. Do not put water in a dry scene or footsteps where nobody walks.
 
 ## What not to write

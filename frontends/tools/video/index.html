@@ -334,6 +334,12 @@
     .song-row audio { width: 100%; height: 32px; }
     .song-row .use-btn { align-self: flex-end; padding: 6px 12px; background: var(--accent); color: var(--on-accent); border: none; border-radius: 6px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
     .song-row .use-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .bed-row {
+      display: flex; align-items: flex-start; gap: 9px; cursor: pointer;
+      padding: 4px 14px 10px; font-size: 13px; color: var(--text);
+    }
+    .bed-row input { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; margin-top: 1px; }
+    .bed-row .hint { display: block; font-size: 11px; color: var(--text-dim); line-height: 1.4; }
 
     /* ── Picker modal (base in shared.css; deltas only below) ── */
     .picker-search { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
@@ -509,6 +515,16 @@
   <div class="picker-search">
     <input type="search" id="song-picker-search" placeholder="Search title / tags…" autocomplete="off">
   </div>
+  <!-- Same ambient bed the improv tool offers, at the same level: the clip's
+       own generated sound stays audible under the song instead of being
+       replaced by it. No-op on a silent clip, which the server probes for. -->
+  <label class="bed-row">
+    <input type="checkbox" id="song-bed-toggle">
+    <span>
+      Video-Geräusche leise mitlaufen lassen
+      <span class="hint">Der eigene Ton des Clips bleibt unter dem Song hörbar (wirkt nur, wenn der Clip Ton hat).</span>
+    </span>
+  </label>
   <div id="song-list"><div style="color:var(--text-dim);padding:20px;text-align:center">Loading…</div></div>
 </div>
 
@@ -586,11 +602,11 @@ const maxImagesForMode = () =>
 const MINIMAX_PIXEL_FRAME_BUDGET = 58e6;
 const FRAME_BOUNDS_WAN = {min: 5, max: 81, step: 1, def: 49};
 
-// Default clip length for MiniMax, in frames. 90 sits on the model's 17k+5
-// grid (17*5+5) and is 3.75 s at its fixed 24 fps — a working default rather
-// than the longest render the VRAM budget happens to allow, which at 864x480
-// is 124 frames and roughly a third longer to wait for.
-const MINIMAX_DEFAULT_FRAMES = 90;
+// Default clip length for MiniMax, in frames. The model only accepts lengths
+// on its 17k+5 grid (…, 56, 73, 90, 107, …) and `align_minimax_length` snaps
+// anything else *up*, so 73 (17*4+5, 3.04 s at the fixed 24 fps) is what a
+// request for the nearby off-grid values actually renders as.
+const MINIMAX_DEFAULT_FRAMES = 73;
 
 function frameBounds() {
   if (!isMinimax()) return FRAME_BOUNDS_WAN;
@@ -1981,10 +1997,11 @@ function _soundtrackBlock(v) {
     </div>`;
   }
   if (v.has_soundtrack) {
+    const bed = v.soundtrack_bed_volume ? ' + Clip-Ton' : '';
     return `<div class="soundtrack-chip">
       <span class="glyph">♪</span>
       <span class="label">Soundtrack</span>
-      <span class="name">Attached</span>
+      <span class="name">Attached${bed}</span>
       <button class="chip-btn" onclick="openSongPicker('${v.id}')">Replace</button>
       <button class="chip-btn remove" onclick="removeSoundtrack('${v.id}')">Remove</button>
     </div>`;
@@ -2476,6 +2493,10 @@ async function openSongPicker(videoId) {
   state.songPickerSearch = '';
   $('song-picker-search').value = '';
   $('song-picker-modal').classList.add('show');
+  // Replacing a song keeps whatever bed choice the current one was muxed with,
+  // so swapping the track does not silently drop the clip's own sound.
+  const cur = state.videos.find(v => v.id === state.songPickerVideoId);
+  $('song-bed-toggle').checked = !!(cur && cur.soundtrack_bed_volume);
   $('song-list').innerHTML = '<div style="color:var(--text-dim);padding:20px;text-align:center">Loading…</div>';
   await loadSongs();
   renderSongList();
@@ -2541,6 +2562,10 @@ document.addEventListener('DOMContentLoaded', () => {
 async function useSong(songId) {
   const videoId = state.songPickerVideoId;
   if (!videoId) return;
+  // Read before closing — closeSongPicker leaves the modal (and its checkbox)
+  // in the DOM, but reading it first keeps the two from drifting apart if that
+  // ever changes.
+  const bedWanted = $('song-bed-toggle').checked;
   closeSongPicker();
   state.muxingVideos.add(videoId);
   const cached = state.videos.find(v => v.id === videoId);
@@ -2549,7 +2574,7 @@ async function useSong(songId) {
     await api(`/api/video/jobs/${videoId}/soundtrack`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({song_id: songId}),
+      body: JSON.stringify({song_id: songId, include_bed: bedWanted}),
     });
     pollSoundtrackMux(videoId, songId);
   } catch (e) {

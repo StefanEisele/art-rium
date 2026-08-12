@@ -30,7 +30,7 @@ from services.video.grain import (
     grain_filter,
     preview_window,
 )
-from services.video.soundtrack import _mux_cmd
+from services.video.soundtrack import _mux_cmd, _mux_cmd_with_bed
 from workers.video_generator import _scale_pad, _single_cmd, _slideshow_cmd
 
 
@@ -178,6 +178,72 @@ class TestSoundtrackMuxCmd:
         afade = next(c for c in cmd if c.startswith("afade="))
         assert "st=12.500" in afade
         assert "d=2.000" in afade
+
+
+class TestSoundtrackMuxWithBed:
+    """The song may keep the clip's own generated audio underneath it instead
+    of replacing it — the same ambient bed the improv tool offers."""
+
+    def _cmd(self, bed_volume=0.35, fade_start=10.0, fade_duration=1.0):
+        return _mux_cmd_with_bed(
+            "ffmpeg", Path("video.mp4"), Path("song.mp3"), Path("out.mp4"),
+            fade_start=fade_start, fade_duration=fade_duration, bed_volume=bed_volume,
+        )
+
+    def test_mixes_both_streams_instead_of_mapping_one(self):
+        cmd = self._cmd()
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "[0:a]volume=0.350[bed]" in fc     # the clip's own audio, quiet
+        assert "[1:a]volume=1.000[lead]" in fc    # the song, at full level
+        assert "amix=inputs=2" in fc
+        assert "1:a:0" not in cmd                 # not the replace-audio mapping
+        assert "[aout]" in cmd
+
+    def test_video_stream_is_still_copied(self):
+        cmd = self._cmd()
+        assert "0:v:0" in cmd
+        assert cmd[cmd.index("-c:v") + 1] == "copy"
+
+    def test_fade_applies_to_the_mix_not_the_song_alone(self):
+        # Fading only the music would leave the clip's own noise running on
+        # by itself after the song had gone.
+        cmd = self._cmd(fade_start=12.5, fade_duration=2.0)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "amix=" in fc and fc.index("amix=") < fc.index("afade=")
+        assert "st=12.500" in fc and "d=2.000" in fc
+
+    def test_mix_does_not_rescale_the_song(self):
+        # Measured: amix's default divides each input by their count, so
+        # switching the bed on dropped the song by ~6 dB (-21.7 → -27.7).
+        # Turning the bed on must change what is underneath the music, not
+        # how loud the music is.
+        cmd = self._cmd()
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "normalize=0" in fc
+
+    def test_the_summed_peak_is_limited(self):
+        # The price of normalize=0: song and bed now add up, and unlike the
+        # improv path there is no loudness pass here to catch the peak.
+        cmd = self._cmd()
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "alimiter=" in fc and fc.index("amix=") < fc.index("alimiter=")
+
+    @pytest.mark.parametrize("asked,expected", [(0.0, BED_VOLUME_MIN), (5.0, BED_VOLUME_MAX)])
+    def test_bed_volume_is_clamped_inside_the_filter(self, asked, expected):
+        fc = self._cmd(bed_volume=asked)[self._cmd(bed_volume=asked).index("-filter_complex") + 1]
+        assert f"[0:a]volume={expected:.3f}[bed]" in fc
+
+    def test_shares_its_levels_with_the_improv_bed(self):
+        # Two tools laying down "the same" bed at different levels would sound
+        # like a bug, so both read one calibration.
+        song = self._cmd(bed_volume=0.35)
+        song_fc = song[song.index("-filter_complex") + 1]
+        improv = _synth_cmd_with_bed(
+            "ffmpeg", Path("src.mp4"), Path("rec.mp4"), Path("out.mp4"), bed_volume=0.35,
+        )
+        improv_fc = improv[improv.index("-filter_complex") + 1]
+        assert "[0:a]volume=0.350[bed]" in song_fc
+        assert "[0:a]volume=0.350[bed]" in improv_fc
 
 
 class TestGrainFilter:

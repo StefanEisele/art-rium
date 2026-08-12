@@ -26,23 +26,26 @@ import uuid
 from pathlib import Path
 
 from core.video_thumb import probe_has_audio
+from services.video.audio_bed import (  # noqa: F401  (re-exported for this module's callers)
+    BED_VOLUME_DEFAULT,
+    BED_VOLUME_MAX,
+    BED_VOLUME_MIN,
+    LEAD_VOLUME_DEFAULT,
+    bed_mix_filter,
+    clamp_bed_volume,
+)
 
 logger = logging.getLogger(__name__)
 
 # Loudness target — Instagram recommends -14 LUFS integrated, true-peak <= -1 dBTP.
 _LOUDNORM_FILTER = "loudnorm=I=-14:TP=-1.5:LRA=11"
 
-# "synth" ambient-bed defaults — piano reads as the lead, the source video's
-# own generated audio (e.g. MiniMax H3's native track) sits quietly underneath.
-BED_VOLUME_DEFAULT = 0.35
-PIANO_VOLUME_DEFAULT = 1.0
-BED_VOLUME_MIN = 0.1
-BED_VOLUME_MAX = 0.8
-
-
-def clamp_bed_volume(vol: float) -> float:
-    """Clamp the ambient-bed volume to the supported [MIN, MAX] window."""
-    return max(BED_VOLUME_MIN, min(BED_VOLUME_MAX, vol))
+# "synth" ambient-bed levels — piano reads as the lead, the source video's own
+# generated audio (e.g. MiniMax H3's native track) sits quietly underneath.
+# Shared with the soundtrack path (services/video/audio_bed.py) so a bed sounds
+# the same whichever tool laid it down; re-exported here because this module
+# was the original home and its callers import them from here.
+PIANO_VOLUME_DEFAULT = LEAD_VOLUME_DEFAULT
 
 # PiP inset geometry — confirmed with user 2026-05-16.
 PIP_WIDTH_PCT_DEFAULT = 0.24    # 24% of background width
@@ -171,11 +174,10 @@ def _synth_cmd_with_bed(
     `-shortest` (via amix's duration=shortest) still clips to whichever
     stream ends first, matching _synth_cmd's behaviour.
     """
-    filter_complex = (
-        f"[0:a]volume={bed_volume:.3f}[bed];"
-        f"[1:a]volume={piano_volume:.3f}[piano];"
-        f"[bed][piano]amix=inputs=2:duration=shortest:dropout_transition=0,"
-        f"{_LOUDNORM_FILTER}[aout]"
+    filter_complex = bed_mix_filter(
+        "0:a", "1:a",
+        bed_volume=bed_volume, lead_volume=piano_volume,
+        tail=_LOUDNORM_FILTER,
     )
     return [
         ffmpeg, "-y",

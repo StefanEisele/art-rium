@@ -51,6 +51,7 @@ DELETE /api/video/{id}              → delete a video/job (cascades to its clip
 import asyncio
 import logging
 import random
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -102,6 +103,7 @@ from services.ollama.zimage_enhance import get_zimage_style_block
 from services.video.audio_stretch import stretch_audio_to_video, stretch_native_audio
 from services.video.grain import render_grain, render_grain_preview
 from services.video.merge import MergeInput, merge_clips
+from services.video.audio_bed import BED_VOLUME_DEFAULT, clamp_bed_volume
 from services.video.soundtrack import mux_soundtrack
 from services.video.upscale import (
     RESOLUTION_MAX,
@@ -486,6 +488,45 @@ def adapt_minimax_canvas(width: int, height: int) -> tuple[int, int]:
     return (max(m, round(w / m) * m), max(m, round(h / m) * m))
 
 
+# MiniMax samples the audio jointly with the picture, from the same prompt
+# text, and the graph is guidance-free — there is no negative prompt to push
+# back with. Left to decide for itself on this library's still, moody frames it
+# reliably reaches for score, so "sound, not music" has to be stated in the
+# positive prompt. prompts/video-minimax-motion.md says it too, but that only
+# reaches prompts the suggester wrote; this reaches every submission, including
+# hand-typed ones.
+# The constraint is against a *score* — music laid over the scene — not against
+# every musical sound: an instrument visible in the frame may be played, because
+# that is the room making the noise. prompts/video-minimax-motion.md draws the
+# same line for the suggester.
+_MMX_NO_MUSIC = "No background music or score — only sound that exists in the scene itself."
+_MMX_AUDIO_FALLBACK = (
+    "Audio: only the sound the moving thing itself makes, and the acoustic space around it."
+)
+_AUDIO_LINE_RE = re.compile(r"(?mi)^\s*audio\s*:")
+_NO_MUSIC_RE = re.compile(r"(?i)\bno (background )?(music|score|soundtrack)\b")
+
+
+def ensure_sound_only_audio(prompt: str) -> str:
+    """Make the prompt ask for noise rather than music.
+
+    Two independent gaps to close: a prompt with no audio line at all leaves
+    the choice to the model, and a prompt that describes sound without ruling
+    music out leaves it ambiguous. Adds only what is missing, and never
+    rewrites or drops what the caller wrote — a hand-typed audio description
+    survives verbatim, it just stops being an open invitation for a score.
+
+    Applied when building the workflow, not when persisting the clip, so the
+    stored prompt stays the one the user actually wrote.
+    """
+    out = prompt.strip()
+    if not _AUDIO_LINE_RE.search(out):
+        out = f"{out}\n{_MMX_AUDIO_FALLBACK}" if out else _MMX_AUDIO_FALLBACK
+    if not _NO_MUSIC_RE.search(out):
+        out = f"{out} {_MMX_NO_MUSIC}"
+    return out
+
+
 def _build_minimax_single_workflow(
     comfy_filename: str,
     prompt: str,
@@ -545,7 +586,7 @@ def _build_minimax_single_workflow(
         # ── Conditioning + empty AV latent (one node does both) ──
         p+"i2v":   {"class_type": "MiniMaxH3ImageToVideo", "inputs": {
             "clip": [p+"clip", 0], "vae": [p+"vae", 0],
-            "prompt": prompt,
+            "prompt": ensure_sound_only_audio(prompt),
             "width": width, "height": height, "length": length,
             "first_frame": [p+"scale", 0],
         }},
@@ -2062,11 +2103,21 @@ async def delete_video(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 class SoundtrackAttach(BaseModel):
     song_id: uuid.UUID
+    # Keep the clip's own generated audio under the song instead of replacing
+    # it. Off by default: the historical behaviour, and the right one for a
+    # silent Wan clip where there is nothing to keep.
+    include_bed: bool = False
+    bed_volume: float = BED_VOLUME_DEFAULT
 
 
-async def _run_soundtrack_mux(video_id: uuid.UUID, song_id: uuid.UUID) -> None:
+async def _run_soundtrack_mux(
+    video_id: uuid.UUID, song_id: uuid.UUID, bed_volume: float | None = None,
+) -> None:
     """Background task: probe the video, mux the song's audio with fade-out,
-    persist the muxed filename + FK. On failure write `error` on the Video row."""
+    persist the muxed filename + FK. On failure write `error` on the Video row.
+
+    `bed_volume` not None keeps the video's own generated audio under the song
+    at that level; None replaces it, as attaching a song always used to."""
     video_key = str(video_id)
     try:
         async with AsyncSessionLocal() as db:
@@ -2091,12 +2142,15 @@ async def _run_soundtrack_mux(video_id: uuid.UUID, song_id: uuid.UUID) -> None:
             video_path, song_path, out_path,
             ffmpeg_path=settings.ffmpeg_path,
             fade_out_seconds=1.0,
+            include_bed=bed_volume is not None,
+            bed_volume=bed_volume if bed_volume is not None else BED_VOLUME_DEFAULT,
         )
 
         async with AsyncSessionLocal() as db:
             video = await db.get(Video, video_id)
             if video:
                 video.soundtrack_song_id = song_id
+                video.soundtrack_bed_volume = bed_volume
                 video.muxed_filename = out_name
                 video.error = None
                 await db.commit()
@@ -2165,7 +2219,10 @@ async def attach_soundtrack(
         "message": "Adding soundtrack…",
         "pct": 10,
     }
-    safe_create_task(_run_soundtrack_mux(video_id, body.song_id), name=f"soundtrack_mux:{video_id}")
+    bed = clamp_bed_volume(body.bed_volume) if body.include_bed else None
+    safe_create_task(
+        _run_soundtrack_mux(video_id, body.song_id, bed), name=f"soundtrack_mux:{video_id}",
+    )
     return _serialize(video)
 
 
@@ -3002,6 +3059,7 @@ def _serialize(v: Video) -> dict:
         "soundtrack_song_id": str(v.soundtrack_song_id) if v.soundtrack_song_id else None,
         "muxed_filename":    v.muxed_filename,
         "has_soundtrack":    bool(v.muxed_filename),
+        "soundtrack_bed_volume": v.soundtrack_bed_volume,
         "upscale_resolution": v.upscale_resolution,
         "upscale_rife":      v.upscale_rife,
         "has_upscale":       bool(v.upscale_filename),

@@ -10,6 +10,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -342,6 +343,12 @@ class Video(Base):
     prompt: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(String(255))   # user-editable display title
     notes: Mapped[str | None] = mapped_column(Text)          # user-editable free-form notes
+    # Ambient bed: how loudly the video's OWN generated audio plays under the
+    # attached song. Null = the song replaces the clip's sound entirely, which
+    # is the historical behaviour and stays the default. Persisted because the
+    # mux is re-run whenever its source changes (upscale, grain) and would
+    # otherwise silently drop the bed on the next re-render.
+    soundtrack_bed_volume: Mapped[float | None] = mapped_column(Float)
     # Optional muxed soundtrack (Song attached via /tools/video detail modal)
     soundtrack_song_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("songs.id", ondelete="SET NULL"), nullable=True

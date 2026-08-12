@@ -20,6 +20,7 @@ from routers.video import (
     _validate_upscale_target,
     adapt_minimax_canvas,
     align_minimax_length,
+    ensure_sound_only_audio,
 )
 from services.video.upscale import (
     build_upscale_workflow,
@@ -156,6 +157,48 @@ class TestAdaptMinimaxCanvas:
             assert aw * ah <= 768 * 1344 * 1.05
 
 
+class TestEnsureSoundOnlyAudio:
+    """MiniMax samples audio from the same prompt and has no negative prompt,
+    so "noise, not music" has to be in the positive text of every submission —
+    not only the ones whose prompt the suggester wrote."""
+
+    def test_prompt_without_an_audio_line_gets_one(self):
+        out = ensure_sound_only_audio("Smoke curls off the surface.")
+        assert "Audio:" in out
+        assert "No background music or score" in out
+        assert out.startswith("Smoke curls off the surface.")
+
+    def test_existing_audio_line_survives_verbatim(self):
+        out = ensure_sound_only_audio("Rain falls.\nAudio: heavy drops on tin, close and dry.")
+        assert "Audio: heavy drops on tin, close and dry." in out
+        assert out.count("Audio:") == 1          # no second, competing line
+        assert "No background music or score" in out
+
+    def test_prompt_that_already_rules_music_out_is_untouched(self):
+        original = "Ash drifts.\nAudio: a low room tone. No music, no score."
+        assert ensure_sound_only_audio(original) == original
+
+    def test_empty_prompt_still_asks_for_sound(self):
+        out = ensure_sound_only_audio("   ")
+        assert out.startswith("Audio:")
+        assert "No background music or score" in out
+
+    def test_the_directive_reaches_the_workflow(self):
+        wf, _, _ = _build_minimax_single_workflow(
+            "img.png", "Smoke curls.", 56, 864, 480, "vid",
+        )
+        node = next(n for n in wf.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+        assert "No background music or score" in node["inputs"]["prompt"]
+
+    def test_case_and_spacing_variants_count_as_an_audio_line(self):
+        for text in ["Wind moves.\naudio: hiss.", "Wind moves.\n  Audio : hiss."]:
+            out = ensure_sound_only_audio(text)
+            # "Audio :" with a space is not the documented shape, so a fallback
+            # line is acceptable there — what must never happen is losing the
+            # user's own words.
+            assert "hiss." in out
+
+
 class TestBuildMinimaxSingleWorkflow:
     def test_default_no_rife_node_wired_straight_from_decode(self):
         wf, save_id, _ = _build_minimax_single_workflow(
@@ -231,10 +274,14 @@ class TestBuildMinimaxSingleWorkflow:
         assert wf["mmx_i2v"]["inputs"]["first_frame"] == ["mmx_scale", 0]
 
     def test_prompt_lands_in_the_conditioning_node(self):
+        # Verbatim, then the audio directive — the model samples sound from
+        # this same text and has no negative prompt to hear "not a score" from.
         wf, _, _ = _build_minimax_single_workflow(
             "img.png", "a specific minimax prompt", 124, 768, 768, "prefix",
         )
-        assert wf["mmx_i2v"]["inputs"]["prompt"] == "a specific minimax prompt"
+        prompt = wf["mmx_i2v"]["inputs"]["prompt"]
+        assert prompt.startswith("a specific minimax prompt")
+        assert "No background music or score" in prompt
 
     def test_sampling_is_guidance_free_off_the_conditioning_output(self):
         # BasicGuider takes positive only — H3 has no negative prompt / cfg.

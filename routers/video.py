@@ -27,6 +27,12 @@ number of jobs, in any order, mixed workflows allowed) via POST
 a new Video row with workflow="merge". Sources can optionally be deleted
 after a successful merge.
 
+The SEEDVR2 upscale exists at both levels, and which one to use is a real
+choice: per CLIP (before merging) keeps the restorer and RIFE inside one
+continuous shot, per VIDEO runs them across the cuts a merge introduced,
+which shows up as morphing at the edits. Upscale the clips, merge, then
+grain the result.
+
 POST /api/video/generate            → enqueue job, return {video_id}
 POST /api/video/suggest-transitions → VLM-suggested per-transition prompts (flf2v)
 POST /api/video/suggest-i2v         → VLM-suggested surreal per-image prompts (i2v/minimax)
@@ -34,6 +40,8 @@ GET  /api/video/jobs/{id}           → poll status
 GET  /api/video/jobs/{id}/progress  → lightweight progress (ComfyUI queue + phase)
 GET  /api/video/clips               → all library clips (frontend groups by job)
 DELETE /api/video/clips/{clip_id}   → delete one clip (empty source jobs are pruned)
+POST /api/video/clips/{id}/upscale  → SEEDVR2 pass on ONE clip, before merging
+DELETE /api/video/clips/{id}/upscale→ drop it again
 POST /api/video/merge               → concat chosen clips (cross-job) into a new video
 GET  /api/video/thumb/{id}          → first-frame JPEG thumbnail
 GET  /api/video/file/{fname}        → serve MP4
@@ -1219,10 +1227,26 @@ async def _delete_clips(clip_ids: list[uuid.UUID]) -> None:
             seg_dir = _segments_dir(c.video_id)
             (seg_dir / c.filename).unlink(missing_ok=True)
             (seg_dir / c.thumb).unlink(missing_ok=True)
+            if c.upscale_filename:
+                (seg_dir / c.upscale_filename).unlink(missing_ok=True)
+            _progress.pop(_clip_key(c.id), None)
             await db.delete(c)
         await db.commit()
         for jid in job_ids:
             await _prune_empty_clip_job(db, jid)
+
+
+def _merge_canvas(clips: list[VideoClip]) -> tuple[int, int]:
+    """Normalisation target for a merge: the largest effective canvas selected.
+
+    Effective, not stored — an upscaled clip's real size is its upscale's, and
+    the merge is the whole reason that pass exists. Largest rather than the
+    first clip's: with a uniform selection (the ordinary case) the two agree,
+    and where they disagree it is because only some clips were upscaled, where
+    "first wins" would scale the restored ones back down and undo the work.
+    """
+    sizes = [_clip_dimensions(c) for c in clips] or [(None, None)]
+    return max(((w or 960, h or 960) for w, h in sizes), key=lambda wh: wh[0] * wh[1])
 
 
 async def _run_merge(
@@ -1247,15 +1271,16 @@ async def _run_merge(
 
         inputs: list[MergeInput] = []
         for c in clips:
-            f = _segments_dir(c.video_id) / c.filename
+            # The upscaled rendition when the clip has one: upscaling happens
+            # per clip precisely so the merge can consume it, and reading
+            # `filename` here would throw that work away.
+            f = _clip_primary_path(c)
             if not f.exists():
                 raise FileNotFoundError(f"Clip file missing on disk: {f}")
             inputs.append(MergeInput(path=f, has_audio=c.has_audio))
 
-        # Normalization target: the first selected clip decides.
-        width  = clips[0].width  or 960
-        height = clips[0].height or 960
-        fps    = clips[0].fps    or 24
+        width, height = _merge_canvas(clips)
+        fps = clips[0].fps or 24
         dest = settings.videos_dir / f"{video_id}_artrium.mp4"
 
         _set_progress(vid_key, "finalizing", f"Merging {len(clips)} clip(s)…", 40)
@@ -1815,19 +1840,31 @@ async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
 
 
 def _serialize_clip(c: VideoClip) -> dict:
+    # `url` serves the upscaled rendition when there is one, so previewing a
+    # clip shows what the merge will actually consume. `width`/`height` stay
+    # the generation canvas (that is what the row means); `out_width`/
+    # `out_height` are what the merge will see.
+    primary = c.upscale_filename or c.filename
+    out_w, out_h = _clip_dimensions(c)
     return {
         "id":          str(c.id),
         "video_id":    str(c.video_id),
         "idx":         c.idx,
-        "url":         f"/api/video/segments/{c.video_id}/{c.filename}",
+        "url":         f"/api/video/segments/{c.video_id}/{primary}",
         "thumb_url":   f"/api/video/segments/{c.video_id}/{c.thumb}",
         "prompt":      c.prompt,
         "frame_count": c.frame_count,
         "workflow":    c.workflow,
         "width":       c.width,
         "height":      c.height,
+        "out_width":   out_w,
+        "out_height":  out_h,
         "fps":         c.fps,
         "has_audio":   c.has_audio,
+        "upscale_resolution": c.upscale_resolution,
+        "upscale_rife":       c.upscale_rife,
+        "has_upscale":        bool(c.upscale_filename),
+        "upscale_rendering":  _is_clip_upscaling(c),
         "created_at":  c.created_at.isoformat(),
     }
 
@@ -1853,6 +1890,9 @@ async def delete_clip(clip_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     seg_dir = _segments_dir(job_id)
     (seg_dir / clip.filename).unlink(missing_ok=True)
     (seg_dir / clip.thumb).unlink(missing_ok=True)
+    if clip.upscale_filename:
+        (seg_dir / clip.upscale_filename).unlink(missing_ok=True)
+    _progress.pop(_clip_key(clip_id), None)
     await db.delete(clip)
     await db.commit()
     await _prune_empty_clip_job(db, job_id)
@@ -2185,6 +2225,99 @@ async def _upscale_plan_from_file(
     }
 
 
+# One SEEDVR2 render at a time, process-wide. ComfyUI would queue concurrent
+# prompts happily enough, but each run brackets itself with `free_memory()` to
+# get a clean card — and a second run calling that while the first is sampling
+# pulls the models out from under it. Bulk-upscaling a stack of clips is the
+# normal case now, so the serialisation has to be here rather than in the UI.
+_upscale_gate = asyncio.Lock()
+
+
+async def _seedvr2_render(
+    src: Path,
+    dest: Path,
+    *,
+    resolution: int,
+    rife: int,
+    plan: dict,
+    progress_key: str,
+    prefix: str,
+    log_subject: str,
+) -> None:
+    """Restore `src` into `dest` with SEEDVR2, honouring the one-at-a-time gate.
+
+    Shared by the video-level pass and the per-clip pass — they differ only in
+    which row they read their source from and which row they write the result
+    onto, so everything between those two ends lives here.
+    """
+    # A silent source must leave the muxer's audio slot unconnected — VHS
+    # raises rather than returning an empty track when it finds no stream.
+    has_audio = await probe_has_audio(src)
+    wf, save_node = build_upscale_workflow(
+        src,
+        resolution=resolution,
+        filename_prefix=prefix,
+        has_audio=has_audio,
+        rife_multiplier=rife,
+    )
+
+    # Three times the estimate, floored well above it: the estimate assumes
+    # ~24 fps and the shared 30-minute POLL_TIMEOUT is far too short for
+    # anything longer than a few seconds of footage.
+    timeout = max(1800, plan["seconds"] * 3)
+
+    if _upscale_gate.locked():
+        prior = _progress.get(progress_key, {})
+        _set_progress(
+            progress_key, "upscaling",
+            "Waiting for the GPU (another upscale is running)…",
+            prior.get("pct", 10),
+        )
+    async with _upscale_gate:
+        # "upscale" is not a generation workflow, so it takes the default budget
+        # — the 3B SEEDVR2 DiT is far smaller than MiniMax's text encoder.
+        await _free_ollama_vram("upscale")
+        async with httpx.AsyncClient(timeout=60) as client:
+            # The DiT, its VAE and whatever the generation pass left resident do
+            # not fit together; force a clean card before loading.
+            await free_memory(client)
+            prompt_id = await post_workflow(client, wf)
+            _register_labels(prompt_id, wf)
+            # This pass runs for minutes with nothing else to report; hand the
+            # progress endpoint the live prompt so it can show SEEDVR2's own
+            # per-batch step counter instead of a frozen "Upscaling…". The
+            # caller already set the wording (a re-render says so), so keep it.
+            prior = _progress.get(progress_key, {})
+            _set_progress(
+                progress_key, "upscaling",
+                prior.get("message", "Upscaling…"), prior.get("pct", 30),
+                prompt_id=prompt_id, band=(prior.get("pct", 30), 88),
+            )
+            logger.info(
+                "Upscale submitted: %s → %dx%d, ~%ds (prompt %s)",
+                log_subject, plan["width"], plan["height"], plan["seconds"], prompt_id,
+            )
+            outputs = await poll_history(
+                client, prompt_id, timeout=timeout, interval=POLL_INTERVAL,
+            )
+            await free_memory(client)
+
+    comfy_src = _comfy_save_path(outputs.get(save_node, {}), "Upscale")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if rife > 1 and has_audio:
+        # RIFE lengthened the picture while frame_rate stayed put, so the
+        # track VHS carried through is now short (padded out with silence).
+        # Same shape the generation path produces — same fix.
+        await stretch_audio_to_video(
+            comfy_src, dest,
+            native_audio_duration=plan["duration"],
+            ffmpeg_path=settings.ffmpeg_path,
+        )
+    else:
+        await asyncio.to_thread(shutil.copy2, comfy_src, dest)
+
+
 async def _apply_upscale(
     video_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
 ) -> None:
@@ -2206,65 +2339,14 @@ async def _apply_upscale(
         raise RuntimeError(f"Source file missing: {src.name}")
     plan = await _upscale_plan_from_file(src, resolution, fallback_w, fallback_h, rife)
 
-    # A silent source must leave the muxer's audio slot unconnected — VHS
-    # raises rather than returning an empty track when it finds no stream.
-    has_audio = await probe_has_audio(src)
-    wf, save_node = build_upscale_workflow(
-        src,
-        resolution=resolution,
-        filename_prefix=f"artrium_up_{video_id.hex[:10]}",
-        has_audio=has_audio,
-        rife_multiplier=rife,
-    )
-
-    # Three times the estimate, floored well above it: the estimate assumes
-    # ~24 fps and the shared 30-minute POLL_TIMEOUT is far too short for
-    # anything longer than a few seconds of footage.
-    timeout = max(1800, plan["seconds"] * 3)
-
-    # "upscale" is not a generation workflow, so it takes the default budget —
-    # the 3B SEEDVR2 DiT is far smaller than MiniMax's text encoder.
-    await _free_ollama_vram("upscale")
-    async with httpx.AsyncClient(timeout=60) as client:
-        # The DiT, its VAE and whatever the generation pass left resident do
-        # not fit together; force a clean card before loading.
-        await free_memory(client)
-        prompt_id = await post_workflow(client, wf)
-        _register_labels(prompt_id, wf)
-        # This pass runs for minutes with nothing else to report; hand the
-        # progress endpoint the live prompt so it can show SEEDVR2's own
-        # per-batch step counter instead of a frozen "Upscaling…". The caller
-        # already set the wording (a re-render says so), so keep it.
-        prior = _progress.get(str(video_id), {})
-        _set_progress(
-            str(video_id), "upscaling",
-            prior.get("message", "Upscaling…"), prior.get("pct", 30),
-            prompt_id=prompt_id, band=(prior.get("pct", 30), 88),
-        )
-        logger.info(
-            "Upscale submitted: video=%s → %dx%d, ~%ds (prompt %s)",
-            video_id, plan["width"], plan["height"], plan["seconds"], prompt_id,
-        )
-        outputs = await poll_history(
-            client, prompt_id, timeout=timeout, interval=POLL_INTERVAL,
-        )
-        await free_memory(client)
-
-    comfy_src = _comfy_save_path(outputs.get(save_node, {}), "Upscale")
     out_name = _upscale_name(video_id)
-    dest = settings.videos_dir / out_name
-
-    if rife > 1 and has_audio:
-        # RIFE lengthened the picture while frame_rate stayed put, so the
-        # track VHS carried through is now short (padded out with silence).
-        # Same shape the generation path produces — same fix.
-        await stretch_audio_to_video(
-            comfy_src, dest,
-            native_audio_duration=plan["duration"],
-            ffmpeg_path=settings.ffmpeg_path,
-        )
-    else:
-        await asyncio.to_thread(shutil.copy2, comfy_src, dest)
+    await _seedvr2_render(
+        src, settings.videos_dir / out_name,
+        resolution=resolution, rife=rife, plan=plan,
+        progress_key=str(video_id),
+        prefix=f"artrium_up_{video_id.hex[:10]}",
+        log_subject=f"video={video_id}",
+    )
 
     async with AsyncSessionLocal() as db:
         video = await db.get(Video, video_id)
@@ -2459,6 +2541,198 @@ async def remove_upscale(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)
         }
         safe_create_task(_run_grain(video_id, video.grain_strength), name=f"grain:{video_id}")
     return _serialize(video)
+
+
+# ── Per-clip SEEDVR2 upscale (run BEFORE the merge) ───────────────────────────
+# Upscaling the merged video makes both halves of this pass work across the
+# hard cuts between segments: SEEDVR2 restores several frames jointly, and RIFE
+# invents in-between frames from each pair — so at a cut it morphs one shot into
+# the next instead of leaving a clean edit. A clip has no cut inside it, so
+# upscaling per clip and merging afterwards produces the same resolution with
+# the edits intact. Grain still belongs last, on the merged result.
+
+
+def _clip_key(clip_id: uuid.UUID) -> str:
+    """Progress key for a clip pass — namespaced so it cannot collide with the
+    job ids that share `_progress`."""
+    return f"clip:{clip_id}"
+
+
+def _clip_upscale_name(clip: VideoClip) -> str:
+    return f"{Path(clip.filename).stem}_up.mp4"
+
+
+def _clip_file(clip: VideoClip) -> Path:
+    """The clip as generated — always the upscale's source, never its output."""
+    return _segments_dir(clip.video_id) / clip.filename
+
+
+def _clip_primary_path(clip: VideoClip) -> Path:
+    """The rendition of this clip that playback and the merge should use."""
+    if clip.upscale_filename:
+        return _segments_dir(clip.video_id) / clip.upscale_filename
+    return _clip_file(clip)
+
+
+def _clip_dimensions(clip: VideoClip) -> tuple[int | None, int | None]:
+    """Effective size of the rendition `_clip_primary_path` returns."""
+    if clip.upscale_filename and clip.upscale_width and clip.upscale_height:
+        return clip.upscale_width, clip.upscale_height
+    return clip.width, clip.height
+
+
+def _is_clip_upscaling(clip: VideoClip) -> bool:
+    return _progress.get(_clip_key(clip.id), {}).get("phase") == "upscaling"
+
+
+async def _apply_clip_upscale(
+    clip_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+) -> None:
+    """Render the SEEDVR2 pass for one clip and persist it. Raises on failure."""
+    rife = clamp_rife(rife_multiplier)
+    async with AsyncSessionLocal() as db:
+        clip = await db.get(VideoClip, clip_id)
+        if not clip:
+            raise RuntimeError("Clip row gone")
+        src = _clip_file(clip)
+        fallback_w, fallback_h = clip.width, clip.height
+        out_name = _clip_upscale_name(clip)
+        dest = _segments_dir(clip.video_id) / out_name
+
+    if not src.exists():
+        raise RuntimeError(f"Clip file missing: {src.name}")
+    plan = await _upscale_plan_from_file(src, resolution, fallback_w, fallback_h, rife)
+
+    await _seedvr2_render(
+        src, dest,
+        resolution=resolution, rife=rife, plan=plan,
+        progress_key=_clip_key(clip_id),
+        prefix=f"artrium_clipup_{clip_id.hex[:10]}",
+        log_subject=f"clip={clip_id}",
+    )
+
+    async with AsyncSessionLocal() as db:
+        clip = await db.get(VideoClip, clip_id)
+        if clip:
+            clip.upscale_resolution = resolution
+            clip.upscale_rife = rife
+            clip.upscale_filename = out_name
+            clip.upscale_width = plan["width"]
+            clip.upscale_height = plan["height"]
+            await db.commit()
+    logger.info(
+        "Clip upscale applied: clip=%s → %dx%d rife=%dx",
+        clip_id, plan["width"], plan["height"], rife,
+    )
+
+
+async def _run_clip_upscale(
+    clip_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+) -> None:
+    """Background task behind POST /clips/{id}/upscale."""
+    key = _clip_key(clip_id)
+    _progress[key] = {"phase": "upscaling", "message": "Upscaling…", "pct": 10}
+    try:
+        await _apply_clip_upscale(clip_id, resolution, rife_multiplier)
+        _progress.pop(key, None)
+    except Exception as exc:
+        logger.exception("Clip upscale failed for clip=%s", clip_id)
+        # Clips have no error column — the phase carries the failure until the
+        # client picks it up, which is all a per-clip chip needs.
+        _progress[key] = {
+            "phase": "failed",
+            "message": f"{type(exc).__name__}: {exc}"[:300],
+            "pct": 0,
+        }
+
+
+def _validate_clip_upscale(
+    clip: VideoClip | None, resolution: int, rife_multiplier: int,
+) -> None:
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    if not RESOLUTION_MIN <= resolution <= RESOLUTION_MAX:
+        raise HTTPException(
+            status_code=422,
+            detail=f"resolution must be between {RESOLUTION_MIN} and {RESOLUTION_MAX}",
+        )
+    if rife_multiplier not in RIFE_MULTIPLIERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"rife_multiplier must be one of {list(RIFE_MULTIPLIERS)}",
+        )
+
+
+@router.get("/clips/{clip_id}/upscale/estimate")
+async def estimate_clip_upscale(
+    clip_id: uuid.UUID,
+    resolution: int = 1080,
+    rife_multiplier: int = 1,
+    db: AsyncSession = Depends(get_db),
+):
+    """Target size and expected wall-clock for one clip's upscale."""
+    clip = await db.get(VideoClip, clip_id)
+    _validate_clip_upscale(clip, resolution, rife_multiplier)
+    src = _clip_file(clip)
+    if not src.exists():
+        raise HTTPException(status_code=409, detail="Clip file is missing on disk")
+    return await _upscale_plan_from_file(
+        src, resolution, clip.width, clip.height, rife_multiplier,
+    )
+
+
+@router.post("/clips/{clip_id}/upscale", status_code=202)
+async def apply_clip_upscale(
+    clip_id: uuid.UUID, body: UpscaleApply, db: AsyncSession = Depends(get_db),
+):
+    """Queue a SEEDVR2 pass for one clip.
+
+    Returns immediately; renders run one at a time behind `_upscale_gate`, so
+    queueing a whole stack at once is safe and is the expected way to use this.
+    """
+    clip = await db.get(VideoClip, clip_id)
+    _validate_clip_upscale(clip, body.resolution, body.rife_multiplier)
+    resolution = clamp_resolution(body.resolution)
+    rife = clamp_rife(body.rife_multiplier)
+
+    if _is_clip_upscaling(clip):
+        raise HTTPException(status_code=409, detail="This clip is already being upscaled")
+
+    _progress[_clip_key(clip_id)] = {
+        "phase": "upscaling", "message": "Queued…", "pct": 5,
+    }
+    safe_create_task(
+        _run_clip_upscale(clip_id, resolution, rife), name=f"clip_upscale:{clip_id}",
+    )
+    return _serialize_clip(clip)
+
+
+@router.get("/clips/{clip_id}/upscale/progress")
+async def clip_upscale_progress(clip_id: uuid.UUID):
+    """Live phase/step for a clip's upscale. Cheap enough to poll."""
+    prog = dict(_progress.get(_clip_key(clip_id), {}))
+    if not prog:
+        return {"phase": "idle", "message": "", "pct": 0}
+    return _attach_live_stage(prog)
+
+
+@router.delete("/clips/{clip_id}/upscale")
+async def remove_clip_upscale(clip_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Drop a clip's upscale and go back to the generated rendition."""
+    clip = await db.get(VideoClip, clip_id)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    if clip.upscale_filename:
+        (_segments_dir(clip.video_id) / clip.upscale_filename).unlink(missing_ok=True)
+    clip.upscale_filename = None
+    clip.upscale_resolution = None
+    clip.upscale_rife = None
+    clip.upscale_width = None
+    clip.upscale_height = None
+    await db.commit()
+    _progress.pop(_clip_key(clip_id), None)
+    await db.refresh(clip)
+    return _serialize_clip(clip)
 
 
 # ── Film grain (post-hoc pass over a finished video) ──────────────────────────

@@ -155,6 +155,18 @@
       color: var(--text-dim); padding: 2px 4px; border-radius: 6px;
     }
     .clip-delete-btn:hover { color: var(--red); }
+    .clip-up-btn {
+      background: none; border: none; cursor: pointer; font-size: 14px;
+      color: var(--text-dim); padding: 2px 4px; border-radius: 6px;
+    }
+    .clip-up-btn:hover { color: var(--accent); }
+    .clip-up-btn.on { color: var(--accent); }
+    .clip-up-btn:disabled { opacity: 0.45; cursor: default; }
+    .seg-up-status { font-size: 11px; color: var(--accent); }
+    /* Clip-upscale settings, shown in the merge bar because that is where the
+       clip workflow already lives. Shared by the per-clip button. */
+    #merge-bar .up-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
+    #merge-bar .up-row .label { color: var(--text-dim); }
 
     /* ── Floating merge bar (cross-job clip selection) ── */
     #merge-bar {
@@ -506,6 +518,9 @@
     <span id="merge-count"></span>
     <button id="merge-clear-btn" type="button" onclick="clearMergeSelection()">Clear</button>
   </div>
+  <!-- Upscale before merging: SEEDVR2 and RIFE stay inside one continuous
+       shot this way, instead of interpolating across the cuts a merge makes. -->
+  <div class="up-row" id="clip-up-row"></div>
   <div class="bar-actions">
     <label>
       <input type="checkbox" id="merge-delete-toggle"
@@ -539,6 +554,9 @@ const state = {
   progressIntervals: new Map(),
   clipsByJob: new Map(),         // videoId → [clip, …] (the job's stack, idx order)
   mergeSelection: new Map(),     // clipId → order number (1-based, cross-job)
+  clipUpscaleRes:  1080,         // shared by the per-clip button and the bulk action
+  clipUpscaleRife: 1,
+  clipUpscaling:   new Set(),    // clip ids queued locally, until the poller sees them finish
   deleteAfterMerge: false,       // remove source clips once the merge succeeds
   storyPollTimer: null,          // interval id while a story-frames job runs
   storySource: null,             // source image object captured when the job starts
@@ -625,16 +643,22 @@ function _updateModeFields() {
 // clean multiple — matches the existing default width/height) while still
 // labelling the chip "1080" for clarity.
 //
-// MiniMax H3 is deliberately restricted to one small canvas in each
-// orientation. Its native 768px short edge costs ~45s per sampling step on this
-// 16GB card (a 2.3s clip takes 16 minutes); 864×480 is 40% of those pixels, and
-// the plan is to recover the resolution afterwards with a separate upscale pass
-// rather than pay for it during diffusion. Both axes are multiples of 32, which
-// the model requires.
+// MiniMax H3 is deliberately restricted to small canvases. Its native 768px
+// short edge costs ~45s per sampling step on this 16GB card (a 2.3s clip takes
+// 16 minutes), and the plan is to recover resolution afterwards with the
+// upscale pass rather than pay for it during diffusion. Every axis here is a
+// multiple of 32, which the model requires.
+//
+// 960×544 (default) is 26% more pixels than 864×480 and correspondingly
+// slower, but it is a real 16:9 canvas that needs less reconstruction later.
+// It also costs clip length: `frameBounds()` derives the frame ceiling from
+// the same VRAM budget, so 960×544 tops out at 107 frames where 864×480
+// reaches 124. 864×480 stays available for longer or cheaper clips.
 const RES_PRESETS = {
   wan: [[960, 960, '960×960'], [1280, 704, '1280×704'], [704, 1280, '704×1280'],
         [1920, 1088, '1920×1080'], [1088, 1920, '1080×1920']],
-  minimax: [[864, 480, '864×480 (16:9)'], [480, 864, '480×864 (9:16)']],
+  minimax: [[960, 544, '960×544 (16:9)'], [544, 960, '544×960 (9:16)'],
+            [864, 480, '864×480 (16:9)'], [480, 864, '480×864 (9:16)']],
 };
 
 function renderResChips() {
@@ -1393,7 +1417,11 @@ async function loadClips() {
   for (const c of clips) {
     if (!state.clipsByJob.has(c.video_id)) state.clipsByJob.set(c.video_id, []);
     state.clipsByJob.get(c.video_id).push(c);
+    // A clip upscale runs for minutes; adopt any the server says is still in
+    // flight so a reload mid-render keeps reporting instead of going quiet.
+    if (c.upscale_rendering) state.clipUpscaling.add(c.id);
   }
+  if (state.clipUpscaling.size) startClipUpscalePolling();
   // Drop merge selections whose clips vanished (deleted elsewhere / merged away)
   const known = new Set(clips.map(c => c.id));
   let changed = false;
@@ -1410,6 +1438,10 @@ function renderClipStack(videoId) {
   if (!clips.length) { host.innerHTML = ''; return; }
   const rows = clips.map(c => {
     const order = state.mergeSelection.get(c.id);
+    const busy = c.upscale_rendering || state.clipUpscaling.has(c.id);
+    const up = c.has_upscale
+      ? ` · ⤢ ${c.upscale_resolution}p${c.upscale_rife > 1 ? ` ${c.upscale_rife}×` : ''} → ${c.out_width}×${c.out_height}`
+      : '';
     return `
     <div class="seg-row ${order ? 'selected' : ''}" data-clip-id="${c.id}"
          onclick="toggleClipSelect('${c.id}')">
@@ -1420,7 +1452,8 @@ function renderClipStack(videoId) {
       </div>
       <div class="seg-info">
         <div class="seg-title">Clip ${c.idx + 1}${c.has_audio ? ' 🔊' : ''}</div>
-        <div class="seg-meta">${c.frame_count || '?'} frames · ${c.width || '?'}×${c.height || '?'} · ${c.fps || '?'}fps</div>
+        <div class="seg-meta">${c.frame_count || '?'} frames · ${c.width || '?'}×${c.height || '?'} · ${c.fps || '?'}fps${up}</div>
+        ${busy ? `<div class="seg-up-status" id="clipup-${c.id}">Upscaling…</div>` : ''}
         <div class="seg-prompt-row">
           <div class="seg-prompt">${_esc(c.prompt || '— (no prompt)')}</div>
           ${c.prompt ? `<button class="copy-btn" type="button" onclick="event.stopPropagation(); copyBucket(this)" title="Copy">📋</button>` : ''}
@@ -1428,13 +1461,16 @@ function renderClipStack(videoId) {
       </div>
       <div class="seg-side">
         <div class="seg-check">${order || '✓'}</div>
+        <button class="clip-up-btn ${c.has_upscale ? 'on' : ''}" type="button" ${busy ? 'disabled' : ''}
+                title="${c.has_upscale ? 'Remove this clip\'s upscale' : 'Upscale this clip (before merging)'}"
+                onclick="event.stopPropagation(); toggleClipUpscale('${c.id}')">⤢</button>
         <button class="clip-delete-btn" type="button" title="Delete clip"
                 onclick="event.stopPropagation(); deleteClip('${c.id}')">🗑</button>
       </div>
     </div>`;
   }).join('');
   host.innerHTML = `
-    <div class="seg-hint">${clips.length} clip${clips.length === 1 ? '' : 's'} — tap a thumbnail to preview, tap a row to add it to the merge selection.</div>
+    <div class="seg-hint">${clips.length} clip${clips.length === 1 ? '' : 's'} — tap a thumbnail to preview, tap a row to add it to the merge selection. ⤢ upscales a single clip.</div>
     ${rows}
   `;
 }
@@ -1481,6 +1517,7 @@ function renderMergeBar() {
   $('merge-delete-toggle').checked = state.deleteAfterMerge;
   $('merge-go-btn').disabled = false;
   $('merge-go-btn').textContent = `Merge ${n} clip${n === 1 ? '' : 's'}`;
+  renderClipUpscaleRow();
 }
 
 function clearMergeSelection() {
@@ -1508,6 +1545,155 @@ async function mergeSelectedClips() {
     startProgressPolling(d.video_id);
   } catch(e) {
     ArtRium.toast(e.message || 'Failed to start merge', true);
+    renderMergeBar();
+  }
+}
+
+// ── Per-clip upscale ──────────────────────────────────────────────────────────
+// The same SEEDVR2 pass as the video-level one, run before the merge instead of
+// after it. That ordering is the point: the restorer works on several frames at
+// once and RIFE invents frames between pairs, so at a merge cut both of them
+// blend two unrelated shots into each other. Inside a clip there is no cut.
+//
+// Renders are serialised server-side (one GPU), so queueing a whole stack is
+// fine — they simply run one after another.
+
+function _clipById(clipId) {
+  for (const clips of state.clipsByJob.values()) {
+    const hit = clips.find(c => c.id === clipId);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function renderClipUpscaleRow() {
+  const host = $('clip-up-row');
+  if (!host) return;
+  const n = state.mergeSelection.size;
+  const resChips = [720, 1080].map(res =>
+    `<button class="chip-btn ${res === state.clipUpscaleRes ? 'on' : ''}"
+             onclick="state.clipUpscaleRes = ${res}; renderClipUpscaleRow()">${res}p</button>`
+  ).join('');
+  const rifeChips = [1, 2, 3, 4].map(m =>
+    `<button class="chip-btn ${m === state.clipUpscaleRife ? 'on' : ''}"
+             onclick="state.clipUpscaleRife = ${m}; renderClipUpscaleRow()">${m === 1 ? 'off' : m + '×'}</button>`
+  ).join('');
+  host.innerHTML = `
+    <span class="label">Upscale clips</span>${resChips}
+    <span class="label">Interpolate</span>${rifeChips}
+    <span style="flex:1"></span>
+    <button class="chip-btn apply" onclick="upscaleSelectedClips()">Upscale ${n}</button>`;
+}
+
+async function toggleClipUpscale(clipId) {
+  const c = _clipById(clipId);
+  if (!c) return;
+
+  if (c.has_upscale) {
+    if (!confirm('Remove this clip\'s upscale and go back to the generated resolution?')) return;
+    try {
+      await api(`/api/video/clips/${clipId}/upscale`, {method: 'DELETE'});
+      ArtRium.toast('Upscale removed');
+      await loadClips();
+      renderClipStack(c.video_id);
+    } catch(e) {
+      ArtRium.toast(e.message || 'Could not remove the upscale', true);
+    }
+    return;
+  }
+
+  const res = state.clipUpscaleRes;
+  const rife = state.clipUpscaleRife;
+  let eta = null;
+  try {
+    const r = await api(
+      `/api/video/clips/${clipId}/upscale/estimate?resolution=${res}&rife_multiplier=${rife}`);
+    eta = await r.json();
+  } catch(e) { /* the estimate is a courtesy — a failure must not block the run */ }
+  const cost = eta ? ` → ${eta.width}×${eta.height}, ${fmtEta(eta.seconds)}.` : '';
+  const interp = rife > 1 ? ` with ${rife}× interpolation` : '';
+  if (!confirm(`Upscale this clip to ${res}p${interp}?${cost} The GPU is busy for the whole render.`)) return;
+
+  await _queueClipUpscale(clipId, res, rife);
+  renderClipStack(c.video_id);
+  startClipUpscalePolling();
+}
+
+async function _queueClipUpscale(clipId, res, rife) {
+  try {
+    await api(`/api/video/clips/${clipId}/upscale`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({resolution: res, rife_multiplier: rife}),
+    });
+    state.clipUpscaling.add(clipId);
+    return true;
+  } catch(e) {
+    ArtRium.toast(e.message || 'Could not start the upscale', true);
+    return false;
+  }
+}
+
+async function upscaleSelectedClips() {
+  const ids = [...state.mergeSelection.entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+  const todo = ids.filter(id => {
+    const c = _clipById(id);
+    return c && !c.has_upscale && !c.upscale_rendering && !state.clipUpscaling.has(id);
+  });
+  if (!todo.length) {
+    ArtRium.toast(ids.length ? 'Every selected clip is already upscaled' : 'No clips selected');
+    return;
+  }
+  const res = state.clipUpscaleRes;
+  const rife = state.clipUpscaleRife;
+  const interp = rife > 1 ? ` with ${rife}× interpolation` : '';
+  if (!confirm(`Upscale ${todo.length} clip(s) to ${res}p${interp}? They render one after another — this can take a while.`)) return;
+
+  let queued = 0;
+  for (const id of todo) {
+    if (await _queueClipUpscale(id, res, rife)) queued++;
+  }
+  if (queued) ArtRium.toast(`Queued ${queued} clip upscale(s)`);
+  for (const jobId of state.clipsByJob.keys()) renderClipStack(jobId);
+  startClipUpscalePolling();
+}
+
+let _clipUpscaleTimer = null;
+
+function startClipUpscalePolling() {
+  if (_clipUpscaleTimer) return;
+  _clipUpscaleTimer = setInterval(pollClipUpscales, 3000);
+  pollClipUpscales();
+}
+
+async function pollClipUpscales() {
+  if (!state.clipUpscaling.size) {
+    clearInterval(_clipUpscaleTimer);
+    _clipUpscaleTimer = null;
+    return;
+  }
+  const finished = [];
+  for (const clipId of [...state.clipUpscaling]) {
+    let p;
+    try {
+      const r = await api(`/api/video/clips/${clipId}/upscale/progress`);
+      p = await r.json();
+    } catch(e) { continue; }   // transient — try again next tick
+
+    const el = document.getElementById(`clipup-${clipId}`);
+    if (p.phase === 'upscaling') {
+      // The server strips its private keys and folds in SEEDVR2's own batch
+      // counter, so `detail` is the informative part when it is there.
+      if (el) el.textContent = p.detail || p.message || 'Upscaling…';
+    } else {
+      if (p.phase === 'failed') ArtRium.toast(p.message || 'Clip upscale failed', true);
+      finished.push(clipId);
+    }
+  }
+  if (finished.length) {
+    finished.forEach(id => state.clipUpscaling.delete(id));
+    await loadClips();
+    for (const jobId of state.clipsByJob.keys()) renderClipStack(jobId);
     renderMergeBar();
   }
 }
@@ -1906,7 +2092,16 @@ async function applyUpscale(id) {
   const eta = await loadUpscaleEstimate(id, resolution, rife);
   const cost = eta ? ` It should take ${fmtEta(eta.seconds)} and produce ${eta.width}×${eta.height}.` : '';
   const interp = rife > 1 ? ` with ${rife}× interpolation` : '';
-  if (!confirm(`Upscale to ${resolution}p${interp}?${cost} The GPU is busy for the whole render.`)) return;
+  // A merge has hard cuts in it, and this pass reads across them: SEEDVR2
+  // restores several frames jointly and RIFE invents frames between pairs, so
+  // an edit gets morphed instead of staying an edit. Upscaling the clips first
+  // avoids that entirely, which is worth saying before the minutes are spent.
+  const cutWarning = (v0 && v0.workflow === 'merge' && (v0.n_images || 0) > 1)
+    ? '\n\nNote: this video was merged from several clips. Upscaling across the ' +
+      'cuts can smear the edits — upscaling the individual clips before merging ' +
+      'avoids that.'
+    : '';
+  if (!confirm(`Upscale to ${resolution}p${interp}?${cost} The GPU is busy for the whole render.${cutWarning}`)) return;
   state.upscalingVideos.add(id);
   try {
     const r = await api(`/api/video/jobs/${id}/upscale`, {

@@ -131,11 +131,13 @@ class TestAdaptMinimaxCanvas:
     def test_native_canvases_pass_through_untouched(self, size):
         assert adapt_minimax_canvas(*size) == size
 
-    @pytest.mark.parametrize("size", [(864, 480), (480, 864)])
+    @pytest.mark.parametrize("size", [(960, 544), (544, 960), (864, 480), (480, 864)])
     def test_small_canvases_are_not_enlarged(self, size):
-        # The UI ships these two deliberately: below the model's native 768px
+        # The UI ships these four deliberately: below the model's native 768px
         # short edge, to buy back sampling time. An adapter that "helpfully"
         # scaled them up to native would make that choice impossible to express.
+        # They must also survive untouched — a canvas the adapter would round
+        # is a canvas the UI is lying about in its chip label.
         assert adapt_minimax_canvas(*size) == size
 
     def test_oversized_landscape_is_pulled_onto_the_canvas(self):

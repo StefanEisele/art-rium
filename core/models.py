@@ -409,6 +409,19 @@ class VideoClip(Base):
     height: Mapped[int | None] = mapped_column(Integer)
     fps: Mapped[int | None] = mapped_column(Integer)
     has_audio: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # true for AUDIO_WORKFLOWS clips
+    # Optional SEEDVR2 upscale of this individual clip, rendered *before* the
+    # merge. Upscaling the merged video instead makes the restorer (and RIFE)
+    # work across the hard cuts between segments, which it interpolates into
+    # visible morphs — a clip has no cuts inside it, so this is the pass that
+    # is safe to run. Sibling file in the same segments dir; the merge reads
+    # it, and grain still belongs afterwards on the merged result.
+    upscale_resolution: Mapped[int | None] = mapped_column(SmallInteger)  # target SHORT edge in px; null = not upscaled
+    upscale_rife: Mapped[int | None] = mapped_column(SmallInteger)        # RIFE factor applied after the restore (1 = off)
+    upscale_filename: Mapped[str | None] = mapped_column(String(512))     # e.g. "seg_0_up.mp4", sibling of `filename`
+    # Dimensions the pass actually produced. Persisted rather than derived so
+    # the merge can size its canvas from the rendition it is really feeding in.
+    upscale_width: Mapped[int | None] = mapped_column(Integer)
+    upscale_height: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

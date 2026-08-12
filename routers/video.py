@@ -60,7 +60,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import select, desc
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth
@@ -1789,6 +1789,18 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
     return {"video_id": str(video.id), "status": "generating"}
 
 
+def _expected_clip_count(video: Video) -> int | None:
+    """How many clips this job will produce when it finishes.
+
+    flf2v animates the gaps *between* key frames, so it yields one clip fewer
+    than it was given images; the others animate each image on its own. Only
+    meaningful for generation jobs — a merge has no stack of its own.
+    """
+    if not video.n_images or video.workflow == "merge":
+        return None
+    return max(1, video.n_images - 1) if video.workflow == "flf2v" else video.n_images
+
+
 @router.get("/jobs/{video_id}/progress")
 async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """Lightweight progress endpoint — reads module-level dict + optional ComfyUI queue check."""
@@ -1798,8 +1810,16 @@ async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
 
     live = dict(_progress.get(str(video_id), {}))
 
+    # Segments land one at a time and each is browsable the moment it exists,
+    # so the poller is told how many are ready rather than being made to wait
+    # for the whole job. It refetches the stack only when this number moves.
+    clips_done = await db.scalar(
+        select(func.count()).select_from(VideoClip).where(VideoClip.video_id == video_id)
+    ) or 0
+    clip_counts = {"clips_done": clips_done, "clips_expected": _expected_clip_count(video)}
+
     if video.status == "done":
-        done = {"phase": "done", "message": "Complete", "pct": 100}
+        done = {"phase": "done", "message": "Complete", "pct": 100, **clip_counts}
         # Post-passes (upscale, grain) run on a video whose status is already
         # 'done'. `phase` must stay "done" — the generation poller stops on it,
         # and starting an upscale seconds after a render finishes would
@@ -1816,7 +1836,12 @@ async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
                 done["detail"] = staged["detail"]
         return done
     if video.status == "failed":
-        return {"phase": "failed", "message": video.error or "Generation failed", "pct": 0}
+        # Partial stacks are usable, so a failed job still reports what it got
+        # far enough to save.
+        return {
+            "phase": "failed", "message": video.error or "Generation failed", "pct": 0,
+            **clip_counts,
+        }
 
     prog = live or {"phase": "processing", "message": "Processing…", "pct": 30}
 
@@ -1836,7 +1861,7 @@ async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
         prog["queue"] = qi
 
     # …then with the node/step ComfyUI is actually on right now.
-    return _attach_live_stage(prog)
+    return {**_attach_live_stage(prog), **clip_counts}
 
 
 def _serialize_clip(c: VideoClip) -> dict:
@@ -1870,12 +1895,19 @@ def _serialize_clip(c: VideoClip) -> dict:
 
 
 @router.get("/clips")
-async def list_clips(db: AsyncSession = Depends(get_db)):
-    """All library clips across every job — the client groups them into
-    per-job stacks via video_id (job order comes from GET /api/video)."""
-    result = await db.execute(
-        select(VideoClip).order_by(VideoClip.video_id, VideoClip.idx)
-    )
+async def list_clips(
+    video_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db),
+):
+    """Library clips — all of them, or one job's stack with `?video_id=`.
+
+    The filter exists for the running-job poller: a generation job's stack
+    grows one clip at a time and is refetched each time it does, which should
+    not mean pulling the whole library down on every segment.
+    """
+    stmt = select(VideoClip).order_by(VideoClip.video_id, VideoClip.idx)
+    if video_id is not None:
+        stmt = stmt.where(VideoClip.video_id == video_id)
+    result = await db.execute(stmt)
     return [_serialize_clip(c) for c in result.scalars().all()]
 
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from routers.video import _clip_dimensions, _merge_canvas
+from routers.video import _clip_dimensions, _expected_clip_count, _merge_canvas
 from services.video.merge import MergeInput, build_merge_command
 
 
@@ -53,6 +53,31 @@ class TestMergeCanvas:
 
     def test_empty_selection_does_not_raise(self):
         assert _merge_canvas([]) == (960, 960)
+
+
+class TestExpectedClipCount:
+    """Drives the "2 of 5 clips ready" readout while a job is still running."""
+
+    def _job(self, workflow, n_images):
+        return SimpleNamespace(workflow=workflow, n_images=n_images)
+
+    @pytest.mark.parametrize("workflow", ["i2v_multi", "minimax_i2v"])
+    def test_per_image_workflows_yield_one_clip_per_image(self, workflow):
+        assert _expected_clip_count(self._job(workflow, 5)) == 5
+
+    def test_flf2v_yields_one_clip_per_gap(self):
+        # It animates the transitions *between* key frames, so 5 images are 4
+        # clips — counting to 5 would leave the readout stuck at "4 of 5".
+        assert _expected_clip_count(self._job("flf2v", 5)) == 4
+
+    def test_flf2v_never_reports_zero(self):
+        assert _expected_clip_count(self._job("flf2v", 1)) == 1
+
+    def test_merge_has_no_stack_of_its_own(self):
+        assert _expected_clip_count(self._job("merge", 3)) is None
+
+    def test_unknown_image_count_is_not_guessed(self):
+        assert _expected_clip_count(self._job("i2v_multi", None)) is None
 
 
 class TestBuildMergeCommand:

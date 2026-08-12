@@ -1364,6 +1364,7 @@ function startProgressPolling(videoId) {
       const r = await api(`/api/video/jobs/${videoId}/progress`);
       const prog = await r.json();
       applyProgress(videoId, prog);
+      await _adoptFinishedClips(videoId, prog);
       if (_TERMINAL_PHASES.has(prog.phase)) {
         clearInterval(intervalId);
         state.progressIntervals.delete(videoId);
@@ -1384,9 +1385,31 @@ function startProgressPolling(videoId) {
   state.progressIntervals.set(videoId, intervalId);
 }
 
+// A running job's clips land one at a time, and each is complete when it lands
+// — so the stack is refetched as soon as the server reports one more than we
+// are showing, instead of the whole job's worth arriving at the end. Gated on
+// the count so an idle poll tick costs nothing and, more importantly, so a
+// clip the user is previewing is not re-rendered out from under them.
+async function _adoptFinishedClips(videoId, prog) {
+  const done = Number(prog.clips_done) || 0;
+  if (done <= (state.clipsByJob.get(videoId) || []).length) return;
+  try {
+    const r = await api(`/api/video/clips?video_id=${videoId}`);
+    const clips = await r.json();
+    if (!clips.length) return;
+    state.clipsByJob.set(videoId, clips);
+    renderClipStack(videoId, {expected: prog.clips_expected, running: true});
+  } catch(_) {}
+}
+
 // Branch on status to wire up whatever the rendered card needs next.
 function _postRenderVideo(v) {
-  if (v.status === 'generating' || v.status === 'assembling') startProgressPolling(v.id);
+  if (v.status === 'generating' || v.status === 'assembling') {
+    startProgressPolling(v.id);
+    // A reload mid-job must not hide the segments already rendered — the
+    // first poll tick only refetches when the count *grows*.
+    if ((state.clipsByJob.get(v.id) || []).length) renderClipStack(v.id, {running: true});
+  }
   else if (_isClipJob(v)) renderClipStack(v.id);
   // An upscale runs for many minutes, long enough that a reload mid-render is
   // normal rather than exotic. The server knows it is still going; pick the
@@ -1431,7 +1454,7 @@ async function loadClips() {
   if (changed) _renumberMergeSelection();
 }
 
-function renderClipStack(videoId) {
+function renderClipStack(videoId, opts = {}) {
   const host = $(`stack-${videoId}`);
   if (!host) return;
   const clips = state.clipsByJob.get(videoId) || [];
@@ -1469,8 +1492,17 @@ function renderClipStack(videoId) {
       </div>
     </div>`;
   }).join('');
+  // While the job is still running the hint counts up instead of explaining
+  // the merge flow — these clips are finished and playable, but the stack is
+  // not the whole story yet.
+  // Plural follows the total being counted towards ("1 of 3 clips"), not the
+  // count so far, which would read "1 of 3 clip".
+  const total = opts.expected || clips.length;
+  const hint = opts.running
+    ? `${clips.length}${opts.expected ? ' of ' + opts.expected : ''} clip${total === 1 ? '' : 's'} ready — playable now, the rest are still rendering.`
+    : `${clips.length} clip${clips.length === 1 ? '' : 's'} — tap a thumbnail to preview, tap a row to add it to the merge selection. ⤢ upscales a single clip.`;
   host.innerHTML = `
-    <div class="seg-hint">${clips.length} clip${clips.length === 1 ? '' : 's'} — tap a thumbnail to preview, tap a row to add it to the merge selection. ⤢ upscales a single clip.</div>
+    <div class="seg-hint">${hint}</div>
     ${rows}
   `;
 }
@@ -1830,6 +1862,23 @@ async function copyBucket(btn) {
   }
 }
 
+// Progress block *plus* a stack host: a multi-clip job renders one segment at
+// a time and each one is finished the moment it lands, so they show up as they
+// arrive rather than all at once at the end. The host stays empty for a merge
+// (which has no clips of its own) and until the first clip exists.
+function _progressBody(v) {
+  return `
+      <div class="progress-wrap">
+        <div class="progress-steps">
+          ${PHASE_STEPS.map(s => `<div class="step-pill" data-step="${s.key}">${s.label}</div>`).join('')}
+        </div>
+        <div class="progress-track"><div class="progress-fill" style="width:3%"></div></div>
+        <div><span class="progress-message">Starting…</span><span class="progress-pct"></span></div>
+        <div class="progress-detail"></div>
+      </div>
+      <div class="seg-review" id="stack-${v.id}"></div>`;
+}
+
 function makeVideoCard(v) {
   const card = document.createElement('div');
   card.className = 'video-card';
@@ -1845,7 +1894,12 @@ function makeVideoCard(v) {
   const clipJob = _isClipJob(v);
 
   let body = '';
-  if (clipJob) {
+  // Order matters: a running job that has already saved a clip satisfies
+  // `clipJob` too, and testing that first would swap its progress bar for a
+  // stack the moment segment 1 landed. While it runs, it gets both.
+  if (v.status === 'generating' || v.status === 'assembling') {
+    body = _progressBody(v);
+  } else if (clipJob) {
     // Generation job → its clip stack (failed jobs keep their partial stack).
     const err = v.status === 'failed' ? `<div class="error-text">${v.error || 'Unknown error'}</div>` : '';
     body = `${err}<div class="seg-review" id="stack-${v.id}"></div>`;
@@ -1875,16 +1929,6 @@ function makeVideoCard(v) {
         <source src="${videoUrl}" type="video/mp4">
       </video>`;
     }
-  } else if (v.status === 'generating' || v.status === 'assembling') {
-    body = `
-      <div class="progress-wrap">
-        <div class="progress-steps">
-          ${PHASE_STEPS.map(s => `<div class="step-pill" data-step="${s.key}">${s.label}</div>`).join('')}
-        </div>
-        <div class="progress-track"><div class="progress-fill" style="width:3%"></div></div>
-        <div><span class="progress-message">Starting…</span><span class="progress-pct"></span></div>
-        <div class="progress-detail"></div>
-      </div>`;
   } else if (v.status === 'failed') {
     body = `<div class="error-text">${v.error || 'Unknown error'}</div>`;
   }

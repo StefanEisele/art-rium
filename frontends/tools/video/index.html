@@ -163,10 +163,35 @@
     .clip-up-btn.on { color: var(--accent); }
     .clip-up-btn:disabled { opacity: 0.45; cursor: default; }
     .seg-up-status { font-size: 11px; color: var(--accent); }
-    /* Clip-upscale settings, shown in the merge bar because that is where the
-       clip workflow already lives. Shared by the per-clip button. */
-    #merge-bar .up-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; }
-    #merge-bar .up-row .label { color: var(--text-dim); }
+
+    /* ── Upscale menu ──
+       Resolution and interpolation belong to the clip being upscaled, not to
+       whatever merge selection happens to be active, so they open from the ⤢
+       that starts the pass and are confirmed there. The merge bar's bulk
+       button opens the same menu with several targets. */
+    #upscale-menu-backdrop {
+      position: fixed; inset: 0; z-index: 120;
+      background: rgba(0,0,0,0.45); display: none;
+    }
+    #upscale-menu-backdrop.show { display: block; }
+    #upscale-menu {
+      position: fixed; z-index: 121;
+      width: min(330px, calc(100vw - 24px));
+      background: var(--surface);
+      border: 1.5px solid var(--border-strong);
+      border-radius: var(--radius);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+      padding: 15px; display: none; flex-direction: column; gap: 13px;
+    }
+    #upscale-menu.show { display: flex; }
+    #upscale-menu .um-title { font-size: 14px; font-weight: 700; }
+    #upscale-menu .um-field { display: flex; flex-direction: column; gap: 7px; }
+    #upscale-menu .um-eta {
+      font-size: 12px; color: var(--text-dim);
+      font-variant-numeric: tabular-nums; min-height: 17px; line-height: 17px;
+    }
+    #upscale-menu .um-actions { display: flex; gap: 8px; }
+    #upscale-menu .um-actions .btn { padding: 10px 14px; font-size: 14px; }
 
     /* ── Floating merge bar (cross-job clip selection) ── */
     #merge-bar {
@@ -251,6 +276,10 @@
     .save-indicator.error { color: var(--red); }
     .action-btn { flex: 1; padding: 9px; border-radius: 8px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; text-align: center; text-decoration: none; }
     .action-btn.delete { background: rgba(255,69,58,0.08); color: var(--red); border-color: rgba(255,69,58,0.2); }
+    /* Picking a finished video as a merge source — same accent language as a
+       selected clip row, so the two read as one selection. */
+    .action-btn.merge-pick.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+    .video-card.merge-selected { border-color: var(--accent); }
 
     /* ── Soundtrack chip on each card ── */
     .soundtrack-chip {
@@ -263,14 +292,8 @@
     .soundtrack-chip .label { color: var(--text-dim); font-size: 11px; font-weight:700; text-transform:uppercase; letter-spacing:.6px; }
     .soundtrack-chip .name { color: var(--text); font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .soundtrack-chip .glyph { color: var(--accent); font-size: 16px; }
-    .soundtrack-chip .chip-btn {
-      background: transparent; border: 1px solid var(--border);
-      color: var(--text-dim); border-radius: 6px; padding: 3px 8px;
-      font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit;
-    }
-    .soundtrack-chip .chip-btn:hover { color: var(--accent); border-color: var(--accent); }
-    .soundtrack-chip .chip-btn.add { color: var(--accent); border-color: rgba(224,122,58,0.35); background: rgba(224,122,58,0.06); flex: 1; }
-    .soundtrack-chip .chip-btn.remove { color: var(--red); border-color: rgba(255,69,58,0.25); }
+    /* .chip-btn itself lives in shared.css — only the layout delta here. */
+    .soundtrack-chip .chip-btn.apply { flex: 1; }
     .soundtrack-chip.muxing .label,
     .soundtrack-chip.muxing .glyph { animation: step-pulse 1.4s ease-in-out infinite; }
 
@@ -291,16 +314,8 @@
     .post-chip .value { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; min-width: 26px; text-align: right; }
     .post-chip .hint { color: var(--text-dim); font-size: 11px; }
     .post-chip input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 22px; }
-    .post-chip .chip-btn {
-      background: transparent; border: 1px solid var(--border);
-      color: var(--text-dim); border-radius: 6px; padding: 4px 9px;
-      font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit;
-    }
-    .post-chip .chip-btn:hover:not(:disabled) { color: var(--accent); border-color: var(--accent); }
-    .post-chip .chip-btn:disabled { opacity: .45; cursor: default; }
-    .post-chip .chip-btn.on { color: var(--accent); border-color: var(--accent); background: rgba(224,122,58,0.10); }
-    .post-chip .chip-btn.apply { color: var(--accent); border-color: rgba(224,122,58,0.35); background: rgba(224,122,58,0.06); flex: 1; }
-    .post-chip .chip-btn.remove { color: var(--red); border-color: rgba(255,69,58,0.25); }
+    /* .chip-btn itself lives in shared.css — only the layout delta here. */
+    .post-chip .chip-btn.apply { flex: 1; }
     .post-chip.working .label,
     .post-chip.working .glyph { animation: step-pulse 1.4s ease-in-out infinite; }
     .grain-preview { margin-top: 2px; }
@@ -528,26 +543,32 @@
   <div id="song-list"><div style="color:var(--text-dim);padding:20px;text-align:center">Loading…</div></div>
 </div>
 
-<!-- Floating merge bar — appears while clips are selected across stacks -->
+<!-- Floating merge bar — appears while clips and/or finished videos are selected -->
 <div id="merge-bar">
   <div class="bar-head">
     <span id="merge-count"></span>
     <button id="merge-clear-btn" type="button" onclick="clearMergeSelection()">Clear</button>
   </div>
-  <!-- Upscale before merging: SEEDVR2 and RIFE stay inside one continuous
-       shot this way, instead of interpolating across the cuts a merge makes. -->
-  <div class="up-row" id="clip-up-row"></div>
   <div class="bar-actions">
     <label>
       <input type="checkbox" id="merge-delete-toggle"
              onchange="state.deleteAfterMerge = this.checked"
              style="width:15px;height:15px;accent-color:var(--accent);">
-      Delete source clips after merge
+      Delete sources after merge
     </label>
     <span style="flex:1"></span>
-    <button id="merge-go-btn" type="button" onclick="mergeSelectedClips()">Merge</button>
+    <!-- Upscale before merging: SEEDVR2 and RIFE stay inside one continuous
+         shot this way, instead of interpolating across the cuts a merge makes.
+         The settings live in the menu this opens, not in the bar. -->
+    <button class="chip-btn" id="merge-upscale-btn" type="button"
+            onclick="openBulkUpscaleMenu(this)">⤢ Upscale</button>
+    <button id="merge-go-btn" type="button" onclick="startMerge()">Merge</button>
   </div>
 </div>
+
+<!-- Upscale settings, opened by any ⤢ button (one clip or the whole selection) -->
+<div id="upscale-menu-backdrop" onclick="closeUpscaleMenu()"></div>
+<div id="upscale-menu" role="dialog" aria-label="Upscale settings"></div>
 
 <div id="toast"></div>
 
@@ -569,11 +590,13 @@ const state = {
   videos: [],
   progressIntervals: new Map(),
   clipsByJob: new Map(),         // videoId → [clip, …] (the job's stack, idx order)
-  mergeSelection: new Map(),     // clipId → order number (1-based, cross-job)
+  // "clip:<id>" | "video:<id>" → order number (1-based). One selection for
+  // both kinds, so a finished video can be spliced between two clips.
+  mergeSelection: new Map(),
   clipUpscaleRes:  1080,         // shared by the per-clip button and the bulk action
   clipUpscaleRife: 1,
   clipUpscaling:   new Set(),    // clip ids queued locally, until the poller sees them finish
-  deleteAfterMerge: false,       // remove source clips once the merge succeeds
+  deleteAfterMerge: false,       // remove the sources once the merge succeeds
   storyPollTimer: null,          // interval id while a story-frames job runs
   storySource: null,             // source image object captured when the job starts
   suggestI2vPollTimer: null,     // interval id while a suggest-i2v job runs
@@ -1441,6 +1464,33 @@ function _postRenderVideo(v) {
 // Every generation job's clips live in the library (state.clipsByJob). Any
 // clips — across jobs and workflows — can be picked into one ordered merge
 // selection; the floating merge bar turns them into a new final video.
+//
+// A FINISHED video is pickable the same way, through the "+ Merge" button on
+// its card: that is how two finished pieces become one longer one, and how a
+// merge is extended without re-picking all of its clips. It joins as the
+// rendition the card plays, so its soundtrack, upscale and grain come along.
+// One selection holds both kinds, keyed by "clip:<id>" / "video:<id>", so the
+// pick order can interleave them freely.
+
+const clipKey  = id => `clip:${id}`;
+const videoKey = id => `video:${id}`;
+
+function _splitMergeKey(key) {
+  const i = key.indexOf(':');
+  return {kind: key.slice(0, i), id: key.slice(i + 1)};
+}
+
+/** Selected keys in pick order. */
+function _mergeSelectionKeys() {
+  return [...state.mergeSelection.entries()].sort((a, b) => a[1] - b[1]).map(([k]) => k);
+}
+
+/** Selected clip ids in pick order (the upscale pass only applies to clips). */
+function _selectedClipIds() {
+  return _mergeSelectionKeys()
+    .filter(k => k.startsWith('clip:'))
+    .map(k => _splitMergeKey(k).id);
+}
 
 // A "clip job" renders as a stack: any non-merge job whose clips exist. Failed
 // jobs keep their already-rendered clips visible (partial stacks are usable).
@@ -1462,10 +1512,17 @@ async function loadClips() {
   }
   if (state.clipUpscaling.size) startClipUpscalePolling();
   // Drop merge selections whose clips vanished (deleted elsewhere / merged away)
-  const known = new Set(clips.map(c => c.id));
+  _pruneMergeSelection('clip:', new Set(clips.map(c => clipKey(c.id))));
+}
+
+/** Forget selected sources of one kind that no longer exist server-side. */
+function _pruneMergeSelection(prefix, knownKeys) {
   let changed = false;
-  for (const id of [...state.mergeSelection.keys()]) {
-    if (!known.has(id)) { state.mergeSelection.delete(id); changed = true; }
+  for (const key of [...state.mergeSelection.keys()]) {
+    if (key.startsWith(prefix) && !knownKeys.has(key)) {
+      state.mergeSelection.delete(key);
+      changed = true;
+    }
   }
   if (changed) _renumberMergeSelection();
 }
@@ -1476,14 +1533,15 @@ function renderClipStack(videoId, opts = {}) {
   const clips = state.clipsByJob.get(videoId) || [];
   if (!clips.length) { host.innerHTML = ''; return; }
   const rows = clips.map(c => {
-    const order = state.mergeSelection.get(c.id);
+    const order = state.mergeSelection.get(clipKey(c.id));
     const busy = c.upscale_rendering || state.clipUpscaling.has(c.id);
     const up = c.has_upscale
       ? ` · ⤢ ${c.upscale_resolution}p${c.upscale_rife > 1 ? ` ${c.upscale_rife}×` : ''} → ${c.out_width}×${c.out_height}`
       : '';
     return `
     <div class="seg-row ${order ? 'selected' : ''}" data-clip-id="${c.id}"
-         onclick="toggleClipSelect('${c.id}')">
+         data-merge-key="${clipKey(c.id)}"
+         onclick="toggleMergeSelect('${clipKey(c.id)}')">
       <div class="seg-thumb-wrap" onclick="playClip(this, event)">
         <img src="${withAuth(c.thumb_url)}" alt="">
         <video src="${withAuth(c.url)}" controls playsinline preload="none"></video>
@@ -1502,7 +1560,7 @@ function renderClipStack(videoId, opts = {}) {
         <div class="seg-check">${order || '✓'}</div>
         <button class="clip-up-btn ${c.has_upscale ? 'on' : ''}" type="button" ${busy ? 'disabled' : ''}
                 title="${c.has_upscale ? 'Remove this clip\'s upscale' : 'Upscale this clip (before merging)'}"
-                onclick="event.stopPropagation(); toggleClipUpscale('${c.id}')">⤢</button>
+                onclick="event.stopPropagation(); toggleClipUpscale('${c.id}', this)">⤢</button>
         <button class="clip-delete-btn" type="button" title="Delete clip"
                 onclick="event.stopPropagation(); deleteClip('${c.id}')">🗑</button>
       </div>
@@ -1531,62 +1589,93 @@ function playClip(wrap, event) {
   if (v) v.play().catch(() => {});
 }
 
-function toggleClipSelect(clipId) {
-  if (state.mergeSelection.has(clipId)) {
-    state.mergeSelection.delete(clipId);
+function toggleMergeSelect(key) {
+  if (state.mergeSelection.has(key)) {
+    state.mergeSelection.delete(key);
     _renumberMergeSelection();
   } else {
-    state.mergeSelection.set(clipId, state.mergeSelection.size + 1);
+    state.mergeSelection.set(key, state.mergeSelection.size + 1);
   }
-  _refreshClipSelectionUI();
+  _refreshMergeSelectionUI();
 }
 
 function _renumberMergeSelection() {
   const sorted = [...state.mergeSelection.entries()].sort((a, b) => a[1] - b[1]);
-  state.mergeSelection = new Map(sorted.map(([id], i) => [id, i + 1]));
+  state.mergeSelection = new Map(sorted.map(([key], i) => [key, i + 1]));
 }
 
-function _refreshClipSelectionUI() {
-  document.querySelectorAll('.seg-row[data-clip-id]').forEach(row => {
-    const order = state.mergeSelection.get(row.dataset.clipId);
-    row.classList.toggle('selected', order !== undefined);
-    const check = row.querySelector('.seg-check');
-    if (check) check.textContent = order !== undefined ? order : '✓';
+// Both pickable things carry `data-merge-key`, so one pass updates a clip row
+// and a finished video's button without either knowing about the other.
+function _refreshMergeSelectionUI() {
+  document.querySelectorAll('[data-merge-key]').forEach(el => {
+    const order = state.mergeSelection.get(el.dataset.mergeKey);
+    const picked = order !== undefined;
+    if (el.classList.contains('seg-row')) {
+      el.classList.toggle('selected', picked);
+      const check = el.querySelector('.seg-check');
+      if (check) check.textContent = picked ? order : '✓';
+    } else {
+      el.classList.toggle('on', picked);
+      el.textContent = picked ? `✓ ${order}` : '+ Merge';
+      const card = el.closest('.video-card');
+      if (card) card.classList.toggle('merge-selected', picked);
+    }
   });
   renderMergeBar();
 }
 
 function renderMergeBar() {
   const bar = $('merge-bar');
-  const n = state.mergeSelection.size;
-  if (!n) { bar.classList.remove('show'); return; }
+  const keys = _mergeSelectionKeys();
+  const n = keys.length;
+  if (!n) {
+    bar.classList.remove('show');
+    // The menu may be open on this selection — nothing left to aim it at.
+    if (upscaleMenu.targets.length) closeUpscaleMenu();
+    return;
+  }
   bar.classList.add('show');
-  $('merge-count').textContent = `${n} clip${n === 1 ? '' : 's'} selected (merge in pick order)`;
+  // Named per kind: "3 clips + 1 video" says what will be concatenated, where
+  // a bare count would hide that a finished video is in the selection.
+  const nClips = keys.filter(k => k.startsWith('clip:')).length;
+  const nVideos = n - nClips;
+  const parts = [];
+  if (nClips)  parts.push(`${nClips} clip${nClips === 1 ? '' : 's'}`);
+  if (nVideos) parts.push(`${nVideos} video${nVideos === 1 ? '' : 's'}`);
+  $('merge-count').textContent = `${parts.join(' + ')} selected (merge in pick order)`;
   $('merge-delete-toggle').checked = state.deleteAfterMerge;
   $('merge-go-btn').disabled = false;
-  $('merge-go-btn').textContent = `Merge ${n} clip${n === 1 ? '' : 's'}`;
-  renderClipUpscaleRow();
+  $('merge-go-btn').textContent = `Merge ${n}`;
+
+  // Only counts the clips a run would change, so the button never promises
+  // work on a selection that is already fully upscaled. Finished videos are
+  // not counted — they have their own per-video upscale on the card.
+  const todo = _upscalableClipIds(_selectedClipIds()).length;
+  const upBtn = $('merge-upscale-btn');
+  upBtn.textContent = todo ? `⤢ Upscale ${todo}` : (nClips ? '⤢ Upscaled' : '⤢ Upscale');
+  upBtn.disabled = !todo;
 }
 
 function clearMergeSelection() {
   state.mergeSelection = new Map();
-  _refreshClipSelectionUI();
+  _refreshMergeSelectionUI();
 }
 
-async function mergeSelectedClips() {
-  const n = state.mergeSelection.size;
+async function startMerge() {
+  const keys = _mergeSelectionKeys();
+  const n = keys.length;
   if (!n) return;
-  const clipIds = [...state.mergeSelection.entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+  const items = keys.map(_splitMergeKey);
   const btn = $('merge-go-btn');
   btn.disabled = true; btn.textContent = 'Submitting…';
   try {
     const r = await api('/api/video/merge', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({clip_ids: clipIds, delete_sources: state.deleteAfterMerge}),
+      body: JSON.stringify({items, delete_sources: state.deleteAfterMerge}),
     });
     const d = await r.json();
-    ArtRium.toast(`Merging ${n} clip${n === 1 ? '' : 's'}…`);
+    ArtRium.toast(`Merging ${n} source${n === 1 ? '' : 's'}…`);
     state.mergeSelection = new Map();
     renderMergeBar();
     await loadVideos();
@@ -1614,26 +1703,154 @@ function _clipById(clipId) {
   return null;
 }
 
-function renderClipUpscaleRow() {
-  const host = $('clip-up-row');
-  if (!host) return;
-  const n = state.mergeSelection.size;
-  const resChips = [720, 1080].map(res =>
-    `<button class="chip-btn ${res === state.clipUpscaleRes ? 'on' : ''}"
-             onclick="state.clipUpscaleRes = ${res}; renderClipUpscaleRow()">${res}p</button>`
-  ).join('');
-  const rifeChips = [1, 2, 3, 4].map(m =>
-    `<button class="chip-btn ${m === state.clipUpscaleRife ? 'on' : ''}"
-             onclick="state.clipUpscaleRife = ${m}; renderClipUpscaleRow()">${m === 1 ? 'off' : m + '×'}</button>`
-  ).join('');
-  host.innerHTML = `
-    <span class="label">Upscale clips</span>${resChips}
-    <span class="label">Interpolate</span>${rifeChips}
-    <span style="flex:1"></span>
-    <button class="chip-btn apply" onclick="upscaleSelectedClips()">Upscale ${n}</button>`;
+// ── Upscale menu ──────────────────────────────────────────────────────────────
+// The settings the pass runs with are picked here, next to the ⤢ that starts
+// it, and confirmed before anything is queued. One menu serves both entry
+// points — a single clip's button and the merge bar's bulk button — because
+// they are the same pass; `targets` is just how many clips it will queue.
+const upscaleMenu = { targets: [], anchor: null, etaToken: 0 };
+
+const CLIP_UPSCALE_RESOLUTIONS = [720, 1080];
+const CLIP_UPSCALE_RIFE_OPTIONS = [1, 2, 3, 4];
+
+/** Clips that a run would actually do something to. */
+function _upscalableClipIds(ids) {
+  return ids.filter(id => {
+    const c = _clipById(id);
+    return c && !c.has_upscale && !c.upscale_rendering && !state.clipUpscaling.has(id);
+  });
 }
 
-async function toggleClipUpscale(clipId) {
+function openUpscaleMenu(anchorEl, clipIds) {
+  if (!clipIds.length) return;
+  upscaleMenu.targets = clipIds;
+  upscaleMenu.anchor = anchorEl;
+  $('upscale-menu-backdrop').classList.add('show');
+  $('upscale-menu').classList.add('show');
+  renderUpscaleMenu();
+  _positionUpscaleMenu(anchorEl);
+  loadClipUpscaleEta();
+}
+
+function closeUpscaleMenu() {
+  $('upscale-menu-backdrop').classList.remove('show');
+  $('upscale-menu').classList.remove('show');
+  upscaleMenu.targets = [];
+  upscaleMenu.anchor = null;
+  // Invalidate any estimate still in flight so a late answer cannot write into
+  // the next menu that opens.
+  upscaleMenu.etaToken++;
+}
+
+function renderUpscaleMenu() {
+  const n = upscaleMenu.targets.length;
+  const resChips = CLIP_UPSCALE_RESOLUTIONS.map(res =>
+    `<button class="chip-btn ${res === state.clipUpscaleRes ? 'on' : ''}" type="button"
+             onclick="pickClipUpscaleRes(${res})">${res}p</button>`
+  ).join('');
+  const rifeChips = CLIP_UPSCALE_RIFE_OPTIONS.map(m =>
+    `<button class="chip-btn ${m === state.clipUpscaleRife ? 'on' : ''}" type="button"
+             onclick="pickClipUpscaleRife(${m})">${m === 1 ? 'off' : m + '×'}</button>`
+  ).join('');
+  $('upscale-menu').innerHTML = `
+    <div class="um-title">⤢ Upscale ${n === 1 ? 'clip' : n + ' clips'}</div>
+    <div class="um-field">
+      <span class="label">Resolution</span>
+      <span class="chip-group">${resChips}</span>
+    </div>
+    <div class="um-field">
+      <span class="label">Interpolation</span>
+      <span class="chip-group">${rifeChips}</span>
+    </div>
+    <div class="um-eta" id="um-eta"></div>
+    <div class="um-actions">
+      <button class="btn" type="button" onclick="closeUpscaleMenu()">Cancel</button>
+      <button class="btn primary" type="button" onclick="confirmUpscaleMenu()">Start</button>
+    </div>`;
+}
+
+function _positionUpscaleMenu(anchorEl) {
+  const menu = $('upscale-menu');
+  // On a phone a popover anchored to a row in a scrolling list lands half off
+  // the screen; there the menu is a bottom sheet instead.
+  if (window.innerWidth < 560) {
+    Object.assign(menu.style, {
+      left: '12px', right: '12px', width: 'auto',
+      top: 'auto', bottom: 'calc(env(safe-area-inset-bottom) + 12px)',
+    });
+    return;
+  }
+  Object.assign(menu.style, {right: 'auto', bottom: 'auto', width: ''});
+  const r = anchorEl.getBoundingClientRect();
+  const w = menu.offsetWidth, h = menu.offsetHeight;
+  const left = Math.max(12, Math.min(r.right - w, window.innerWidth - w - 12));
+  // Below the button, or above it when there is no room left underneath.
+  const top = (r.bottom + 8 + h > window.innerHeight - 12)
+    ? Math.max(12, r.top - h - 8)
+    : r.bottom + 8;
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function pickClipUpscaleRes(res) {
+  state.clipUpscaleRes = res;
+  renderUpscaleMenu();
+  loadClipUpscaleEta();
+}
+
+function pickClipUpscaleRife(mult) {
+  state.clipUpscaleRife = mult;
+  renderUpscaleMenu();
+  loadClipUpscaleEta();
+}
+
+/** Target size + wall-clock for the settings currently picked. */
+async function loadClipUpscaleEta() {
+  const el = $('um-eta');
+  const [first] = upscaleMenu.targets;
+  if (!el || !first) return;
+  const n = upscaleMenu.targets.length;
+  const res = state.clipUpscaleRes;
+  const rife = state.clipUpscaleRife;
+  const token = ++upscaleMenu.etaToken;
+  el.textContent = 'Estimating…';
+  try {
+    const r = await api(
+      `/api/video/clips/${first}/upscale/estimate?resolution=${res}&rife_multiplier=${rife}`);
+    const d = await r.json();
+    if (token !== upscaleMenu.etaToken) return;   // settings changed meanwhile
+    // The estimate is for one clip. With several selected the clips differ in
+    // length, so the total is not n× this one — say what is known instead of
+    // inventing a sum.
+    el.textContent = n === 1
+      ? `→ ${d.width}×${d.height} · ${fmtEta(d.seconds)}`
+      : `→ ${d.width}×${d.height} · ${fmtEta(d.seconds)} for the first, then one after another`;
+  } catch(e) {
+    if (token !== upscaleMenu.etaToken) return;
+    // A courtesy, not a gate: the run stays available without it.
+    el.textContent = 'The GPU is busy for the whole render.';
+  }
+}
+
+async function confirmUpscaleMenu() {
+  const ids = upscaleMenu.targets.slice();
+  closeUpscaleMenu();
+  const res = state.clipUpscaleRes;
+  const rife = state.clipUpscaleRife;
+  let queued = 0;
+  for (const id of ids) {
+    if (await _queueClipUpscale(id, res, rife)) queued++;
+  }
+  if (queued) {
+    ArtRium.toast(queued === 1 ? 'Upscaling…' : `Queued ${queued} clip upscales`);
+  }
+  for (const jobId of state.clipsByJob.keys()) renderClipStack(jobId);
+  renderMergeBar();
+  startClipUpscalePolling();
+}
+
+/** The ⤢ on a clip row: opens the menu, or removes an upscale it already has. */
+async function toggleClipUpscale(clipId, btnEl) {
   const c = _clipById(clipId);
   if (!c) return;
 
@@ -1650,21 +1867,7 @@ async function toggleClipUpscale(clipId) {
     return;
   }
 
-  const res = state.clipUpscaleRes;
-  const rife = state.clipUpscaleRife;
-  let eta = null;
-  try {
-    const r = await api(
-      `/api/video/clips/${clipId}/upscale/estimate?resolution=${res}&rife_multiplier=${rife}`);
-    eta = await r.json();
-  } catch(e) { /* the estimate is a courtesy — a failure must not block the run */ }
-  const cost = eta ? ` → ${eta.width}×${eta.height}, ${fmtEta(eta.seconds)}.` : '';
-  const interp = rife > 1 ? ` with ${rife}× interpolation` : '';
-  if (!confirm(`Upscale this clip to ${res}p${interp}?${cost} The GPU is busy for the whole render.`)) return;
-
-  await _queueClipUpscale(clipId, res, rife);
-  renderClipStack(c.video_id);
-  startClipUpscalePolling();
+  openUpscaleMenu(btnEl, [clipId]);
 }
 
 async function _queueClipUpscale(clipId, res, rife) {
@@ -1682,28 +1885,15 @@ async function _queueClipUpscale(clipId, res, rife) {
   }
 }
 
-async function upscaleSelectedClips() {
-  const ids = [...state.mergeSelection.entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id);
-  const todo = ids.filter(id => {
-    const c = _clipById(id);
-    return c && !c.has_upscale && !c.upscale_rendering && !state.clipUpscaling.has(id);
-  });
+/** The merge bar's ⤢: the same menu, aimed at every selected clip at once. */
+function openBulkUpscaleMenu(btnEl) {
+  const ids = _selectedClipIds();
+  const todo = _upscalableClipIds(ids);
   if (!todo.length) {
     ArtRium.toast(ids.length ? 'Every selected clip is already upscaled' : 'No clips selected');
     return;
   }
-  const res = state.clipUpscaleRes;
-  const rife = state.clipUpscaleRife;
-  const interp = rife > 1 ? ` with ${rife}× interpolation` : '';
-  if (!confirm(`Upscale ${todo.length} clip(s) to ${res}p${interp}? They render one after another — this can take a while.`)) return;
-
-  let queued = 0;
-  for (const id of todo) {
-    if (await _queueClipUpscale(id, res, rife)) queued++;
-  }
-  if (queued) ArtRium.toast(`Queued ${queued} clip upscale(s)`);
-  for (const jobId of state.clipsByJob.keys()) renderClipStack(jobId);
-  startClipUpscalePolling();
+  openUpscaleMenu(btnEl, todo);
 }
 
 let _clipUpscaleTimer = null;
@@ -1750,7 +1940,7 @@ async function deleteClip(clipId) {
   if (!confirm('Delete this clip?')) return;
   try {
     await api(`/api/video/clips/${clipId}`, {method: 'DELETE'});
-    state.mergeSelection.delete(clipId);
+    state.mergeSelection.delete(clipKey(clipId));
     _renumberMergeSelection();
     ArtRium.toast('Clip deleted');
     await loadVideos();   // the source job may have been pruned entirely
@@ -1802,6 +1992,12 @@ async function loadVideos() {
   try {
     const [r] = await Promise.all([api('/api/video'), loadClips()]);
     state.videos = await r.json();
+    // A picked video can disappear (deleted elsewhere, or consumed by a merge
+    // that deleted its sources) — and one that went back to rendering is no
+    // longer pickable either.
+    _pruneMergeSelection('video:', new Set(
+      state.videos.filter(v => v.status === 'done' && v.url).map(v => videoKey(v.id)),
+    ));
     renderVideos();
     for (const v of state.videos) _postRenderVideo(v);
     renderMergeBar();
@@ -1822,7 +2018,8 @@ function renderVideos() {
 function _videoMeta(v) {
   const n = v.n_images || '?';
   if (v.workflow === 'merge') {
-    return `Merged from ${n} clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
+    // "sources", not "clips" — a merge may also join finished videos.
+    return `Merged from ${n} source${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
   }
   if (v.workflow === 'minimax_i2v' || v.workflow === 'ltx_i2v') {
     // ltx_i2v is retired but still on older rows in the library.
@@ -1949,8 +2146,25 @@ function makeVideoCard(v) {
     body = `<div class="error-text">${v.error || 'Unknown error'}</div>`;
   }
 
+  // A finished video is a merge source like a clip is: this picks the rendition
+  // the card plays (soundtrack, upscale and grain included) into the same
+  // ordered selection the floating bar concatenates. Hidden while a post-pass
+  // is in flight — it rewrites that very file, and the server refuses anyway.
+  const mergeOrder = state.mergeSelection.get(videoKey(v.id));
+  const postPassBusy = v.upscale_rendering || v.grain_rendering ||
+    state.upscalingVideos?.has(v.id) || state.grainingVideos?.has(v.id) ||
+    state.muxingVideos?.has(v.id);
+  const pickBtn = (v.status === 'done' && v.url && !postPassBusy)
+    ? `<button class="action-btn merge-pick ${mergeOrder ? 'on' : ''}"
+               data-merge-key="${videoKey(v.id)}"
+               title="Add this finished video to the merge selection"
+               onclick="toggleMergeSelect('${videoKey(v.id)}')">${mergeOrder ? `✓ ${mergeOrder}` : '+ Merge'}</button>`
+    : '';
+  if (mergeOrder) card.classList.add('merge-selected');
+
   const actions = v.status === 'done' && v.url
-    ? `<a class="action-btn" href="${withAuth(v.url)}" download>Download</a>
+    ? `${pickBtn}
+       <a class="action-btn" href="${withAuth(v.url)}" download>Download</a>
        <button class="action-btn delete" onclick="deleteVideo('${v.id}')">Delete</button>`
     : `<button class="action-btn delete" onclick="deleteVideo('${v.id}')">Delete</button>`;
 
@@ -2008,7 +2222,7 @@ function _soundtrackBlock(v) {
   }
   return `<div class="soundtrack-chip">
     <span class="label">Soundtrack</span>
-    <button class="chip-btn add" onclick="openSongPicker('${v.id}')">+ Attach</button>
+    <button class="chip-btn apply" onclick="openSongPicker('${v.id}')">+ Attach</button>
   </div>`;
 }
 
@@ -2076,17 +2290,22 @@ function _upscaleBlock(v) {
          <span class="hint">unavailable while a song is attached</span></div>`
     : `<div class="row wrap">
          <span class="label">Interpolation</span>
-         ${UPSCALE_RIFE_OPTIONS.map(m =>
+         <span class="chip-group">${UPSCALE_RIFE_OPTIONS.map(m =>
            `<button class="chip-btn ${m === rife ? 'on' : ''}"
                     onclick="pickUpscaleRife('${v.id}', ${m})">${m === 1 ? 'off' : m + '×'}</button>`
-         ).join('')}
+         ).join('')}</span>
        </div>`;
+  // One labelled row per choice, in the same order and wording as the clip
+  // menu — the two are the same pass, so they should not read as two features.
   return `<div class="post-chip" id="upscale-chip-${v.id}">
-    <div class="row wrap">
+    <div class="row">
       <span class="glyph">⤢</span>
       <span class="label">Upscale</span>
-      ${chips}
       <span class="hint" id="upscale-eta-${v.id}">${eta ? _etaText(eta) : ''}</span>
+    </div>
+    <div class="row wrap">
+      <span class="label">Resolution</span>
+      <span class="chip-group">${chips}</span>
     </div>
     ${rifeRow}
     <div class="row">
@@ -2465,7 +2684,8 @@ async function deleteVideo(id) {
     clearInterval(state.progressIntervals.get(id));
     state.progressIntervals.delete(id);
     // Deleting a job cascades to its clips — drop them from the merge selection.
-    for (const c of state.clipsByJob.get(id) || []) state.mergeSelection.delete(c.id);
+    for (const c of state.clipsByJob.get(id) || []) state.mergeSelection.delete(clipKey(c.id));
+    state.mergeSelection.delete(videoKey(id));
     state.clipsByJob.delete(id);
     _renumberMergeSelection();
     ArtRium.toast('Deleted');
@@ -2639,6 +2859,19 @@ window.addEventListener('load', async () => {
   loadStoryStyles();
   await loadVideos();
 });
+
+// The upscale menu is anchored to a button in a scrolling list, so anything
+// that moves that button under it has to be answered: reposition on resize,
+// dismiss on scroll rather than leave it pointing at nothing.
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && upscaleMenu.targets.length) closeUpscaleMenu();
+});
+window.addEventListener('resize', () => {
+  if (upscaleMenu.anchor) _positionUpscaleMenu(upscaleMenu.anchor);
+});
+window.addEventListener('scroll', () => {
+  if (upscaleMenu.targets.length) closeUpscaleMenu();
+}, true);
 </script>
 </body>
 </html>

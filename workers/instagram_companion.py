@@ -25,6 +25,7 @@ from services.instagram.companions import find_companion, get_or_create_companio
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
     REEL_POLL_TIMEOUT,
+    ai_label_field,
     create_media_container,
     missing_config,
     publish_container,
@@ -52,6 +53,7 @@ async def publish_stories(post_id: uuid.UUID) -> None:
             return
         # Stories only support images — skip any video children on a mixed post.
         image_refs = [r for r in await load_media_refs(post, db) if r.kind == "image"]
+        ai_label = post.ai_label
 
     media_ids: list[str] = []
     try:
@@ -59,7 +61,8 @@ async def publish_stories(post_id: uuid.UUID) -> None:
             for ref in image_refs:
                 container_id = await create_media_container(
                     client,
-                    {"image_url": share_url(ref.filename), "media_type": "STORIES"},
+                    {"image_url": share_url(ref.filename), "media_type": "STORIES",
+                     **ai_label_field(ai_label)},
                     f"story container for {ref.filename}",
                 )
                 story_media_id = await publish_container(
@@ -101,6 +104,7 @@ async def publish_reel(post_id: uuid.UUID) -> None:
         image_refs = [r for r in await load_media_refs(post, db) if r.kind == "image"]
         caption = post.caption or ""
         collaborators = post.collaborators or None
+        ai_label = post.ai_label
         reel_companion = find_companion(post, "reel")
         reel_video_id = reel_companion.video_id if reel_companion else None
 
@@ -146,6 +150,7 @@ async def publish_reel(post_id: uuid.UUID) -> None:
                     "caption":       caption,
                     "share_to_feed": "true",
                     **collaborators_field(collaborators),
+                    **ai_label_field(ai_label),
                 },
                 "reel container",
             )

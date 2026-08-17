@@ -494,11 +494,14 @@
     }
     .notes-textarea:focus { border-color: var(--accent); }
 
-    /* ── Auto-enhance ("Zauberstab") ── */
-    .enhance-head {
+    /* ── Post-passes: auto-enhance ("Zauberstab") + film grain ──
+       Both are the same control shape — a toggle button, a strength slider and
+       a hold-to-compare — so they share these `.fx-*` rules and differ only in
+       their glyph and their endpoints. */
+    .fx-head {
       display: flex; align-items: center; justify-content: space-between; gap: 8px;
     }
-    .enhance-row {
+    .fx-row {
       display: flex; align-items: center; gap: 10px;
     }
     .wand-btn {
@@ -520,8 +523,8 @@
     .wand-btn.busy { animation: wand-pulse 0.9s ease-in-out infinite; }
     @keyframes wand-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-    #enhance-strength { flex: 1; min-width: 0; accent-color: var(--accent); }
-    .enhance-pct {
+    #enhance-strength, #grain-strength { flex: 1; min-width: 0; accent-color: var(--accent); }
+    .fx-pct {
       font-size: 12px; color: var(--text-dim);
       font-variant-numeric: tabular-nums; min-width: 40px; text-align: right;
     }
@@ -533,12 +536,89 @@
       user-select: none; -webkit-user-select: none;
     }
     .compare-btn:active { color: var(--accent); border-color: var(--accent); }
-    .enhance-hint { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
-    .enhance-chips { display: flex; flex-wrap: wrap; gap: 4px; }
-    .enhance-chip {
+    .fx-hint { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+    .fx-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+
+    /* ── Diffusion upscale ──
+       More surface than the other two passes get, because it is the only one
+       with a decision in it: how much the model is allowed to repaint. */
+    .us-panel {
+      display: flex; flex-direction: column; gap: 9px;
+      margin-top: 8px; padding: 10px;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .us-row { display: flex; align-items: center; gap: 8px; }
+    .us-label { font-size: 11px; font-weight: 700; color: var(--text-dim); min-width: 46px; }
+    #upscale-denoise { flex: 1; min-width: 0; accent-color: var(--accent); }
+    .us-scale-ends {
+      display: flex; justify-content: space-between;
+      font-size: 10px; color: var(--text-dim); margin-top: -4px;
+    }
+    .us-actions { justify-content: space-between; }
+    .us-eta { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+    .us-progress { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
+    .us-track { height: 4px; border-radius: 2px; background: var(--surface2); overflow: hidden; }
+    .us-fill { height: 100%; width: 3%; background: var(--accent); transition: width 0.4s ease; }
+    .us-detail { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+    .fx-chip {
       font-size: 10px; padding: 2px 6px; border-radius: 5px;
       background: var(--surface2); color: var(--text-dim);
       font-variant-numeric: tabular-nums;
+    }
+
+    /* ── Title row: input + AI suggestion button ── */
+    .title-row { display: flex; align-items: center; gap: 8px; }
+    .title-row .title-input { flex: 1; min-width: 0; }
+
+    /* ── Title suggestions overlay (the Titler, in place) ──
+       Above the detail modal (z-index 100) so it can be opened from inside it
+       without the modal having to give up focus or scroll position. */
+    #titler-modal {
+      display: none; position: fixed; inset: 0; z-index: 210;
+      background: rgba(0,0,0,0.72);
+      align-items: flex-end; justify-content: center;
+      padding-top: env(safe-area-inset-top);
+    }
+    #titler-modal.show { display: flex; }
+    .titler-sheet {
+      width: 100%; max-width: 480px;
+      background: var(--surface);
+      border: 1.5px solid var(--border); border-bottom: none;
+      border-radius: 18px 18px 0 0;
+      padding: 18px 18px calc(env(safe-area-inset-bottom) + 20px);
+      display: flex; flex-direction: column; gap: 14px;
+      max-height: 88dvh; overflow-y: auto;
+    }
+    .titler-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .titler-head h2 { font-size: 16px; font-weight: 700; }
+    .titler-list { display: flex; flex-direction: column; gap: 8px; }
+    .title-suggestion {
+      text-align: left; width: 100%;
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 10px; color: var(--text);
+      font-size: 15px; line-height: 1.35; font-family: inherit;
+      padding: 12px 14px; cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .title-suggestion:hover { border-color: var(--accent); }
+    .title-suggestion:active { background: var(--accent-soft); border-color: var(--accent); }
+    .titler-status {
+      font-size: 13px; color: var(--text-dim); line-height: 1.5;
+      padding: 18px 4px; text-align: center;
+    }
+    .titler-status.error { color: var(--red); }
+    /* The VLM takes seconds, not milliseconds — a pulse on the panel is what
+       says "still thinking" without a spinner jumping the layout. */
+    .titler-status.busy { animation: wand-pulse 1.1s ease-in-out infinite; }
+    .titler-actions { display: flex; gap: 10px; }
+    .titler-actions .btn { flex: 1; }
+
+    /* Centred dialog rather than a bottom sheet once there is room for one. */
+    @media (min-width: 860px) {
+      #titler-modal { align-items: center; }
+      .titler-sheet { border-radius: 16px; border-bottom: 1.5px solid var(--border); padding-bottom: 18px; }
     }
 
     /* ── Action buttons ── */
@@ -692,24 +772,83 @@
 
     <!-- Auto-enhance ("Zauberstab") -->
     <div>
-      <div class="section-label enhance-head">
+      <div class="section-label fx-head">
         <span>Verbessern</span>
-        <button class="compare-btn" id="compare-btn" style="display:none">Original halten</button>
+        <!-- Holds the layer below the wand: the upscale when there is one,
+             the original otherwise — so what you see is this pass alone. -->
+        <button class="compare-btn" id="compare-btn" style="display:none">Ohne Korrektur halten</button>
       </div>
-      <div class="enhance-row">
+      <div class="fx-row">
         <button class="wand-btn" id="wand-btn" onclick="onWand()" title="Automatisch verbessern">🪄</button>
         <input type="range" id="enhance-strength" min="0" max="150" step="5" value="100" style="display:none">
-        <span class="enhance-pct" id="enhance-pct" style="display:none">100%</span>
+        <span class="fx-pct" id="enhance-pct" style="display:none">100%</span>
       </div>
-      <div class="enhance-hint" id="enhance-hint"></div>
-      <div class="enhance-chips" id="enhance-chips"></div>
+      <div class="fx-hint" id="enhance-hint"></div>
+      <div class="fx-chips" id="enhance-chips"></div>
+    </div>
+
+    <!-- Film grain -->
+    <div>
+      <div class="section-label fx-head">
+        <span>Körnung</span>
+        <button class="compare-btn" id="grain-compare-btn" style="display:none">Ohne Korn halten</button>
+      </div>
+      <div class="fx-row">
+        <button class="wand-btn" id="grain-btn" onclick="onGrainWand()" title="Filmkorn hinzufügen">🎞</button>
+        <input type="range" id="grain-strength" min="0" max="100" step="5" value="30" style="display:none">
+        <span class="fx-pct" id="grain-pct" style="display:none">30%</span>
+      </div>
+      <div class="fx-hint" id="grain-hint"></div>
+    </div>
+
+    <!-- Diffusion upscale (Z-Image Turbo + Ultimate SD Upscale) -->
+    <div>
+      <div class="section-label fx-head">
+        <span>Vergrößern</span>
+        <button class="compare-btn" id="upscale-compare-btn" style="display:none">Klein halten</button>
+      </div>
+      <div class="fx-row">
+        <button class="wand-btn" id="upscale-btn" onclick="onUpscaleClick()" title="Bild vergrößern">⤢</button>
+        <span class="fx-pct" id="upscale-size"></span>
+      </div>
+      <div class="us-panel" id="upscale-panel" style="display:none">
+        <div class="us-row">
+          <span class="us-label">Größe</span>
+          <span class="fx-chips" id="upscale-scales"></span>
+        </div>
+        <div class="us-row">
+          <span class="us-label">Modell</span>
+          <span class="fx-chips" id="upscale-models"></span>
+        </div>
+        <div class="us-row">
+          <span class="us-label">Stil</span>
+          <input type="range" id="upscale-denoise" min="10" max="45" step="1" value="25">
+          <span class="fx-pct" id="upscale-denoise-val">0.25</span>
+        </div>
+        <div class="us-scale-ends">
+          <span>← Mehr Konsistenz</span><span>Mehr Kreativität →</span>
+        </div>
+        <div class="us-row us-actions">
+          <span class="us-eta" id="upscale-eta"></span>
+          <button class="chip-btn apply" id="upscale-run" onclick="runUpscale()">Vergrößern</button>
+        </div>
+      </div>
+      <div class="us-progress" id="upscale-progress" style="display:none">
+        <div class="us-track"><div class="us-fill" id="upscale-fill"></div></div>
+        <div class="us-detail" id="upscale-detail"></div>
+      </div>
+      <div class="fx-hint" id="upscale-hint"></div>
     </div>
 
     <!-- Title -->
     <div>
       <div class="section-label">Title</div>
-      <input class="title-input" id="modal-title" placeholder="No title yet…"
-             autocomplete="off" autocorrect="off" spellcheck="false">
+      <div class="title-row">
+        <input class="title-input" id="modal-title" placeholder="No title yet…"
+               autocomplete="off" autocorrect="off" spellcheck="false">
+        <button class="wand-btn" id="titler-btn" onclick="openTitler()"
+                title="Titel vorschlagen lassen">✨</button>
+      </div>
     </div>
 
     <!-- Rating -->
@@ -782,6 +921,20 @@
       <a class="vd-btn download" id="vd-download" href="#">Download</a>
       <button class="vd-btn" id="vd-save" onclick="saveActiveVideo()" style="background:var(--accent);color:#000">Save</button>
       <button class="vd-btn delete" id="vd-delete" onclick="deleteActiveVideo()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Title suggestions (the Titler, opened from the title field) ── -->
+<div id="titler-modal" onclick="closeTitler(event)">
+  <div class="titler-sheet" onclick="event.stopPropagation()">
+    <div class="titler-head">
+      <h2>Titelvorschläge</h2>
+      <button class="modal-close" onclick="closeTitler()">✕</button>
+    </div>
+    <div id="titler-body"></div>
+    <div class="titler-actions">
+      <button class="btn" id="titler-regen-btn" onclick="runTitler()">↻ Neue Vorschläge</button>
     </div>
   </div>
 </div>
@@ -1128,6 +1281,15 @@ const populateModal = (img) => {
   $('modal-img').alt = img.filename;
 
   renderEnhanceUI(img);
+  renderGrainUI(img);
+  // Opening an image whose upscale is still running has to pick the progress
+  // back up — the job lives on the server, so closing the modal (or reloading)
+  // never cancelled it.
+  stopUpscalePolling();
+  $('upscale-progress').style.display = 'none';
+  $('upscale-panel').style.display = 'none';
+  renderUpscaleUI(img);
+  resumeUpscaleIfRunning(img.id);
   renderStars(state.modal.rating);
 
   const promptEl = $('modal-prompt');
@@ -1178,6 +1340,10 @@ const populateModal = (img) => {
 // renders a downscaled *preview* server-side, and only releasing it commits
 // the real sibling file. Both go through the identical analyse→plan→apply
 // chain, so what is judged during the drag is what gets written.
+//
+// It renders on top of the upscale when there is one, so playing with the wand
+// on an upscaled image keeps it at its upscaled size — only the ⤢ toggle takes
+// a picture back to the size it was generated at.
 let enhancePreviewTimer = null;
 
 /** Turn the applied Adjustments into short human chips ("what did it do?"). */
@@ -1213,7 +1379,7 @@ const renderEnhanceUI = (img) => {
     ? 'Regler ändert die Stärke — 0 % entfernt die Verbesserung wieder.'
     : 'Ein Klick analysiert das Bild und räumt Tonwerte, Brillanz und Farbe auf.';
   $('enhance-chips').innerHTML = (on ? enhanceParamChips(img.enhance_params) : [])
-    .map(c => `<span class="enhance-chip">${ArtRium.escHtml(c)}</span>`).join('');
+    .map(c => `<span class="fx-chip">${ArtRium.escHtml(c)}</span>`).join('');
 };
 
 const setEnhanceBusy = (busy) => {
@@ -1267,10 +1433,26 @@ const previewEnhance = (strength) => {
   }, 130);
 };
 
+/**
+ * Swap the modal image between the renditions. The stack, bottom to top, is
+ *   original → upscaled → enhanced → grained
+ * (services/image/rendition.py), so each compare button names the layer
+ * directly *below* its own pass:
+ *   unupscaled — the untouched original
+ *   unenhanced — the upscale if there is one, the original otherwise
+ *   ungrained  — enhanced, else upscaled, else the original
+ *   primary    — what viewers actually get, i.e. the top of the stack
+ */
 const showRendition = (which) => {
   const img = state.modal.image;
   if (!img) return;
-  $('modal-img').src = withAuth(which === 'original' ? img.url : (img.primary_url || img.url));
+  // Showing the layer directly below a pass is what makes the comparison read
+  // as that one pass's contribution — not the whole stack undone.
+  const src = which === 'unupscaled' ? img.url
+            : which === 'unenhanced' ? (img.upscaled_url || img.url)
+            : which === 'ungrained'  ? (img.enhanced_url || img.upscaled_url || img.url)
+            : (img.primary_url || img.url);
+  $('modal-img').src = withAuth(src);
 };
 
 const initEnhanceControls = () => {
@@ -1283,15 +1465,416 @@ const initEnhanceControls = () => {
   // where a real render is worth paying for.
   slider.addEventListener('change', () => applyEnhance(parseInt(slider.value, 10)));
 
-  // Press-and-hold to see the untouched original. Pointer events cover mouse
-  // and touch in one path; `contextmenu` is suppressed so a long press on
-  // mobile compares instead of opening the image menu.
+  // Press-and-hold to see the picture without the correction — the upscale
+  // when there is one, the untouched original otherwise. Pointer events cover
+  // mouse and touch in one path; `contextmenu` is suppressed so a long press
+  // on mobile compares instead of opening the image menu.
   const cmp = $('compare-btn');
-  cmp.addEventListener('pointerdown', (e) => { e.preventDefault(); showRendition('original'); });
+  cmp.addEventListener('pointerdown', (e) => { e.preventDefault(); showRendition('unenhanced'); });
   ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
     cmp.addEventListener(ev, () => showRendition('primary'))
   );
   cmp.addEventListener('contextmenu', (e) => e.preventDefault());
+};
+
+// ══════════════════════════════════════════════════════════
+// FILM GRAIN
+// ══════════════════════════════════════════════════════════
+// The same control as the wand, one layer further up: grain renders on top of
+// the enhanced file when there is one and the upscale otherwise (see
+// services/image/rendition.py), and removing it puts whatever was underneath
+// straight back — the original when nothing else is on.
+let grainPreviewTimer = null;
+
+const GRAIN_DEFAULT = 30;
+
+const renderGrainUI = (img) => {
+  const on = !!img.grained;
+  const strength = img.grain_strength || GRAIN_DEFAULT;
+
+  $('grain-btn').classList.toggle('on', on);
+  $('grain-strength').value = strength;
+  $('grain-pct').textContent = `${strength}%`;
+  ['grain-strength', 'grain-pct', 'grain-compare-btn'].forEach(id => {
+    $(id).style.display = on ? '' : 'none';
+  });
+
+  $('grain-hint').textContent = on
+    ? 'Regler ändert die Körnung — 0 % stellt den Zustand ohne Korn wieder her.'
+    : 'Legt feines Filmkorn über das Bild. Das Original bleibt erhalten.';
+};
+
+const setGrainBusy = (busy) => {
+  $('grain-btn').classList.toggle('busy', busy);
+  $('grain-btn').disabled = busy;
+  $('grain-strength').disabled = busy;
+};
+
+/** Commit `strength` (0 = remove) and adopt the returned row everywhere. */
+const applyGrain = async (strength) => {
+  const img = state.modal.image;
+  const idx = state.modal.index;
+  setGrainBusy(true);
+  try {
+    const r = await apiFetch(`/api/images/${img.id}/grain`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ strength }),
+    });
+    const updated = await r.json();
+    Object.assign(img, updated);
+    $('modal-img').src = withAuth(updated.primary_url);
+    renderGrainUI(updated);
+    refreshGridItem(idx, updated);
+    ArtRium.toast(updated.grained ? 'Korn aufgelegt' : 'Korn entfernt');
+  } catch (e) {
+    ArtRium.toast('Körnung fehlgeschlagen: ' + e.message, true);
+    renderGrainUI(img);
+  } finally {
+    setGrainBusy(false);
+  }
+};
+
+const onGrainWand = () => {
+  const img = state.modal.image;
+  if (!img) return;
+  applyGrain(img.grained ? 0 : parseInt($('grain-strength').value, 10) || GRAIN_DEFAULT);
+};
+
+const previewGrain = (strength) => {
+  const img = state.modal.image;
+  if (!img) return;
+  clearTimeout(grainPreviewTimer);
+  grainPreviewTimer = setTimeout(() => {
+    $('modal-img').src = withAuth(`/api/images/${img.id}/grain/preview?strength=${strength}`);
+  }, 130);
+};
+
+const initGrainControls = () => {
+  const slider = $('grain-strength');
+  slider.addEventListener('input', () => {
+    $('grain-pct').textContent = `${slider.value}%`;
+    previewGrain(slider.value);
+  });
+  slider.addEventListener('change', () => applyGrain(parseInt(slider.value, 10)));
+
+  // Hold to see the picture without the grain — which is the enhanced
+  // rendition when the wand is on, not the untouched original: the point of
+  // the comparison is the grain alone.
+  const cmp = $('grain-compare-btn');
+  cmp.addEventListener('pointerdown', (e) => { e.preventDefault(); showRendition('ungrained'); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
+    cmp.addEventListener(ev, () => showRendition('primary'))
+  );
+  cmp.addEventListener('contextmenu', (e) => e.preventDefault());
+};
+
+// ══════════════════════════════════════════════════════════
+// DIFFUSION UPSCALE (Z-Image Turbo + Ultimate SD Upscale)
+// ══════════════════════════════════════════════════════════
+// The third pass, and the only slow one: an ESRGAN enlargement followed by a
+// tiled re-diffusion, so the generator paints real detail at the new size
+// instead of interpolating what is already there. Minutes on the GPU, hence a
+// queued job with a polled progress bar rather than the instant round-trip the
+// wand and the grain get.
+//
+// It is also the *bottom* of the rendition stack: it always reads the
+// untouched original, and the wand and grain are re-rendered on top of the
+// result when it lands. So it can be started whatever else is switched on, and
+// nothing above it can cost the GPU minutes it took.
+//
+// The slider is the whole point of the UI. It is the sampler's denoise, named
+// after what it decides: low keeps the picture and only sharpens it, high lets
+// each tile repaint its contents. The range comes from the server
+// (/upscale/options) so it cannot drift from services/image/upscale.py.
+const usState = {
+  options: null,      // /upscale/options for the open image
+  scale: null,
+  model: null,
+  denoise: 0.25,
+  pollTimer: null,
+};
+
+const renderUpscaleUI = (img) => {
+  const on = !!img.upscaled;
+  const running = !!usState.pollTimer;
+
+  $('upscale-btn').classList.toggle('on', on);
+  $('upscale-compare-btn').style.display = on ? '' : 'none';
+  $('upscale-size').textContent = on
+    ? `${img.upscale_width}×${img.upscale_height}`
+    : '';
+
+  // The panel is a decision, so it only shows while one is being made: never
+  // for an image that already has an upscale, never while one is rendering.
+  if (on || running) $('upscale-panel').style.display = 'none';
+
+  $('upscale-hint').textContent = running
+    ? ''
+    : on
+      ? `${img.upscale_scale}× · Stil ${Number(img.upscale_denoise).toFixed(2)} · `
+        + `${img.upscale_model === 'nomos8ksc' ? '4x Nomos8kSC' : 'RealESRGAN 4x+'}`
+        + ' — ⤢ entfernt die Vergrößerung wieder. Zauberstab und Korn bleiben erhalten.'
+      : 'Vergrößert das Originalbild und zeichnet dabei echte Details nach (Z-Image, kachelweise). '
+        + 'Zauberstab und Korn werden danach neu darüber gelegt. Dauert Minuten.';
+};
+
+const onUpscaleClick = async () => {
+  const img = state.modal.image;
+  if (!img || usState.pollTimer) return;
+  if (img.upscaled) {
+    if (!confirm('Vergrößerung entfernen und zum kleinen Bild zurück?')) return;
+    try {
+      const r = await apiFetch(`/api/images/${img.id}/upscale`, { method: 'DELETE' });
+      const updated = await r.json();
+      Object.assign(img, updated);
+      $('modal-img').src = withAuth(updated.primary_url);
+      renderUpscaleUI(updated);
+      // The wand and the grain came back down to the original with it.
+      renderEnhanceUI(updated);
+      renderGrainUI(updated);
+      refreshGridItem(state.modal.index, updated);
+      ArtRium.toast('Vergrößerung entfernt');
+    } catch (e) {
+      ArtRium.toast('Entfernen fehlgeschlagen: ' + e.message, true);
+    }
+    return;
+  }
+  // Toggle the settings panel; load its options the first time it opens.
+  const panel = $('upscale-panel');
+  const opening = panel.style.display === 'none';
+  panel.style.display = opening ? '' : 'none';
+  if (opening) await loadUpscaleOptions(img);
+};
+
+const loadUpscaleOptions = async (img) => {
+  try {
+    const r = await apiFetch(`/api/images/${img.id}/upscale/options`);
+    usState.options = await r.json();
+  } catch (e) {
+    ArtRium.toast('Optionen konnten nicht geladen werden', true);
+    return;
+  }
+  const o = usState.options;
+  usState.scale = usState.scale || o.scale_default;
+  usState.model = usState.model || o.default_model;
+  usState.denoise = o.denoise_default;
+  $('upscale-denoise').min = Math.round(o.denoise_min * 100);
+  $('upscale-denoise').max = Math.round(o.denoise_max * 100);
+  $('upscale-denoise').value = Math.round(usState.denoise * 100);
+  renderUpscalePanel();
+};
+
+const renderUpscalePanel = () => {
+  const o = usState.options;
+  if (!o) return;
+  // A capped choice still shows its real output size, so "4×" that the budget
+  // trimmed does not silently pretend to be 4×.
+  $('upscale-scales').innerHTML = o.scales.map(s => `
+    <button class="chip-btn ${s.scale === usState.scale ? 'on' : ''}"
+            onclick="pickUpscaleScale(${s.scale})"
+            title="${s.width}×${s.height}${s.capped ? ' (begrenzt)' : ''}">
+      ${s.scale}×${s.capped ? '*' : ''}</button>`).join('');
+  $('upscale-models').innerHTML = o.models.map(m => `
+    <button class="chip-btn ${m.key === usState.model ? 'on' : ''}"
+            onclick="pickUpscaleModel('${m.key}')" title="${m.hint}">${m.label}</button>`).join('');
+  $('upscale-denoise-val').textContent = usState.denoise.toFixed(2);
+
+  const chosen = o.scales.find(s => s.scale === usState.scale);
+  $('upscale-eta').textContent = chosen
+    ? `${chosen.width}×${chosen.height} · ${chosen.tiles} Kacheln · ca. ${fmtUsEta(chosen.seconds)}`
+    : '';
+};
+
+const fmtUsEta = (sec) => sec < 90 ? `${Math.round(sec)} s` : `${Math.round(sec / 60)} min`;
+
+const pickUpscaleScale = (s) => { usState.scale = s; renderUpscalePanel(); };
+const pickUpscaleModel = (m) => { usState.model = m; renderUpscalePanel(); };
+
+const runUpscale = async () => {
+  const img = state.modal.image;
+  if (!img) return;
+  $('upscale-run').disabled = true;
+  try {
+    await apiFetch(`/api/images/${img.id}/upscale`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        denoise: usState.denoise, scale: usState.scale, model: usState.model,
+      }),
+    });
+    $('upscale-panel').style.display = 'none';
+    startUpscalePolling(img.id);
+    ArtRium.toast('Vergrößerung gestartet');
+  } catch (e) {
+    ArtRium.toast('Start fehlgeschlagen: ' + e.message, true);
+  } finally {
+    $('upscale-run').disabled = false;
+  }
+};
+
+/** Poll until the pass ends. Survives closing the modal: the job is
+ *  server-side, so reopening the image picks the progress back up. */
+const startUpscalePolling = (imageId) => {
+  stopUpscalePolling();
+  $('upscale-progress').style.display = '';
+  $('upscale-btn').classList.add('busy');
+  usState.pollTimer = setInterval(() => pollUpscale(imageId), 2500);
+  pollUpscale(imageId);
+};
+
+const stopUpscalePolling = () => {
+  clearInterval(usState.pollTimer);
+  usState.pollTimer = null;
+  $('upscale-btn').classList.remove('busy');
+};
+
+const pollUpscale = async (imageId) => {
+  let p;
+  try {
+    const r = await apiFetch(`/api/images/${imageId}/upscale/progress`);
+    p = await r.json();
+  } catch (e) { return; }   // transient — try again next tick
+
+  $('upscale-fill').style.width = `${Math.max(3, Math.min(100, p.pct || 0))}%`;
+  $('upscale-detail').textContent = p.detail || p.message || '';
+
+  if (p.phase === 'done' || p.phase === 'failed' || p.phase === 'idle') {
+    stopUpscalePolling();
+    $('upscale-progress').style.display = 'none';
+    if (p.phase === 'failed') ArtRium.toast(p.message || 'Vergrößerung fehlgeschlagen', true);
+    // Adopt the finished row wherever the image is on screen.
+    try {
+      const r = await apiFetch(`/api/images/${imageId}`);
+      const updated = await r.json();
+      if (state.modal.image && state.modal.image.id === imageId) {
+        Object.assign(state.modal.image, updated);
+        $('modal-img').src = withAuth(updated.primary_url);
+        renderUpscaleUI(state.modal.image);
+        // Both Pillow passes were re-rendered on top of the new upscale, so
+        // the wand's chips describe the larger picture now — re-read them
+        // rather than leaving the amounts the small render produced.
+        renderEnhanceUI(state.modal.image);
+        renderGrainUI(state.modal.image);
+        refreshGridItem(state.modal.index, updated);
+      }
+    } catch (e) { /* the toast already said what happened */ }
+    if (p.phase === 'done') ArtRium.toast('Vergrößert ✓');
+  }
+};
+
+const resumeUpscaleIfRunning = async (imageId) => {
+  try {
+    const r = await apiFetch(`/api/images/${imageId}/upscale/progress`);
+    const p = await r.json();
+    // Only adopt a job that is still going; a finished entry lingers so the
+    // poller can read its final state, and re-adopting it would restart the
+    // bar for something already applied.
+    if (['queued', 'uploading', 'submitting', 'running', 'finalizing'].includes(p.phase)
+        && state.modal.image && state.modal.image.id === imageId) {
+      startUpscalePolling(imageId);
+    }
+  } catch (e) { /* nothing running, or offline */ }
+};
+
+const initUpscaleControls = () => {
+  const slider = $('upscale-denoise');
+  slider.addEventListener('input', () => {
+    usState.denoise = parseInt(slider.value, 10) / 100;
+    $('upscale-denoise-val').textContent = usState.denoise.toFixed(2);
+  });
+  // Hold to see the picture at its original size — the comparison that matters
+  // is the detail the pass painted, so it goes against the rendition below.
+  const cmp = $('upscale-compare-btn');
+  cmp.addEventListener('pointerdown', (e) => { e.preventDefault(); showRendition('unupscaled'); });
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
+    cmp.addEventListener(ev, () => showRendition('primary'))
+  );
+  cmp.addEventListener('contextmenu', (e) => e.preventDefault());
+};
+
+// ══════════════════════════════════════════════════════════
+// TITLE SUGGESTIONS (Titler)
+// ══════════════════════════════════════════════════════════
+// The standalone /tools/titler page runs the same endpoint; here it is an
+// overlay on the title field so a title can be picked without leaving the
+// image being looked at.
+const titlerState = { imageId: null, busy: false };
+
+const openTitler = () => {
+  const img = state.modal.image;
+  if (!img) return;
+  $('titler-modal').classList.add('show');
+  // Suggestions belong to one image: reopening on another must not show the
+  // previous image's titles while the new ones are still being generated.
+  if (titlerState.imageId !== img.id) {
+    titlerState.imageId = img.id;
+    runTitler();
+  }
+};
+
+const closeTitler = (e) => {
+  if (e && e.target !== $('titler-modal')) return;
+  $('titler-modal').classList.remove('show');
+};
+
+const setTitlerStatus = (text, kind = '') => {
+  $('titler-body').innerHTML =
+    `<div class="titler-status ${kind}">${ArtRium.escHtml(text)}</div>`;
+};
+
+const runTitler = async () => {
+  const img = state.modal.image;
+  if (!img || titlerState.busy) return;
+  titlerState.imageId = img.id;
+  titlerState.busy = true;
+  $('titler-regen-btn').disabled = true;
+  $('titler-btn').classList.add('busy');
+  setTitlerStatus('Das Bild wird angeschaut…', 'busy');
+
+  try {
+    const r = await apiFetch('/api/titler/run', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ image_id: img.id }),
+    });
+    const d = await r.json();
+    renderTitleSuggestions(d.titles || []);
+  } catch (e) {
+    setTitlerStatus(e.message || 'Der Titler hat nicht geantwortet.', 'error');
+  } finally {
+    titlerState.busy = false;
+    $('titler-regen-btn').disabled = false;
+    $('titler-btn').classList.remove('busy');
+  }
+};
+
+const renderTitleSuggestions = (titles) => {
+  if (!titles.length) {
+    setTitlerStatus('Keine Vorschläge zurückbekommen — noch einmal versuchen.', 'error');
+    return;
+  }
+  const list = document.createElement('div');
+  list.className = 'titler-list';
+  titles.forEach(t => {
+    const btn = document.createElement('button');
+    btn.className = 'title-suggestion';
+    btn.type = 'button';
+    btn.textContent = t;
+    btn.onclick = () => useTitle(t);
+    list.appendChild(btn);
+  });
+  const body = $('titler-body');
+  body.innerHTML = '';
+  body.appendChild(list);
+};
+
+/** Put a suggestion into the title field. Saved with the rest of the modal. */
+const useTitle = (title) => {
+  $('modal-title').value = title;
+  state.modal.dirty = true;
+  closeTitler();
+  ArtRium.toast('Titel übernommen — noch speichern');
 };
 
 // ── Stars ──
@@ -1411,6 +1994,9 @@ const confirmDelete = async () => {
   btn.disabled = true;
   try {
     await deleteImageApi(state.modal.image.id);
+    // The modal stays open on the *next* image, so the button has to come back
+    // — re-enabling only in the catch left it dead for every image after the
+    // first successful delete.
 
     const gridItem = $('grid').querySelector(`[data-idx="${state.modal.index}"]`);
     if (gridItem) gridItem.remove();
@@ -1431,6 +2017,7 @@ const confirmDelete = async () => {
     ArtRium.toast('Deleted');
   } catch (e) {
     ArtRium.toast('Delete failed: ' + e.message, true);
+  } finally {
     btn.disabled = false;
   }
 };
@@ -1663,6 +2250,12 @@ async function deleteActiveVideo() {
 // KEYBOARD
 // ══════════════════════════════════════════════════════════
 document.addEventListener('keydown', e => {
+  // The suggestions overlay sits on top of the modal, so it owns the keys
+  // while it is open — Escape must close it, not the image behind it.
+  if ($('titler-modal').classList.contains('show')) {
+    if (e.key === 'Escape') closeTitler();
+    return;
+  }
   if (!$('modal').classList.contains('open')) return;
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   if (e.key === 'Escape')      closeModal();
@@ -1676,6 +2269,8 @@ document.addEventListener('keydown', e => {
 window.addEventListener('load', () => {
   $('search-input').addEventListener('input', onSearchInput);
   initEnhanceControls();
+  initGrainControls();
+  initUpscaleControls();
   fetchImages(true);
   loadLoraLabels();
   if ('serviceWorker' in navigator) {

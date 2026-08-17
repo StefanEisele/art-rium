@@ -31,6 +31,7 @@ from services.instagram.companions import find_companion, get_or_create_companio
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
     REEL_POLL_TIMEOUT,
+    ai_label_field,
     create_media_container,
     missing_config,
     share_url,
@@ -88,6 +89,7 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
         ]
         caption = post.caption or ""
         collaborators = post.collaborators or None
+        ai_label = post.ai_label
         reel_video_id = reel.video_id
         existing_filename = reel.video_filename
 
@@ -107,6 +109,7 @@ async def schedule_reel(post_id: uuid.UUID) -> tuple[ScheduleStatus, str | None]
                     "share_to_feed":          "true",
                     "scheduled_publish_time": str(int(publish_at.timestamp())),
                     **collaborators_field(collaborators),
+                    **ai_label_field(ai_label),
                 },
                 "reel container",
             )

@@ -595,6 +595,100 @@
 
     .detail-sheet h2 { font-size: 16px; font-weight: 700; }
 
+    /* ── Instagram preview ──
+       Shows the post inside the frame Instagram will actually render it in.
+       The frame is an aspect-ratio box; each child sits in it exactly as it
+       will on Instagram — `cover` for a pre-cropped child (what we upload
+       already has the frame's shape), `contain` on black for one we hand over
+       unchanged, which is where the bars come from. The object-position
+       percentage is the same window services/instagram/framing.py::crop_box
+       computes; the two must stay in step. */
+    #ig-preview-modal {
+      display: none;
+      position: fixed; inset: 0; z-index: 260;
+      background: rgba(0,0,0,0.82);
+      align-items: flex-end;
+    }
+    #ig-preview-modal.show { display: flex; }
+    .igp-sheet {
+      width: 100%; max-width: 480px; margin: 0 auto;
+      background: var(--surface);
+      border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+      box-shadow: var(--shadow-modal);
+      padding: 16px 16px calc(env(safe-area-inset-bottom) + 20px);
+      display: flex; flex-direction: column; gap: 12px;
+      max-height: 92dvh; overflow-y: auto;
+    }
+    .igp-head { display: flex; align-items: center; gap: 10px; }
+    .igp-head h2 { flex: 1; font-size: 16px; font-weight: 700; }
+    .igp-close {
+      background: none; border: none; color: var(--text-dim);
+      font-size: 20px; cursor: pointer; padding: 2px 6px; font-family: inherit;
+    }
+    /* The faux post card — deliberately plain: it is here to judge framing,
+       not to be a pixel-perfect Instagram mock. */
+    .igp-card { background: #000; border-radius: 12px; overflow: hidden; }
+    .igp-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px; background: var(--surface2);
+      font-size: 12px; font-weight: 600;
+    }
+    .igp-avatar {
+      width: 22px; height: 22px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2, var(--accent)));
+    }
+    .igp-ai-badge {
+      margin-left: auto; font-size: 10px; font-weight: 700;
+      color: var(--text-dim); border: 1px solid var(--border);
+      border-radius: 999px; padding: 2px 7px;
+    }
+    .igp-frame {
+      position: relative; width: 100%;
+      background: #000; overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .igp-frame img { width: 100%; height: 100%; display: block; }
+    .igp-nav {
+      position: absolute; top: 50%; transform: translateY(-50%);
+      width: 30px; height: 30px; border-radius: 50%;
+      background: rgba(0,0,0,0.55); color: #fff; border: none;
+      font-size: 15px; cursor: pointer; display: flex;
+      align-items: center; justify-content: center;
+    }
+    .igp-nav:disabled { opacity: 0.25; cursor: default; }
+    .igp-nav.prev { left: 8px; }
+    .igp-nav.next { right: 8px; }
+    .igp-count {
+      position: absolute; top: 8px; right: 8px;
+      background: rgba(0,0,0,0.6); color: #fff;
+      font-size: 11px; font-weight: 700;
+      border-radius: 999px; padding: 3px 9px;
+    }
+    .igp-vidmark {
+      position: absolute; top: 8px; left: 8px;
+      background: rgba(0,0,0,0.6); color: #fff;
+      font-size: 11px; border-radius: 999px; padding: 3px 9px;
+    }
+    .igp-dots { display: flex; gap: 5px; justify-content: center; padding: 8px 0; background: var(--surface2); }
+    .igp-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border-strong, #666); }
+    .igp-dot.on { background: var(--accent); }
+    .igp-verdict { font-size: 12px; line-height: 1.45; color: var(--text-dim); }
+    .igp-verdict strong { color: var(--text); }
+    .igp-verdict.warn strong { color: var(--accent); }
+    .igp-controls { display: flex; flex-direction: column; gap: 10px; }
+    .igp-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .igp-row > .igp-label { font-size: 12px; font-weight: 700; min-width: 62px; }
+    .igp-chip {
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 999px; color: var(--text-dim);
+      font-size: 12px; font-weight: 600; padding: 6px 12px;
+      cursor: pointer; font-family: inherit;
+    }
+    .igp-chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+    .igp-chip:disabled { opacity: 0.4; cursor: default; }
+    .igp-offset { flex: 1; min-width: 130px; accent-color: var(--accent); }
+    .igp-hint { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+
     /* Carousel thumbnail strip in detail modal */
     .detail-thumb-strip {
       display: flex; gap: 8px; overflow-x: auto;
@@ -732,6 +826,10 @@
           <button class="add-image-btn" id="add-video-btn" onclick="openVideoPicker('feed-media')" title="Add video">+ Video</button>
         </div>
         <div class="images-hint" id="images-hint">Tap + to add images or videos. Up to 10 items total per carousel.</div>
+        <!-- Framing lives behind the preview: the decision is only meaningful
+             next to the picture it changes. -->
+        <button class="igp-chip" id="preview-btn" onclick="openIgPreview('new')"
+                style="display:none; align-self:flex-start">👁 Instagram-Vorschau &amp; Zuschnitt</button>
       </div>
 
       <!-- Reel source videos strip (reel mode) -->
@@ -816,6 +914,16 @@
         </div>
       </div>
 
+      <!-- Meta's own AI self-disclosure, sent as is_ai_generated on the
+           container. Defaults from INSTAGRAM_AI_LABEL_DEFAULT. -->
+      <div class="dispatch-row">
+        <label>
+          <input type="checkbox" id="ai-label-toggle" onchange="state.aiLabel = this.checked">
+          <span class="dispatch-toggle-text">🤖 KI-Label</span>
+          <span class="dispatch-toggle-hint">Meta zeigt „AI info" unter dem Kontonamen.</span>
+        </label>
+      </div>
+
       <!-- Cloud dispatch toggle (only shown if outpost configured + reachable) -->
       <div class="dispatch-row" id="dispatch-row" style="display:none">
         <label>
@@ -863,6 +971,17 @@
   <div id="vp-grid"></div>
 </div>
 
+<!-- ── Instagram preview (framing + crop) ── -->
+<div id="ig-preview-modal" onclick="closeIgPreview(event)">
+  <div class="igp-sheet" onclick="event.stopPropagation()">
+    <div class="igp-head">
+      <h2>So sieht es auf Instagram aus</h2>
+      <button class="igp-close" onclick="closeIgPreview()">✕</button>
+    </div>
+    <div id="igp-body"></div>
+  </div>
+</div>
+
 <!-- ── Post Detail Modal ── -->
 <div id="detail-modal" onclick="closeDetail(event)">
   <div class="detail-sheet" onclick="event.stopPropagation()">
@@ -870,6 +989,15 @@
 
     <!-- Thumbnail strip (single or carousel) -->
     <div class="detail-thumb-strip" id="detail-thumb-strip"></div>
+    <button class="igp-chip" id="detail-preview-btn" onclick="openIgPreview('detail')"
+            style="display:none; align-self:flex-start">👁 Instagram-Vorschau &amp; Zuschnitt</button>
+    <div class="dispatch-row" id="detail-ai-row">
+      <label>
+        <input type="checkbox" id="detail-ai-label" onchange="state.detailAiLabel = this.checked">
+        <span class="dispatch-toggle-text">🤖 KI-Label</span>
+        <span class="dispatch-toggle-hint">Meta zeigt „AI info" unter dem Kontonamen.</span>
+      </label>
+    </div>
 
     <div class="detail-meta">
       <div class="detail-date" id="detail-date"></div>
@@ -1001,6 +1129,11 @@ const state = {
   // Standalone-reel mode
   mode: 'feed',                  // 'feed' | 'reel'
   selectedReelVideos: [],        // ordered array of Video objects (1–4) for kind='reel'
+  // Framing + AI label (new-post form; the detail modal keeps its own copies)
+  frameRatio: 'auto',            // 'auto' | '4x5' | '1x1' | '1.91x1'
+  aiLabel: true,                 // overwritten by /framing-defaults on load
+  detailFrameRatio: 'auto',
+  detailAiLabel: false,
 };
 
 const MAX_REEL_VIDEOS = 4;
@@ -1401,6 +1534,16 @@ function renderSelectedStrip() {
   addImgBtn.style.display = atMax ? 'none' : '';
   addVidBtn.style.display = atMax ? 'none' : '';
 
+  // The preview is only meaningful once there is something to frame.
+  const previewBtn = $('preview-btn');
+  if (previewBtn) {
+    const nFilled = state.selectedMedia.filter(m => m.crop_mode === 'fill').length;
+    previewBtn.style.display = state.selectedMedia.length ? '' : 'none';
+    previewBtn.textContent = nFilled
+      ? `👁 Vorschau · ${nFilled} formatfüllend`
+      : '👁 Instagram-Vorschau & Zuschnitt';
+  }
+
   // Hint adapts to the kind mix so the user knows what they have.
   const n     = state.selectedMedia.length;
   const nImg  = state.selectedMedia.filter(m => m.kind === 'image').length;
@@ -1421,6 +1564,226 @@ function renderSelectedStrip() {
 function removeSelectedMedia(idx) {
   state.selectedMedia.splice(idx, 1);
   renderSelectedStrip();
+}
+
+// ── Instagram framing + preview ───────────────────────────────────────────────
+// Instagram renders a feed post in ONE frame, and that frame has to sit between
+// 4:5 and 1.91:1 — a carousel takes it from the first child. A 9:16 render is
+// 0.5625, far outside that, so Instagram fits it into 4:5 and pads the sides:
+// the black bars. Nothing here changes what Instagram does; what it changes is
+// what we hand over. A child set to "fill" is pre-cropped to the frame, so
+// there is nothing left to pad.
+//
+// These constants and the crop window mirror services/instagram/framing.py.
+// /framing-defaults refreshes them on load so there is one source of truth,
+// but the math has to run locally for the preview to be live.
+let IG_FEED_MIN = 0.8;      // 4:5 — the tallest frame Instagram has
+let IG_FEED_MAX = 1.91;     // 1.91:1 — the widest
+let IG_FRAMES   = { '4x5': 0.8, '1x1': 1.0, '1.91x1': 1.91 };
+const IG_FRAME_LABELS = { auto: 'Auto', '4x5': '4:5', '1x1': '1:1', '1.91x1': '1.91:1' };
+
+async function loadFramingDefaults() {
+  try {
+    const r = await api('/api/instagram/framing-defaults');
+    const d = await r.json();
+    IG_FEED_MIN = d.feed_min_ratio;
+    IG_FEED_MAX = d.feed_max_ratio;
+    const { auto, ...pinned } = d.frames || {};
+    if (Object.keys(pinned).length) IG_FRAMES = pinned;
+    state.aiLabel = !!d.ai_label_default;
+  } catch (e) { /* keep the built-in fallbacks */ }
+  const box = $('ai-label-toggle');
+  if (box) box.checked = state.aiLabel;
+}
+
+const mediaRatio = (m) => (m && m.width && m.height) ? m.width / m.height : null;
+const clampFeedRatio = (r) => Math.min(Math.max(r, IG_FEED_MIN), IG_FEED_MAX);
+
+/** The ratio Instagram will render this post in — mirrors framing.frame_ratio. */
+function igFrameRatio(setting, items) {
+  if (IG_FRAMES[setting] !== undefined) return IG_FRAMES[setting];
+  const first = mediaRatio(items && items[0]);
+  return first ? clampFeedRatio(first) : IG_FRAMES['4x5'];
+}
+
+/** CSS object-position for a filled child — the same window as crop_box: only
+ *  the axis actually being cut moves, the other stays centred. */
+function cropObjectPosition(srcRatio, frame, offset) {
+  const pct = Math.round((offset ?? 0.5) * 100);
+  if (!srcRatio) return '50% 50%';
+  return srcRatio > frame ? `${pct}% 50%` : `50% ${pct}%`;
+}
+
+const previewCtx = { target: 'new', idx: 0 };
+
+const _previewItems = () => previewCtx.target === 'detail' ? state.detailMedia : state.selectedMedia;
+const _previewFrame = () => previewCtx.target === 'detail' ? state.detailFrameRatio : state.frameRatio;
+function _setPreviewFrameState(v) {
+  if (previewCtx.target === 'detail') state.detailFrameRatio = v; else state.frameRatio = v;
+}
+function _previewChanged() {
+  if (previewCtx.target === 'detail') renderDetailMediaUI(); else renderSelectedStrip();
+}
+
+function openIgPreview(target) {
+  previewCtx.target = target;
+  previewCtx.idx = 0;
+  if (!_previewItems().length) return;
+  $('ig-preview-modal').classList.add('show');
+  renderIgPreview();
+}
+
+function closeIgPreview(e) {
+  if (!e || e.target === $('ig-preview-modal')) {
+    $('ig-preview-modal').classList.remove('show');
+  }
+}
+
+function igPreviewGo(delta) {
+  const items = _previewItems();
+  previewCtx.idx = Math.min(Math.max(previewCtx.idx + delta, 0), items.length - 1);
+  renderIgPreview();
+}
+
+function setPreviewCropMode(mode) {
+  const it = _previewItems()[previewCtx.idx];
+  if (!it || it.kind === 'video') return;
+  it.crop_mode = mode;
+  if (it.crop_offset === undefined) it.crop_offset = 0.5;
+  renderIgPreview();
+  _previewChanged();
+}
+
+function setPreviewOffset(value) {
+  const it = _previewItems()[previewCtx.idx];
+  if (!it) return;
+  it.crop_offset = Number(value) / 100;
+  renderIgPreview();
+  _previewChanged();
+}
+
+function setPreviewFrame(key) {
+  _setPreviewFrameState(key);
+  renderIgPreview();
+  _previewChanged();
+}
+
+/** One tap for the common case: fill every image, leave videos alone. */
+function fillAllPreview() {
+  const items = _previewItems();
+  const allFilled = items.filter(m => m.kind === 'image').every(m => m.crop_mode === 'fill');
+  for (const m of items) {
+    if (m.kind === 'video') continue;
+    m.crop_mode = allFilled ? 'fit' : 'fill';
+    if (m.crop_offset === undefined) m.crop_offset = 0.5;
+  }
+  renderIgPreview();
+  _previewChanged();
+}
+
+function renderIgPreview() {
+  const items = _previewItems();
+  const host = $('igp-body');
+  if (!items.length) { host.innerHTML = '<div class="igp-hint">Keine Medien ausgewählt.</div>'; return; }
+
+  previewCtx.idx = Math.min(previewCtx.idx, items.length - 1);
+  const setting = _previewFrame();
+  const frame = igFrameRatio(setting, items);
+  const it = items[previewCtx.idx];
+  const src = mediaRatio(it);
+  const mode = it.kind === 'video' ? 'fit' : (it.crop_mode || 'fit');
+  const offset = it.crop_offset ?? 0.5;
+  const aiOn = previewCtx.target === 'detail' ? state.detailAiLabel : state.aiLabel;
+
+  // The picture that gets published is the enhanced/grained rendition, so the
+  // preview shows that one rather than the untouched original.
+  const imgSrc = it.kind === 'video'
+    ? (it.thumb_url ? withAuth(it.thumb_url) : '')
+    : withAuth(it.primary_url || it.url || it.thumb_url);
+
+  const imgStyle = mode === 'fill'
+    ? `object-fit:cover;object-position:${cropObjectPosition(src, frame, offset)}`
+    : 'object-fit:contain';
+
+  // What the user is actually being told: whether this child gets bars, and why.
+  const off = src ? Math.abs(src - frame) > 0.01 : false;
+  let verdict, warn = false;
+  if (mode === 'fill') {
+    verdict = '<strong>Formatfüllend</strong> — wird vor dem Upload auf das Format beschnitten, Instagram hat nichts mehr zu ergänzen.';
+  } else if (!off) {
+    verdict = '<strong>Passt exakt</strong> — keine Ränder, kein Beschnitt.';
+  } else if (src && src < frame) {
+    verdict = '<strong>Ränder links und rechts</strong> — das Bild ist höher als Instagrams höchstes Format (4:5), also wird es eingepasst statt beschnitten.';
+    warn = true;
+  } else {
+    verdict = '<strong>Ränder oben und unten</strong> — das Bild ist breiter als der Rahmen des Beitrags.';
+    warn = true;
+  }
+  if (it.kind === 'video') {
+    verdict += ' Videos werden hier nicht beschnitten (das hieße neu encodieren).';
+  }
+
+  const frameChips = ['auto', ...Object.keys(IG_FRAMES)].map(key => `
+    <button class="igp-chip ${key === setting ? 'on' : ''}" onclick="setPreviewFrame('${key}')">
+      ${IG_FRAME_LABELS[key] || key}</button>`).join('');
+
+  const nImages = items.filter(m => m.kind === 'image').length;
+  const allFilled = nImages > 0 && items.filter(m => m.kind === 'image').every(m => m.crop_mode === 'fill');
+
+  const srcLabel = (it.width && it.height)
+    ? `${it.width}×${it.height} (${(src).toFixed(2)}:1)` : 'Größe unbekannt';
+
+  host.innerHTML = `
+    <div class="igp-card">
+      <div class="igp-bar">
+        <span class="igp-avatar"></span>
+        <span>art_rium</span>
+        ${aiOn ? '<span class="igp-ai-badge">AI info</span>' : ''}
+      </div>
+      <div class="igp-frame" style="aspect-ratio:${frame}">
+        ${imgSrc ? `<img src="${imgSrc}" alt="" style="${imgStyle}">` : ''}
+        ${it.kind === 'video' ? '<span class="igp-vidmark">▶ Video</span>' : ''}
+        ${items.length > 1 ? `<span class="igp-count">${previewCtx.idx + 1}/${items.length}</span>` : ''}
+        ${items.length > 1 ? `
+          <button class="igp-nav prev" onclick="igPreviewGo(-1)" ${previewCtx.idx === 0 ? 'disabled' : ''}>‹</button>
+          <button class="igp-nav next" onclick="igPreviewGo(1)" ${previewCtx.idx === items.length - 1 ? 'disabled' : ''}>›</button>` : ''}
+      </div>
+      ${items.length > 1 ? `<div class="igp-dots">${
+        items.map((_, i) => `<span class="igp-dot ${i === previewCtx.idx ? 'on' : ''}"></span>`).join('')
+      }</div>` : ''}
+    </div>
+
+    <div class="igp-verdict ${warn ? 'warn' : ''}">${verdict}</div>
+
+    <div class="igp-controls">
+      <div class="igp-row">
+        <span class="igp-label">Bild ${previewCtx.idx + 1}</span>
+        <button class="igp-chip ${mode === 'fit' ? 'on' : ''}" ${it.kind === 'video' ? 'disabled' : ''}
+                onclick="setPreviewCropMode('fit')">Einpassen</button>
+        <button class="igp-chip ${mode === 'fill' ? 'on' : ''}" ${it.kind === 'video' ? 'disabled' : ''}
+                onclick="setPreviewCropMode('fill')">Formatfüllend</button>
+      </div>
+      ${mode === 'fill' ? `
+      <div class="igp-row">
+        <span class="igp-label">Ausschnitt</span>
+        <input class="igp-offset" type="range" min="0" max="100" step="1" value="${Math.round(offset * 100)}"
+               oninput="setPreviewOffset(this.value)">
+        <span class="igp-hint">${src && src > frame ? 'links ↔ rechts' : 'oben ↕ unten'}</span>
+      </div>` : ''}
+      <div class="igp-row">
+        <span class="igp-label">Format</span>
+        ${frameChips}
+      </div>
+      ${nImages > 1 ? `
+      <div class="igp-row">
+        <button class="igp-chip" onclick="fillAllPreview()">
+          ${allFilled ? 'Alle einpassen' : 'Alle formatfüllend'}</button>
+      </div>` : ''}
+      <div class="igp-hint">
+        Quelle: ${srcLabel} · Rahmen ${frame.toFixed(2)}:1${setting === 'auto' ? ' (automatisch — Instagram nimmt das erste Bild)' : ''}.
+        Instagram erlaubt im Feed nur ${IG_FEED_MIN}–${IG_FEED_MAX}:1; alles Höhere wird eingepasst.
+      </div>
+    </div>`;
 }
 
 function moveSelectedMedia(idx, delta) {
@@ -1924,7 +2287,13 @@ async function schedulePost() {
       if (state.selectedMedia.length === 0) return;
       body = {
         kind:                 'feed',
-        media:                state.selectedMedia.map(m => ({ kind: m.kind, id: m.id })),
+        media:                state.selectedMedia.map(m => ({
+          kind: m.kind, id: m.id,
+          crop_mode: m.crop_mode || 'fit',
+          crop_offset: m.crop_offset ?? 0.5,
+        })),
+        frame_ratio:          state.frameRatio,
+        ai_label:             state.aiLabel,
         caption:              $('caption-input').value.trim() || null,
         collaborators:        collaborators.length ? collaborators : null,
         scheduled_at:         state.computedDate,
@@ -1959,6 +2328,9 @@ async function schedulePost() {
     state.reelVideoId = null;
     state.reelVideo   = null;
     state.cloudDispatch = false;
+    // The frame goes back to auto; the AI label keeps the configured default
+    // rather than the last post's choice — it is a policy, not a per-post whim.
+    state.frameRatio = 'auto';
     $('picker-grid').innerHTML = '';
     $('caption-input').value = '';
     $('collab-input').value = '';
@@ -2092,6 +2464,17 @@ function renderDetailMediaUI() {
     summary = `Carousel · ${items.length} items (${nImg} image${nImg === 1 ? '' : 's'} + ${nVid} video${nVid === 1 ? '' : 's'})${leadTitle ? ' · ' + leadTitle : ''}`;
   }
   $('detail-title-text').textContent = summary;
+
+  // Framing is editable exactly where the media is — the crop is baked at save
+  // time, and an outpost post has already been handed over.
+  const previewBtn = $('detail-preview-btn');
+  const nFilled = state.detailMedia.filter(m => m.crop_mode === 'fill').length;
+  previewBtn.style.display = state.detailMedia.length ? '' : 'none';
+  previewBtn.textContent = nFilled
+    ? `👁 Vorschau · ${nFilled} formatfüllend`
+    : '👁 Instagram-Vorschau & Zuschnitt';
+  $('detail-ai-row').style.display = (post.status === 'scheduled' && !isOutpost) ? '' : 'none';
+  $('detail-ai-label').disabled = !editable;
 }
 
 function removeDetailMedia(idx) {
@@ -2122,6 +2505,10 @@ function openDetail(post) {
   state.detailMedia = media.length
     ? media.map(m => ({ ...m }))
     : fallbackImgs.map(img => ({ kind: 'image', ...img }));
+
+  state.detailFrameRatio = post.frame_ratio || 'auto';
+  state.detailAiLabel    = !!post.ai_label;
+  $('detail-ai-label').checked = state.detailAiLabel;
 
   $('detail-date').textContent = fmtDate(post.scheduled_at);
   renderDetailMediaUI();
@@ -2234,7 +2621,13 @@ async function saveDetail() {
           ArtRium.toast('Post must have at least one image or video', true);
           return;
         }
-        patchBody.media = state.detailMedia.map(m => ({ kind: m.kind, id: m.id }));
+        patchBody.media = state.detailMedia.map(m => ({
+          kind: m.kind, id: m.id,
+          crop_mode: m.crop_mode || 'fit',
+          crop_offset: m.crop_offset ?? 0.5,
+        }));
+        patchBody.frame_ratio = state.detailFrameRatio;
+        patchBody.ai_label    = state.detailAiLabel;
       }
     }
     await api(`/api/instagram/posts/${state.activePost.id}`, {
@@ -2453,7 +2846,10 @@ window.addEventListener('load', async () => {
     (newList) => { state.detailMedia = newList; renderDetailMediaUI(); },
   );
 
-  await Promise.all([loadTimeline(), loadLastPost(), loadAllVideos(), probeOutpost()]);
+  await Promise.all([
+    loadTimeline(), loadLastPost(), loadAllVideos(), probeOutpost(),
+    loadFramingDefaults(),
+  ]);
 });
 
 async function probeOutpost() {

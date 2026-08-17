@@ -4,10 +4,17 @@ no subprocess) — services/video/merge.py — plus the canvas the merge picks.
 """
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
-from routers.video import _clip_dimensions, _expected_clip_count, _merge_canvas
+from routers.video import (
+    MergeItem,
+    MergeRequest,
+    _clip_dimensions,
+    _expected_clip_count,
+    _merge_canvas,
+)
 from services.video.merge import MergeInput, build_merge_command
 
 
@@ -30,7 +37,7 @@ class TestMergeCanvas:
     if the merge sizes its canvas from the rendition it actually feeds in."""
 
     def test_uniform_selection_uses_the_shared_size(self):
-        assert _merge_canvas([_clip(), _clip(), _clip()]) == (864, 480)
+        assert _merge_canvas([(864, 480)] * 3) == (864, 480)
 
     def test_upscaled_clip_reports_its_upscaled_size(self):
         c = _clip(filename="seg_0_up.mp4", up_w=1920, up_h=1080)
@@ -46,13 +53,43 @@ class TestMergeCanvas:
         # "First clip wins" would scale the restored clip back down to 864x480
         # and throw the whole pass away.
         clips = [_clip(), _clip(filename="seg_1_up.mp4", up_w=1920, up_h=1080)]
-        assert _merge_canvas(clips) == (1920, 1080)
+        assert _merge_canvas([_clip_dimensions(c) for c in clips]) == (1920, 1080)
+
+    def test_finished_video_source_lifts_the_canvas_too(self):
+        # A merge may mix library clips with finished (often already upscaled)
+        # videos — the probed size of the video has to win the same way.
+        assert _merge_canvas([(864, 480), (1920, 1080)]) == (1920, 1080)
 
     def test_missing_dimensions_fall_back_to_a_square_default(self):
-        assert _merge_canvas([_clip(width=None, height=None)]) == (960, 960)
+        assert _merge_canvas([(None, None)]) == (960, 960)
 
     def test_empty_selection_does_not_raise(self):
         assert _merge_canvas([]) == (960, 960)
+
+
+class TestMergeRequestSources:
+    """The merge selection is an ordered mix of clips and finished videos;
+    `clip_ids` is only the shape a cached older frontend still posts."""
+
+    def test_items_keep_their_order_and_kind(self):
+        a, b = uuid4(), uuid4()
+        req = MergeRequest(items=[
+            MergeItem(kind="video", id=a), MergeItem(kind="clip", id=b),
+        ])
+        assert [(s.kind, s.id) for s in req.sources()] == [("video", a), ("clip", b)]
+
+    def test_legacy_clip_ids_are_read_as_clips(self):
+        a, b = uuid4(), uuid4()
+        req = MergeRequest(clip_ids=[a, b])
+        assert [(s.kind, s.id) for s in req.sources()] == [("clip", a), ("clip", b)]
+
+    def test_items_win_over_a_stale_clip_ids_field(self):
+        a, b = uuid4(), uuid4()
+        req = MergeRequest(items=[MergeItem(kind="video", id=a)], clip_ids=[b])
+        assert [(s.kind, s.id) for s in req.sources()] == [("video", a)]
+
+    def test_empty_request_selects_nothing(self):
+        assert MergeRequest().sources() == []
 
 
 class TestExpectedClipCount:

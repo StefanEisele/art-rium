@@ -22,8 +22,18 @@ from core.db import get_db
 from core.models import InstagramPost, Image, Video
 from core.scheduling import companion_at
 from core.tasks import safe_create_task
+from services.image.rendition import primary_filename
 from services.instagram.collaborators import normalize as normalize_collaborators
 from services.instagram.companions import find_companion, get_or_create_companion
+from services.instagram.crops import ensure_post_crops
+from services.instagram.framing import (
+    FEED_MAX_RATIO,
+    FEED_MIN_RATIO,
+    FRAME_AUTO,
+    FRAME_CHOICES,
+    FRAME_RATIOS,
+    frame_ratio as compute_frame_ratio,
+)
 from services.instagram.graph import missing_config
 from services.instagram.media import replace_media_items
 from services.instagram.publisher import publish_feed, schedule_feed
@@ -41,6 +51,12 @@ class MediaItem(BaseModel):
     """One ordered child of a feed-carousel: an image OR a video."""
     kind: Literal["image", "video"]
     id: uuid.UUID
+    # How this child meets the post's frame. 'fit' hands Instagram the picture
+    # as it is and lets it pad the sides; 'fill' pre-crops it to the frame.
+    # `crop_offset` slides the crop window along the axis being cut: 0 keeps
+    # the top/left, 1 the bottom/right. Videos are always published 'fit'.
+    crop_mode: Literal["fit", "fill"] = "fit"
+    crop_offset: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 class PostCreate(BaseModel):
@@ -62,6 +78,11 @@ class PostCreate(BaseModel):
     companion_time: Optional[str] = "18:23"    # "HH:MM" — day+ delays snap to this time
     reel_video_id: Optional[uuid.UUID] = None  # use an existing generated video for the companion Reel (kind='feed' only)
     dispatch_target: Optional[str] = "local"   # "local" (default) | "outpost" (Pi cloud-schedule)
+    # Frame Instagram renders the post in: "auto" (the first child's ratio,
+    # clamped into 4:5…1.91:1 — what Instagram does anyway) or a pinned choice.
+    frame_ratio: Optional[str] = FRAME_AUTO
+    # Meta's is_ai_generated self-disclosure. Omitted → the configured default.
+    ai_label: Optional[bool] = None
 
 
 class PostUpdate(BaseModel):
@@ -75,6 +96,8 @@ class PostUpdate(BaseModel):
     reel_delay_minutes:  Optional[int] = None
     companion_time: Optional[str] = None
     reel_video_id: Optional[uuid.UUID] = None
+    frame_ratio: Optional[str] = None
+    ai_label: Optional[bool] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -100,6 +123,54 @@ def _media_tuples_from_post(post: InstagramPost) -> list[tuple[str, uuid.UUID]]:
         (m.kind, m.image_id if m.kind == "image" else m.video_id)
         for m in sorted(post.media, key=lambda m: m.position)
     ]
+
+
+def _crop_specs_from_post(post: InstagramPost) -> list[tuple[str, float]]:
+    """Current per-child (crop_mode, crop_offset), in position order."""
+    return [
+        (m.crop_mode, round(m.crop_offset, 3))
+        for m in sorted(post.media, key=lambda m: m.position)
+    ]
+
+
+def _crop_specs_from_items(items: list[MediaItem]) -> list[tuple[str, float]]:
+    # A video child can only be published as-is — cropping one would mean
+    # re-encoding it — so 'fill' is not accepted there, it is normalised away.
+    return [
+        (("fit" if it.kind == "video" else it.crop_mode), round(it.crop_offset, 3))
+        for it in items
+    ]
+
+
+def _apply_crop_specs(post: InstagramPost, specs: list[tuple[str, float]]) -> None:
+    """Write per-child crop settings onto the post's media rows, by position."""
+    children = sorted(post.media, key=lambda m: m.position)
+    for child, (mode, offset) in zip(children, specs):
+        child.crop_mode = mode
+        child.crop_offset = offset
+
+
+async def _bake_crops(post: InstagramPost, db: AsyncSession) -> None:
+    """Render the crop renditions this post's settings ask for.
+
+    A crop that cannot be rendered is a 400 rather than a silent fallback:
+    publishing the uncropped picture would quietly undo the framing the user
+    just chose, and they would only find out by looking at the live post.
+    """
+    try:
+        await ensure_post_crops(post, db)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _validated_frame(value: str | None) -> str:
+    frame = (value or FRAME_AUTO).lower()
+    if frame not in FRAME_CHOICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"frame_ratio must be one of {', '.join(FRAME_CHOICES)}",
+        )
+    return frame
 
 
 def _legacy_to_media(image_id: uuid.UUID | None, carousel_image_ids: list[uuid.UUID] | None) -> list[MediaItem]:
@@ -174,6 +245,8 @@ def _serialize(
         "feed_creation_id": post.feed_creation_id,
         "reel_creation_id": reel.creation_id if reel else None,
         "remote_scheduled": bool(post.feed_creation_id),
+        "frame_ratio":           post.frame_ratio,
+        "ai_label":              post.ai_label,
         "dispatch_target":       post.dispatch_target,
         "outpost_id":            post.outpost_id,
         "outpost_status":        post.outpost_status,
@@ -189,7 +262,13 @@ def _serialize(
     if images is not None or videos is not None:
         d["media"] = []
         for m in sorted(post.media, key=lambda m: m.position):
-            item: dict = {"kind": m.kind, "position": m.position}
+            # `width`/`height` travel with every child so the preview can lay
+            # the post out in Instagram's frame without waiting for each file
+            # to load, and so the frame itself can be computed here.
+            item: dict = {
+                "kind": m.kind, "position": m.position,
+                "crop_mode": m.crop_mode, "crop_offset": m.crop_offset,
+            }
             if m.kind == "image" and (images or {}).get(m.image_id):
                 img = images[m.image_id]
                 item.update({
@@ -197,7 +276,12 @@ def _serialize(
                     "filename": img.filename,
                     "title": img.title,
                     "url": f"/api/image/{img.filename}",
+                    # What actually gets published (enhanced/grained rendition),
+                    # so the preview judges the framing on the real picture.
+                    "primary_url": f"/api/image/{primary_filename(img)}",
                     "thumb_url": f"/api/image/{img.filename}/thumb",
+                    "width": img.width,
+                    "height": img.height,
                 })
             elif m.kind == "video" and (videos or {}).get(m.video_id):
                 vid = videos[m.video_id]
@@ -207,8 +291,20 @@ def _serialize(
                     "title": vid.title,
                     "url": f"/api/video/file/{vid.filename}" if vid.filename else None,
                     "thumb_url": f"/api/video/thumb/{vid.id}" if vid.status == "done" else None,
+                    "width": vid.width,
+                    "height": vid.height,
                 })
             d["media"].append(item)
+
+        # The frame Instagram will actually render this post in — the number
+        # the preview draws, and the one the crops were baked against.
+        first = d["media"][0] if d["media"] else None
+        first_ratio = (
+            (first.get("width") / first["height"])
+            if first and first.get("width") and first.get("height") else None
+        )
+        d["frame_ratio_value"] = compute_frame_ratio(post.frame_ratio, first_ratio)
+        d["feed_ratio_range"] = [FEED_MIN_RATIO, FEED_MAX_RATIO]
 
     if images is not None:
         # Primary image info (for timeline preview)
@@ -332,6 +428,8 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     media_tuples: list[tuple[str, uuid.UUID]] = []
+    crop_specs: list[tuple[str, float]] = []
+    frame = _validated_frame(body.frame_ratio)
 
     if kind == "reel":
         # Standalone reel: validate the source-video list; outpost is the only path.
@@ -367,6 +465,7 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
         if not items:
             raise HTTPException(status_code=400, detail="kind='feed' requires media (or legacy image_id)")
         media_tuples = await _resolve_media_items(items, db)
+        crop_specs = _crop_specs_from_items(items)
 
     if dispatch_target == "outpost":
         miss = outpost_svc.missing_config()
@@ -385,6 +484,11 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
         status="scheduled",
         companion_time=body.companion_time,
         dispatch_target=dispatch_target,
+        frame_ratio=frame,
+        # Not sent → the configured default. Everything this tool publishes is
+        # generated, so the default is on; the client can still say otherwise.
+        ai_label=(settings.instagram_ai_label_default
+                  if body.ai_label is None else body.ai_label),
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -396,7 +500,12 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
         if body.reel_video_id is not None:
             get_or_create_companion(post, "reel").video_id = body.reel_video_id
         await replace_media_items(post, media_tuples, db)
+        _apply_crop_specs(post, crop_specs)
     db.add(post)
+    # The crop has to exist before the post can be dispatched, and dispatch can
+    # start on the next line — the outpost task fires immediately.
+    await db.flush()
+    await _bake_crops(post, db)
     await db.commit()
     await db.refresh(post)
     logger.info(
@@ -507,6 +616,17 @@ async def update_post(
         if body.status not in allowed:
             raise HTTPException(status_code=400, detail=f"status must be one of {allowed}")
         post.status = body.status
+    if "frame_ratio" in body.model_fields_set:
+        new_frame = _validated_frame(body.frame_ratio)
+        if new_frame != post.frame_ratio:
+            post.frame_ratio = new_frame
+            invalidates_remote = True   # a different frame is a different crop
+    if "ai_label" in body.model_fields_set and body.ai_label is not None:
+        if body.ai_label != post.ai_label:
+            post.ai_label = body.ai_label
+            # The label is a container parameter, so an already-created remote
+            # container carries the old answer and has to be rebuilt.
+            invalidates_remote = True
     if body.media is not None:
         # Full mixed-media replacement (preferred Stage-2+ input).
         if post.kind != "feed":
@@ -515,6 +635,12 @@ async def update_post(
         if new_tuples != _media_tuples_from_post(post):
             await replace_media_items(post, new_tuples, db)
             invalidates_remote = True
+        # Applied whether or not the media list itself changed — editing only a
+        # crop leaves the identities alone but still changes what gets published.
+        new_specs = _crop_specs_from_items(body.media)
+        if new_specs != _crop_specs_from_post(post):
+            invalidates_remote = True
+        _apply_crop_specs(post, new_specs)
     elif body.carousel_image_ids is not None:
         # Legacy image-only replacement — kept for frontend back-compat.
         primary = _image_ids_in_order(post)[:1]
@@ -552,6 +678,9 @@ async def update_post(
             reel.status = None
 
     post.updated_at = datetime.now(timezone.utc)
+    if post.kind == "feed":
+        await db.flush()
+        await _bake_crops(post, db)
     await db.commit()
 
     if creation_ids_to_drop:
@@ -756,6 +885,20 @@ async def _drop_remote_containers(creation_ids: list[str]) -> None:
                 logger.info("Dropped IG container %s → %s", cid, r.status_code)
             except Exception as exc:
                 logger.warning("Failed to drop IG container %s: %s", cid, exc)
+
+
+@router.get("/framing-defaults")
+async def framing_defaults():
+    """Frame rules + the AI-label default, so the client doesn't have to keep
+    its own copy of Meta's numbers or guess what a new post will be created
+    with. The preview still does the ratio math locally (it has to, live), but
+    it takes the constants from here."""
+    return {
+        "ai_label_default": settings.instagram_ai_label_default,
+        "frames": {"auto": None, **FRAME_RATIOS},
+        "feed_min_ratio": FEED_MIN_RATIO,
+        "feed_max_ratio": FEED_MAX_RATIO,
+    }
 
 
 @router.get("/outpost-status")

@@ -93,9 +93,13 @@ async def test_collaborators_go_on_carousel_parent_not_children():
     """
     _child_payload must never carry `collaborators`; the parent CAROUSEL
     container must. Sending it on a child fails the whole Graph API call.
+
+    `is_ai_generated` is documented the same way ("not available for carousel
+    children"), so it is checked here too — same rule, same failure mode.
     """
     import uuid
 
+    from services.instagram.graph import ai_label_field
     from services.instagram.media import MediaRef
     from services.instagram.publisher import _Snapshot, _child_payload
 
@@ -103,10 +107,11 @@ async def test_collaborators_go_on_carousel_parent_not_children():
                    filename="a.png", filepath="images/a.png")
     child = await _child_payload(ref, is_carousel_item=True)
     assert "collaborators" not in child
+    assert "is_ai_generated" not in child
     assert child["is_carousel_item"] == "true"
 
     snap = _Snapshot(
-        media=[ref, ref], caption="hi", collaborators=["alice"],
+        media=[ref, ref], caption="hi", collaborators=["alice"], ai_label=True,
         story_delay=None, reel_delay=None, companion_time=None,
         scheduled_at=None, feed_creation_id=None,
     )
@@ -115,5 +120,17 @@ async def test_collaborators_go_on_carousel_parent_not_children():
         "children": "1,2",
         "caption": snap.caption,
         **container_field(snap.collaborators),
+        **ai_label_field(snap.ai_label),
     }
     assert json.loads(parent["collaborators"]) == ["alice"]
+    assert parent["is_ai_generated"] == "true"
+
+
+def test_ai_label_off_omits_the_parameter():
+    """Off must mean absent, not "false": absent is Meta's documented default
+    and leaves the post unlabelled, while a stray value would be a guess about
+    how Meta parses it."""
+    from services.instagram.graph import ai_label_field
+
+    assert ai_label_field(False) == {}
+    assert ai_label_field(True) == {"is_ai_generated": "true"}

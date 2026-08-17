@@ -100,9 +100,20 @@ async def load_media_refs(post: InstagramPost, db: AsyncSession) -> list[MediaRe
                 # img.filename/img.filepath straight off the row would publish
                 # the unenhanced original. /share/image resolves either name
                 # out of images_dir, so the enhanced sibling needs no routing.
-                refs.append(MediaRef(
-                    "image", img.id, primary_filename(img), primary_filepath(img),
-                ))
+                #
+                # A baked Instagram crop wins over both — it is rendered *from*
+                # the primary rendition (services/instagram/crops.py) and is
+                # the only file that fills the post's frame instead of being
+                # padded into it. Both dispatch paths inherit the crop here,
+                # which is why neither of them mentions cropping.
+                if m.crop_filename and m.crop_filepath:
+                    refs.append(MediaRef(
+                        "image", img.id, m.crop_filename, m.crop_filepath,
+                    ))
+                else:
+                    refs.append(MediaRef(
+                        "image", img.id, primary_filename(img), primary_filepath(img),
+                    ))
         elif m.kind == "video":
             vid = videos.get(m.video_id)
             if vid and vid.status == "done" and vid.filename and vid.filepath:

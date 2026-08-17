@@ -37,9 +37,11 @@ from core.models import InstagramPost
 from core.scheduling import companion_at
 from services.instagram.collaborators import container_field as collaborators_field
 from services.instagram.companions import find_companion, get_or_create_companion
+from services.instagram.crops import ensure_post_crops
 from services.instagram.graph import (
     REEL_POLL_INTERVAL,
     REEL_POLL_TIMEOUT,
+    ai_label_field,
     create_media_container,
     missing_config,
     publish_container,
@@ -149,6 +151,7 @@ class _Snapshot:
     media:            list[MediaRef]
     caption:          str
     collaborators:    list[str] | None
+    ai_label:         bool
     story_delay:      int | None
     reel_delay:       int | None
     companion_time:   str | None
@@ -165,6 +168,11 @@ async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
         post = await db.get(InstagramPost, post_id)
         if not post or post.status != "scheduled":
             return None
+        # Refresh the crops before reading the media list: an image enhanced
+        # after this post was scheduled has a newer source than its baked crop,
+        # and load_media_refs would otherwise hand out the stale one.
+        await ensure_post_crops(post, db)
+        await db.commit()
         media = await load_media_refs(post, db)
         if not media:
             logger.warning("publish_feed %s has no media items", post_id)
@@ -175,6 +183,7 @@ async def _load_post_snapshot(post_id: uuid.UUID) -> _Snapshot | None:
             media=media,
             caption=post.caption or "",
             collaborators=post.collaborators or None,
+            ai_label=post.ai_label,
             story_delay=story.delay_minutes if story else None,
             reel_delay=reel.delay_minutes if reel else None,
             companion_time=post.companion_time,
@@ -241,6 +250,7 @@ async def _create_single_container(
     data = await _child_payload(ref, is_carousel_item=False)
     data["caption"] = snap.caption
     data.update(collaborators_field(snap.collaborators))
+    data.update(ai_label_field(snap.ai_label))
     if scheduled_publish_time is not None:
         data["scheduled_publish_time"] = str(scheduled_publish_time)
     container_id = await create_media_container(client, data, f"create single {ref.kind} container")
@@ -279,11 +289,14 @@ async def _create_carousel_container(
 
     # `collaborators` goes on the parent only — Meta rejects the call with
     # "param collaborators is not allowed" if a child container carries it.
+    # `is_ai_generated` is documented the same way ("not available for carousel
+    # children"), so it rides on the parent too.
     data: dict[str, str] = {
         "media_type": "CAROUSEL",
         "children":   ",".join(child_ids),
         "caption":    snap.caption,
         **collaborators_field(snap.collaborators),
+        **ai_label_field(snap.ai_label),
     }
     if scheduled_publish_time is not None:
         data["scheduled_publish_time"] = str(scheduled_publish_time)

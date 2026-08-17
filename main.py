@@ -21,6 +21,7 @@ from core.config import settings
 from core.startup_sweep import backfill_review_clips, sweep_stuck_jobs
 from core.tasks import safe_create_task
 from services.ollama.analysis import warm_titler_model
+from services.video_api.queue import CloudVideoQueue
 from workers.comfy_listener import ComfyListener
 from workers.instagram_scheduler import InstagramScheduler
 
@@ -64,6 +65,14 @@ async def lifespan(app: FastAPI):
     scheduler = InstagramScheduler()
     scheduler_task = safe_create_task(scheduler.run(), name="instagram_scheduler")
 
+    # Start the paid cloud-render queue. Its first act is to reconcile: MiniMax
+    # tasks outlive this process, so anything still in flight is adopted and
+    # any reservation whose submit never landed is released. Skipping that
+    # would leak budget on every restart.
+    cloud_queue = CloudVideoQueue()
+    cloud_task = safe_create_task(cloud_queue.run(), name="cloud_video_queue")
+    app.state.cloud_queue = cloud_queue
+
     # Warm the titler VLM in the background — cold load is ~2.5 min, which
     # exceeds the Cloudflare tunnel's ~100s upstream timeout for the first
     # frontend request. Fire-and-forget; never blocks server startup.
@@ -72,10 +81,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    cloud_queue.stop()
     comfy_task.cancel()
     scheduler_task.cancel()
     warm_task.cancel()
-    for t in (comfy_task, scheduler_task, warm_task):
+    cloud_task.cancel()
+    for t in (comfy_task, scheduler_task, warm_task, cloud_task):
         try:
             await t
         except asyncio.CancelledError:
@@ -206,13 +217,14 @@ async def gate_frontend(request: Request, call_next):
 
 
 # ── Routers ──────────────────────────────────────────────────────────────────
-from routers import generate, images, titler, instagram, video, wordpress, system, improv, music  # noqa: E402  (after app is created)
+from routers import generate, images, titler, instagram, video, video_api, wordpress, system, improv, music  # noqa: E402  (after app is created)
 
 app.include_router(generate.router)
 app.include_router(images.router)
 app.include_router(titler.router)
 app.include_router(instagram.router)
 app.include_router(video.router)
+app.include_router(video_api.router)
 app.include_router(wordpress.router)
 app.include_router(system.router)
 app.include_router(improv.router)
@@ -226,7 +238,7 @@ _shared = _frontends_dir / "shared"
 if _shared.exists():
     app.mount("/shared", StaticFiles(directory=str(_shared)), name="shared")
 
-_TOOL_NAMES = ("z-image", "gallery", "titler", "instagram", "video", "articles", "improv", "music")
+_TOOL_NAMES = ("z-image", "gallery", "titler", "instagram", "video", "video-api", "articles", "improv", "music")
 for _tool in _TOOL_NAMES:
     _dir = _frontends_dir / "tools" / _tool
     if _dir.exists():

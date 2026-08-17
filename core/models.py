@@ -4,6 +4,7 @@ Alembic autogenerates migrations from these definitions.
 """
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -59,13 +60,34 @@ class Image(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     # Auto-enhance ("Zauberstab", services/image/enhance.py). Like the video
     # grain pass, this writes a *sibling* file and never overwrites the
-    # original, and is always re-rendered from the original so re-running at a
+    # original, and is always re-rendered from the rendition below it — the
+    # upscale when there is one, the original otherwise — so re-running at a
     # different strength replaces the correction instead of stacking it.
     # Precedence for publishing lives in services/image/rendition.py.
     enhance_strength: Mapped[int | None] = mapped_column(SmallInteger)  # 0–150 UI scale; null = not enhanced
     enhanced_filename: Mapped[str | None] = mapped_column(String(512))  # basename, sibling of `filename`
     enhanced_filepath: Mapped[str | None] = mapped_column(Text)         # relative to storage_dir
     enhance_params: Mapped[dict | None] = mapped_column(JSONB)          # the Adjustments the analysis chose, for the UI
+    # Diffusion upscale (services/image/upscale.py) — Ultimate SD Upscale
+    # driven by Z-Image Turbo. The *lowest* derived rendition: it always reads
+    # the untouched original, and the two Pillow passes (wand, grain) render on
+    # top of it at the new resolution. Deliberately so — re-running this costs
+    # GPU minutes, so nothing cheap is allowed to invalidate it, and only
+    # deleting the upscale takes the image back to its generated size.
+    upscale_scale: Mapped[float | None] = mapped_column(Float)          # 1.5–4.0; null = not upscaled
+    upscale_denoise: Mapped[float | None] = mapped_column(Float)        # the creativity the tiles were redrawn at
+    upscale_model: Mapped[str | None] = mapped_column(String(32))       # key into services/image/upscale.py::UPSCALE_MODELS
+    upscaled_filename: Mapped[str | None] = mapped_column(String(512))  # basename, sibling of `filename`
+    upscaled_filepath: Mapped[str | None] = mapped_column(Text)         # relative to storage_dir
+    upscale_width: Mapped[int | None] = mapped_column(Integer)
+    upscale_height: Mapped[int | None] = mapped_column(Integer)
+    # Film grain (services/image/grain.py) — the last derived rendition: it
+    # renders on top of the enhancement / upscale when there is one (grain
+    # belongs at the delivery resolution), as the video pass does too.
+    # Removing it puts whatever was underneath back untouched.
+    grain_strength: Mapped[int | None] = mapped_column(SmallInteger)    # 1–100 UI scale; null = no grain
+    grained_filename: Mapped[str | None] = mapped_column(String(512))   # basename, sibling of `filename`
+    grained_filepath: Mapped[str | None] = mapped_column(Text)          # relative to storage_dir
     # WordPress media library (set when uploaded via /api/wordpress/media/upload)
     wp_media_id: Mapped[int | None] = mapped_column(Integer)
     wp_source_url: Mapped[str | None] = mapped_column(Text)
@@ -188,6 +210,13 @@ class InstagramPost(Base):
         String(32), nullable=False, default="scheduled", index=True
     )                                                               # scheduled | posted | cancelled | failed
     instagram_media_id: Mapped[str | None] = mapped_column(String(128))  # filled after posting
+    # Which frame Instagram will render this post in — "auto" (the first
+    # child's ratio, clamped into the feed's 4:5…1.91:1 range, which is what
+    # Instagram does anyway) or a pinned choice. See services/instagram/framing.py.
+    frame_ratio: Mapped[str] = mapped_column(String(8), nullable=False, default="auto")
+    # Meta's `is_ai_generated` self-disclosure, set per post at container
+    # creation. New posts default to settings.instagram_ai_label_default.
+    ai_label: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     # Story/reel companion state lives in PostCompanion (one row per kind) —
     # see below. companion_time is the one knob shared by both companions'
     # timing math, so it stays here rather than being duplicated per-row.
@@ -303,6 +332,17 @@ class InstagramPostMedia(Base):
     video_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("videos.id", ondelete="CASCADE"), nullable=True
     )
+    # How this child meets the post's frame. 'fit' publishes the picture as it
+    # is and lets Instagram pad it (bars); 'fill' pre-crops it to the frame so
+    # there is nothing left to pad. `crop_offset` (0..1) slides the crop window
+    # along whichever axis is being cut. Images only — cropping a video would
+    # mean re-encoding it, so video children stay 'fit'.
+    crop_mode: Mapped[str] = mapped_column(String(8), nullable=False, default="fit")
+    crop_offset: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    # The baked crop that actually gets published, a sibling of the source
+    # image under images_dir. Null whenever crop_mode is 'fit'.
+    crop_filename: Mapped[str | None] = mapped_column(String(512))
+    crop_filepath: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
@@ -322,14 +362,23 @@ AUDIO_WORKFLOWS = frozenset({"minimax_i2v", "ltx_i2v"})
 
 # Key-frame animation workflows, as opposed to improv mixes or merges. Used to
 # label a video for YouTube and for the article LLM.
-ANIMATE_WORKFLOWS = frozenset({"i2v_multi", "minimax_i2v", "ltx_i2v", "flf2v"})
+ANIMATE_WORKFLOWS = frozenset({"i2v_multi", "minimax_i2v", "ltx_i2v", "flf2v", "minimax_api"})
+
+# Videos rendered by a paid cloud provider rather than the local GPU.
+API_WORKFLOW = "minimax_api"
+
+# Ledger states. 'released' never counts against the limit; nothing is ever
+# deleted, because the ledger *is* the audit trail.
+LEDGER_STATES = ("reserved", "settled", "released")
+COMMITTED_STATES = ("reserved", "settled")
+LEDGER_KINDS = ("generate_768p", "generate_2k", "regenerate_2k")
 
 
 class Video(Base):
     __tablename__ = "videos"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('generating', 'review', 'assembling', 'done', 'failed')",
+            "status IN ('queued', 'generating', 'review', 'assembling', 'done', 'failed')",
             name="ck_videos_status",
         ),
     )
@@ -377,7 +426,22 @@ class Video(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="generating", index=True)
     error: Mapped[str | None] = mapped_column(Text)
     comfy_prompt_id: Mapped[str | None] = mapped_column(String(128))
-    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "minimax_i2v" | "flf2v" | "merge" (legacy rows may hold "ltx_i2v")
+    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "minimax_i2v" | "flf2v" | "merge" | "minimax_api" (legacy rows may hold "ltx_i2v")
+    # ── Cloud generation (workflow == API_WORKFLOW) ──────────────────────────
+    # These rows are rendered by MiniMax, not by the local GPU, so they behave
+    # differently in one important way: the job keeps running when this process
+    # dies. core/startup_sweep.py therefore leaves them alone and
+    # services/video_api/queue.py reconciles them against the provider instead,
+    # the same division of labour the Instagram outpost already uses.
+    api_task_id: Mapped[str | None] = mapped_column(String(128), index=True)  # provider task id, null until submitted
+    api_resolution: Mapped[str | None] = mapped_column(String(8))             # "768P" | "2K"
+    api_ratio: Mapped[str | None] = mapped_column(String(16))                 # "adaptive" | "16:9" | …
+    duration_s: Mapped[int | None] = mapped_column(SmallInteger)              # requested seconds (4–15)
+    # A 2K regeneration points at the 768P take it was pulled up from, so the
+    # pair is shown as one item rather than as two unrelated videos.
+    source_video_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     # YouTube upload (set when pushed via services/youtube/client.py)
     youtube_video_id: Mapped[str | None] = mapped_column(String(32))    # e.g. "dQw4w9WgXcQ"
     youtube_url: Mapped[str | None] = mapped_column(Text)               # canonical watch URL
@@ -515,3 +579,113 @@ class Song(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cloud-render budget (services/video_api/)
+# ─────────────────────────────────────────────────────────────────────────────
+# MiniMax bills per second of generated video, so the price of a call is known
+# before it is made. That is what lets the limit be a hard gate instead of an
+# after-the-fact warning — but only if money is *reserved* before the job is
+# submitted and settled afterwards. Adding cost up after the fact breaks the
+# moment two jobs run at once: both pass the check, both run, the limit is
+# gone. See services/video_api/budget.py.
+
+
+class BudgetPeriod(Base):
+    """One month's spending limit, and the conversion it was set with."""
+
+    __tablename__ = "budget_periods"
+    __table_args__ = (
+        CheckConstraint("limit_eur >= 0", name="ck_budget_periods_limit_positive"),
+        CheckConstraint(
+            "warn_threshold_pct BETWEEN 1 AND 100", name="ck_budget_periods_warn_pct"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    month: Mapped[str] = mapped_column(String(7), nullable=False, unique=True)  # "2026-08"
+    limit_eur: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
+    warn_threshold_pct: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=80, server_default="80"
+    )
+    # The USD→EUR rate this period books at. Stored per period rather than in
+    # the config so the ledger stays reproducible: entries keep the amount they
+    # were priced at, and changing the rate later cannot rewrite history.
+    usd_eur_rate: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    rate_updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+
+    entries: Mapped[list["LedgerEntry"]] = relationship(
+        back_populates="period", cascade="all, delete-orphan"
+    )
+
+
+class LedgerEntry(Base):
+    """One reservation, and what became of it.
+
+    Rows are never deleted and amounts are never rewritten — a finished job
+    moves 'reserved' → 'settled' (possibly at a different amount, once the
+    provider reports what it actually billed), a failed one moves
+    'reserved' → 'released'.
+    """
+
+    __tablename__ = "ledger_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('reserved', 'settled', 'released')", name="ck_ledger_entries_state"
+        ),
+        CheckConstraint(
+            "kind IN ('generate_768p', 'generate_2k', 'regenerate_2k')",
+            name="ck_ledger_entries_kind",
+        ),
+        # The hot query is "everything committed in this period".
+        Index("ix_ledger_entries_period_state", "period_id", "state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    period_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("budget_periods.id", ondelete="CASCADE"), nullable=False
+    )
+    video_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("videos.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # Null until the provider accepted the submit. A reserved row that still has
+    # no task id after a few minutes is one whose submit never landed, and the
+    # startup reconciliation releases it — without that check, a crash between
+    # reserving and submitting would eat budget permanently.
+    task_id: Mapped[str | None] = mapped_column(String(128))
+    # Guards against a retried submit booking twice.
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    duration_s: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    ref_image_count: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, default=0, server_default="0"
+    )
+    input_video_seconds: Mapped[Decimal] = mapped_column(
+        Numeric(6, 2), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    amount_eur: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)  # incl. safety factor while reserved
+    # The rate this entry was priced at. Kept per entry, not read back off the
+    # period: settling a job weeks later must convert at the rate it was booked
+    # with, or a rate edit would silently re-price work already done.
+    usd_eur_rate: Mapped[Decimal] = mapped_column(Numeric(8, 4), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="reserved", server_default="reserved", index=True
+    )
+    note: Mapped[str | None] = mapped_column(Text)   # why it was released, for the ledger view
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False, index=True
+    )
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    period: Mapped["BudgetPeriod"] = relationship(back_populates="entries")

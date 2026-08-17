@@ -23,6 +23,12 @@ outpost_status / outpost_reel_status are deliberately NOT swept here —
 `services.instagram.outpost.sync_outpost_status()` already reconciles
 those against the Pi's own /status/{id} on a recurring poll, so sweeping
 them here would just fight that reconciliation.
+
+Cloud renders (Video.workflow == API_WORKFLOW) are excluded for the same
+reason, and it matters more there: a MiniMax task keeps running — and keeps
+being billed — while this process is down. Marking it failed here would strand
+its budget reservation and throw away a clip that was paid for.
+`services.video_api.queue.CloudVideoQueue.reconcile()` owns those rows.
 """
 import json
 import logging
@@ -32,6 +38,7 @@ from sqlalchemy import select
 from core.config import settings
 from core.db import AsyncSessionLocal
 from core.models import (
+    API_WORKFLOW,
     AUDIO_WORKFLOWS,
     ImprovSession,
     PostCompanion,
@@ -50,7 +57,10 @@ async def sweep_stuck_jobs() -> None:
         n = 0
 
         result = await db.execute(
-            select(Video).where(Video.status.in_(("generating", "assembling")))
+            select(Video).where(
+                Video.status.in_(("generating", "assembling")),
+                Video.workflow.is_distinct_from(API_WORKFLOW),
+            )
         )
         for video in result.scalars():
             video.status = "failed"

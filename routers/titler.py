@@ -32,6 +32,22 @@ _VIDEO_FRAMES = 3
 _VIDEO_FRAME_MAX_EDGE = 512
 
 
+async def _titles_with_retry(generate, subject: str) -> list[str]:
+    """Call the VLM, and once more if it answered with an empty list.
+
+    Observed on qwen2.5vl:3b at temperature 0.8: a valid `{"titles": []}` comes
+    back occasionally, on an image that titles perfectly well a second later.
+    It is a sampling roll, not a property of the picture, and a warm call costs
+    ~1.5 s — so retrying here beats handing the user an error to click through.
+    """
+    for attempt in (1, 2):
+        titles = await generate()
+        if titles:
+            return titles
+        logger.warning("Titler returned no titles for %s (attempt %d)", subject, attempt)
+    return []
+
+
 class TitlerRequest(BaseModel):
     image_id: str
 
@@ -68,7 +84,9 @@ async def run_titler(
     )
 
     try:
-        titles = await generate_titles(jpg_bytes, n=_TITLER_N)
+        titles = await _titles_with_retry(
+            lambda: generate_titles(jpg_bytes, n=_TITLER_N), f"image {img.id}",
+        )
     except Exception as exc:
         logger.exception("Titler failed for image %s", img.id)
         raise HTTPException(status_code=502, detail=f"Titler failed: {exc}")
@@ -113,7 +131,9 @@ async def run_video_titler(
     )
 
     try:
-        titles = await generate_video_titles(frames, n=_TITLER_N)
+        titles = await _titles_with_retry(
+            lambda: generate_video_titles(frames, n=_TITLER_N), f"video {video.id}",
+        )
     except Exception as exc:
         logger.exception("Video titler failed for video %s", video.id)
         raise HTTPException(status_code=502, detail=f"Titler failed: {exc}")

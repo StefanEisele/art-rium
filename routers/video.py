@@ -24,8 +24,11 @@ A job is "done" when all of its clips are rendered — there is no per-job
 final file anymore. Final videos are created by merging clips (from any
 number of jobs, in any order, mixed workflows allowed) via POST
 /api/video/merge, which normalizes resolution/fps/audio and re-encodes into
-a new Video row with workflow="merge". Sources can optionally be deleted
-after a successful merge.
+a new Video row with workflow="merge". A merge source may also be a finished
+VIDEO rather than a library clip — that is how two finished pieces (each with
+its own soundtrack, upscale or grain) are joined into a longer one, and how a
+merge gets extended without re-picking all of its clips. Sources can
+optionally be deleted after a successful merge.
 
 The SEEDVR2 upscale exists at both levels, and which one to use is a real
 choice: per CLIP (before merging) keeps the restorer and RIFE inside one
@@ -42,7 +45,7 @@ GET  /api/video/clips               → all library clips (frontend groups by jo
 DELETE /api/video/clips/{clip_id}   → delete one clip (empty source jobs are pruned)
 POST /api/video/clips/{id}/upscale  → SEEDVR2 pass on ONE clip, before merging
 DELETE /api/video/clips/{id}/upscale→ drop it again
-POST /api/video/merge               → concat chosen clips (cross-job) into a new video
+POST /api/video/merge               → concat chosen clips + finished videos into a new video
 GET  /api/video/thumb/{id}          → first-frame JPEG thumbnail
 GET  /api/video/file/{fname}        → serve MP4
 GET  /api/videos                    → list all videos
@@ -54,8 +57,10 @@ import random
 import re
 import shutil
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -86,6 +91,7 @@ from services.comfy.client import (
     upload_image,
 )
 from services.comfy.ingest import ingest_comfy_image
+from services.comfy.progress import attach_live_stage as _attach_live_stage
 from services.comfy.zimage import ZIMAGE_SAVE_NODE, build_zimage_workflow
 from workers.comfy_listener import get_listener
 from services.ollama.analysis import (
@@ -222,9 +228,23 @@ class GenerateVideoRequest(BaseModel):
     end_on_keyframe: bool = False  # flf2v: append the raw end key frame after the diffused clip (pixel-exact landing, but reads as a cut when diffusion undershoots)
 
 
+class MergeItem(BaseModel):
+    """One entry of a merge selection: a library clip or a finished video."""
+    kind: Literal["clip", "video"] = "clip"
+    id: uuid.UUID
+
+
 class MergeRequest(BaseModel):
-    clip_ids: list[uuid.UUID]      # library clips to concatenate, in playback order (cross-job)
-    delete_sources: bool = False   # delete the source clips (and empty source jobs) after a successful merge
+    # The ordered selection to concatenate, in playback order. `items` is the
+    # current shape and may mix library clips with finished videos; `clip_ids`
+    # is the clip-only shape a service-worker-cached older frontend still
+    # sends, and is read only when `items` is absent.
+    items: list[MergeItem] = []
+    clip_ids: list[uuid.UUID] = []
+    delete_sources: bool = False   # delete the sources (and empty source jobs) after a successful merge
+
+    def sources(self) -> list[MergeItem]:
+        return self.items or [MergeItem(kind="clip", id=cid) for cid in self.clip_ids]
 
 
 # ── FLF2V workflow builder (key-frame transitions) ────────────────────────────
@@ -722,37 +742,6 @@ def _set_progress(
     if band:
         entry["_band"] = band
     _progress[vid_key] = entry
-
-
-def _attach_live_stage(prog: dict) -> dict:
-    """Fold ComfyUI's current node + sampler step into a progress payload.
-
-    The listener sees every ComfyUI event already (workers/comfy_listener.py);
-    this reads the latest one for the prompt the job is waiting on, so a
-    multi-minute render reports "Sampling… · step 7/20" and moves its bar
-    inside the band, instead of sitting frozen at one percentage until the
-    segment finishes. Returns a copy with the private keys removed.
-    """
-    prompt_id = prog.pop("_prompt_id", None)
-    lo, hi = prog.pop("_band", (None, None))
-    listener = get_listener()
-    step = listener.get_step_progress(prompt_id) if listener else None
-    if not step:
-        return prog
-
-    label = step.get("label")
-    value, maximum = step.get("value"), step.get("max")
-    if maximum:
-        ratio = max(0.0, min(1.0, float(value or 0) / float(maximum)))
-        if lo is not None:
-            prog["pct"] = int(lo + ratio * (hi - lo))
-        prog["step"] = {"value": int(value or 0), "max": int(maximum)}
-        prog["detail"] = f"{label or 'Sampling…'} step {int(value or 0)}/{int(maximum)}"
-    elif label:
-        # Between samplers — loading a model, decoding, encoding the mp4. No
-        # counter to report, but the stage name is the informative part anyway.
-        prog["detail"] = label
-    return prog
 
 
 async def _finalize_video_failure(video_id: uuid.UUID, exc: Exception, vid_key: str) -> None:
@@ -1277,63 +1266,189 @@ async def _delete_clips(clip_ids: list[uuid.UUID]) -> None:
             await _prune_empty_clip_job(db, jid)
 
 
-def _merge_canvas(clips: list[VideoClip]) -> tuple[int, int]:
+def _video_owned_paths(video: Video) -> list[Path]:
+    """Every file a Video row owns: the original, its derived renditions, the
+    grain preview and the thumbnail. Its segments directory is separate — see
+    `_segments_dir` — because removing a directory is not an unlink."""
+    paths: list[Path] = []
+    if video.filepath:
+        paths.append(settings.storage_dir / video.filepath)
+    for name in (video.muxed_filename, video.upscale_filename, video.grain_filename):
+        if name:
+            paths.append(settings.videos_dir / name)
+    paths.append(settings.videos_dir / _grain_preview_name(video.id))
+    paths.append(settings.videos_dir / f"{video.id}_thumb.jpg")
+    return paths
+
+
+async def _delete_source_videos(video_ids: list[uuid.UUID]) -> None:
+    """Delete finished videos that a merge consumed.
+
+    Row first, files after: a video can be referenced elsewhere (a scheduled
+    Instagram reel, an improv session), and a FK that refuses the delete has to
+    leave the video intact and playable rather than a row pointing at files
+    that are already gone.
+    """
+    async with AsyncSessionLocal() as db:
+        for vid in video_ids:
+            video = await db.get(Video, vid)
+            if not video:
+                continue
+            paths, seg_dir = _video_owned_paths(video), _segments_dir(vid)
+            try:
+                await db.delete(video)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                logger.warning("Could not delete merged source video %s (still referenced?)", vid)
+                continue
+            _progress.pop(str(vid), None)
+            for p in paths:
+                p.unlink(missing_ok=True)
+            shutil.rmtree(seg_dir, ignore_errors=True)
+
+
+def _video_primary_name(v: Video) -> str | None:
+    """The rendition of a finished video that everything should read.
+
+    Post-processing writes siblings rather than overwriting the original, each
+    pass consuming the one before it — soundtrack, then upscale, then grain —
+    so the last one present is the most complete file. Mirrored by
+    services/instagram/media.py::resolve_video_path; keep the two in step.
+    """
+    return v.grain_filename or v.upscale_filename or v.muxed_filename or v.filename
+
+
+def _video_primary_path(v: Video) -> Path | None:
+    name = _video_primary_name(v)
+    if not name:
+        return None
+    if name == v.filename and v.filepath:
+        return settings.storage_dir / v.filepath
+    return settings.videos_dir / name
+
+
+def _merge_canvas(sizes: list[tuple[int | None, int | None]]) -> tuple[int, int]:
     """Normalisation target for a merge: the largest effective canvas selected.
 
-    Effective, not stored — an upscaled clip's real size is its upscale's, and
-    the merge is the whole reason that pass exists. Largest rather than the
-    first clip's: with a uniform selection (the ordinary case) the two agree,
-    and where they disagree it is because only some clips were upscaled, where
-    "first wins" would scale the restored ones back down and undo the work.
+    Effective, not stored — an upscaled source's real size is its upscale's,
+    and the merge is the whole reason that pass exists. Largest rather than the
+    first source's: with a uniform selection (the ordinary case) the two agree,
+    and where they disagree it is because only some sources were upscaled,
+    where "first wins" would scale the restored ones back down and undo the
+    work. A source of unknown size falls back to a square default rather than
+    dropping out of the vote.
     """
-    sizes = [_clip_dimensions(c) for c in clips] or [(None, None)]
+    sizes = sizes or [(None, None)]
     return max(((w or 960, h or 960) for w, h in sizes), key=lambda wh: wh[0] * wh[1])
 
 
-async def _run_merge(
-    video_id: uuid.UUID, clip_ids: list[uuid.UUID], delete_sources: bool,
-) -> None:
-    """Concatenate the chosen library clips into the merge Video's final file.
+@dataclass(frozen=True)
+class _MergeSource:
+    """One resolved merge input: the file to read plus what it really is."""
+    inp: MergeInput
+    width: int | None
+    height: int | None
+    fps: int
 
-    Runs as a background task. Clips may come from different jobs/workflows;
-    services.video.merge normalizes resolution/fps/audio in one ffmpeg pass.
-    Reports progress through the same _progress dict as _run_generation so the
-    existing polling endpoint keeps working without any client-side branching.
+
+async def _resolve_merge_sources(
+    sources: list[tuple[str, uuid.UUID]],
+) -> list[_MergeSource]:
+    """Resolve each selected clip/video to its playable file, audio flag and
+    effective canvas — the three facts the concat needs.
+
+    A clip answers all of them from its row: `_clip_primary_path` and
+    `_clip_dimensions` already account for a per-clip upscale, and `has_audio`
+    is persisted at render time. A finished video does not — the row's
+    `width`/`height` record the *generation* canvas and are left untouched by
+    an upscale, and nothing on it says whether the current rendition carries
+    audio (a muxed soundtrack adds one). So the file itself is probed, the
+    same rule `_upscale_plan_from_file` follows.
     """
-    vid_key = str(video_id)
+    clip_ids  = [sid for kind, sid in sources if kind == "clip"]
+    video_ids = [sid for kind, sid in sources if kind == "video"]
+    async with AsyncSessionLocal() as db:
+        clips: dict[uuid.UUID, VideoClip] = {}
+        if clip_ids:
+            r = await db.execute(select(VideoClip).where(VideoClip.id.in_(clip_ids)))
+            clips = {c.id: c for c in r.scalars().all()}
+        videos: dict[uuid.UUID, Video] = {}
+        if video_ids:
+            r = await db.execute(select(Video).where(Video.id.in_(video_ids)))
+            videos = {v.id: v for v in r.scalars().all()}
 
-    try:
-        async with AsyncSessionLocal() as db:
-            result = await db.execute(select(VideoClip).where(VideoClip.id.in_(clip_ids)))
-            by_id = {c.id: c for c in result.scalars().all()}
-        clips = [by_id[cid] for cid in clip_ids if cid in by_id]
-        if len(clips) != len(clip_ids):
-            raise ValueError("One or more selected clips no longer exist")
-
-        inputs: list[MergeInput] = []
-        for c in clips:
+    resolved: list[_MergeSource] = []
+    for kind, sid in sources:
+        if kind == "clip":
+            c = clips.get(sid)
+            if not c:
+                raise ValueError("One or more selected clips no longer exist")
             # The upscaled rendition when the clip has one: upscaling happens
             # per clip precisely so the merge can consume it, and reading
             # `filename` here would throw that work away.
             f = _clip_primary_path(c)
             if not f.exists():
                 raise FileNotFoundError(f"Clip file missing on disk: {f}")
-            inputs.append(MergeInput(path=f, has_audio=c.has_audio))
+            w, h = _clip_dimensions(c)
+            resolved.append(_MergeSource(
+                MergeInput(path=f, has_audio=c.has_audio), w, h, c.fps or 24,
+            ))
+        else:
+            v = videos.get(sid)
+            if not v:
+                raise ValueError("One or more selected videos no longer exist")
+            f = _video_primary_path(v)
+            if not f or not f.exists():
+                raise FileNotFoundError(f"Video file missing on disk: {v.filename or sid}")
+            pw, ph = await probe_video_dimensions(f)
+            resolved.append(_MergeSource(
+                MergeInput(path=f, has_audio=await probe_has_audio(f)),
+                pw or v.width, ph or v.height, v.fps or 24,
+            ))
+    return resolved
 
-        width, height = _merge_canvas(clips)
-        fps = clips[0].fps or 24
+
+async def _run_merge(
+    video_id: uuid.UUID, sources: list[tuple[str, uuid.UUID]], delete_sources: bool,
+) -> None:
+    """Concatenate the chosen sources into the merge Video's final file.
+
+    Runs as a background task. Sources may be library clips from different
+    jobs/workflows, finished videos, or a mix of both; services.video.merge
+    normalizes resolution/fps/audio in one ffmpeg pass. Reports progress
+    through the same _progress dict as _run_generation so the existing polling
+    endpoint keeps working without any client-side branching.
+    """
+    vid_key = str(video_id)
+
+    try:
+        resolved = await _resolve_merge_sources(sources)
+        inputs = [s.inp for s in resolved]
+        width, height = _merge_canvas([(s.width, s.height) for s in resolved])
+        fps = resolved[0].fps
         dest = settings.videos_dir / f"{video_id}_artrium.mp4"
 
-        _set_progress(vid_key, "finalizing", f"Merging {len(clips)} clip(s)…", 40)
-        if len(clips) == 1:
+        _set_progress(vid_key, "finalizing", f"Merging {len(inputs)} source(s)…", 40)
+        if len(inputs) == 1:
             await asyncio.to_thread(shutil.copy2, inputs[0].path, dest)
         else:
             await merge_clips(
                 inputs, dest, width, height, fps, ffmpeg_path=settings.ffmpeg_path,
             )
 
+        # The row was created from the first source's numbers, which are only a
+        # guess at what comes out: `_merge_canvas` may have picked a bigger one,
+        # and a probed video source can differ from what its row claims. Persist
+        # what was actually rendered before the card goes to "done".
+        async with AsyncSessionLocal() as db:
+            row = await db.get(Video, video_id)
+            if row:
+                row.width, row.height, row.fps = width, height, fps
+                await db.commit()
+
         await _finalize_video_done(video_id, dest, vid_key)
-        logger.info("Video %s merged from %d clip(s)", video_id, len(clips))
+        logger.info("Video %s merged from %d source(s)", video_id, len(inputs))
 
     except Exception as exc:
         logger.exception("Video merge %s failed", video_id)
@@ -1343,11 +1458,19 @@ async def _run_merge(
     if delete_sources:
         # The merge itself succeeded — a cleanup hiccup must not flip the
         # finished video back to failed, so this runs outside the main try.
+        clip_ids  = [sid for kind, sid in sources if kind == "clip"]
+        video_ids = [sid for kind, sid in sources if kind == "video"]
         try:
-            await _delete_clips(clip_ids)
-            logger.info("Merge %s: deleted %d source clip(s)", video_id, len(clip_ids))
+            if clip_ids:
+                await _delete_clips(clip_ids)
+            if video_ids:
+                await _delete_source_videos(video_ids)
+            logger.info(
+                "Merge %s: deleted %d source clip(s) and %d source video(s)",
+                video_id, len(clip_ids), len(video_ids),
+            )
         except Exception:
-            logger.exception("Merge %s: source-clip cleanup failed (video is fine)", video_id)
+            logger.exception("Merge %s: source cleanup failed (video is fine)", video_id)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -1971,34 +2094,81 @@ async def delete_clip(clip_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     await _prune_empty_clip_job(db, job_id)
 
 
+MERGE_MAX_SOURCES = 50
+
+
 @router.post("/merge", status_code=202)
 async def merge_videos(body: MergeRequest, db: AsyncSession = Depends(get_db)):
-    """Concatenate the chosen library clips — from any jobs, any workflows, in
-    the given order — into a new final video (workflow='merge'). Resolution,
-    fps and audio are normalized to make mixed selections always mergeable.
-    With delete_sources=true the source clips are removed after success."""
-    if not body.clip_ids:
-        raise HTTPException(status_code=400, detail="No clips selected")
-    if len(body.clip_ids) > 50:
-        raise HTTPException(status_code=400, detail="Maximum 50 clips per merge")
-    if len(set(body.clip_ids)) != len(body.clip_ids):
-        raise HTTPException(status_code=400, detail="Duplicate clip IDs in selection")
+    """Concatenate the chosen sources — library clips from any job or workflow,
+    finished videos, or a mix — in the given order into a new final video
+    (workflow='merge'). Resolution, fps and audio are normalized to make mixed
+    selections always mergeable. With delete_sources=true the sources are
+    removed after success.
 
-    result = await db.execute(select(VideoClip).where(VideoClip.id.in_(body.clip_ids)))
-    by_id = {c.id: c for c in result.scalars().all()}
-    missing = [str(cid) for cid in body.clip_ids if cid not in by_id]
-    if missing:
-        raise HTTPException(status_code=404, detail=f"Clip(s) not found: {', '.join(missing)}")
-    first = by_id[body.clip_ids[0]]
+    A finished video enters the merge as the rendition the tool plays: its
+    soundtrack, upscale and grain are all baked in already, so joining two
+    finished pieces keeps what was done to each of them."""
+    sources = body.sources()
+    if not sources:
+        raise HTTPException(status_code=400, detail="Nothing selected to merge")
+    if len(sources) > MERGE_MAX_SOURCES:
+        raise HTTPException(
+            status_code=400, detail=f"Maximum {MERGE_MAX_SOURCES} sources per merge",
+        )
+    keys = [(s.kind, s.id) for s in sources]
+    if len(set(keys)) != len(keys):
+        raise HTTPException(status_code=400, detail="Duplicate source in selection")
+
+    clip_ids  = [s.id for s in sources if s.kind == "clip"]
+    video_ids = [s.id for s in sources if s.kind == "video"]
+
+    clips: dict[uuid.UUID, VideoClip] = {}
+    if clip_ids:
+        r = await db.execute(select(VideoClip).where(VideoClip.id.in_(clip_ids)))
+        clips = {c.id: c for c in r.scalars().all()}
+        missing = [str(cid) for cid in clip_ids if cid not in clips]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Clip(s) not found: {', '.join(missing)}")
+
+    videos: dict[uuid.UUID, Video] = {}
+    if video_ids:
+        r = await db.execute(select(Video).where(Video.id.in_(video_ids)))
+        videos = {v.id: v for v in r.scalars().all()}
+        missing = [str(vid) for vid in video_ids if vid not in videos]
+        if missing:
+            raise HTTPException(status_code=404, detail=f"Video(s) not found: {', '.join(missing)}")
+        for v in videos.values():
+            if v.status != "done" or not v.filename:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Video {v.id} is not a finished video (status: {v.status})",
+                )
+            # A post-pass rewrites the very file this merge would read, and it
+            # is a sibling under a fixed name, so a half-written rendition
+            # would go straight into the concat.
+            if _is_upscaling(v) or _is_graining(v):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Video {v.id} is still rendering a post-pass — wait for it to finish",
+                )
+
+    # Placeholder numbers for the card while the merge runs; _run_merge
+    # overwrites them with what actually came out.
+    first = sources[0]
+    src_w, src_h, src_fps = (
+        (clips[first.id].width, clips[first.id].height, clips[first.id].fps)
+        if first.kind == "clip"
+        else (videos[first.id].width, videos[first.id].height, videos[first.id].fps)
+    )
 
     video = Video(
         id=uuid.uuid4(),
         workflow="merge",
         status="assembling",
-        width=first.width,
-        height=first.height,
-        fps=first.fps,
-        n_images=len(body.clip_ids),   # for merges: number of source clips
+        width=src_w,
+        height=src_h,
+        fps=src_fps,
+        n_images=len(sources),   # for merges: number of sources concatenated
         created_at=datetime.now(timezone.utc),
     )
     db.add(video)
@@ -2006,12 +2176,12 @@ async def merge_videos(body: MergeRequest, db: AsyncSession = Depends(get_db)):
     await db.refresh(video)
 
     safe_create_task(
-        _run_merge(video.id, body.clip_ids, body.delete_sources),
+        _run_merge(video.id, keys, body.delete_sources),
         name=f"video_merge:{video.id}",
     )
     logger.info(
-        "Queued merge %s from %d clip(s), delete_sources=%s",
-        video.id, len(body.clip_ids), body.delete_sources,
+        "Queued merge %s from %d clip(s) + %d video(s), delete_sources=%s",
+        video.id, len(clip_ids), len(video_ids), body.delete_sources,
     )
     return {"video_id": str(video.id), "status": "assembling"}
 
@@ -2078,23 +2248,9 @@ async def delete_video(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     video = await db.get(Video, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    if video.filepath:
-        p = settings.storage_dir / video.filepath
-        if p.exists():
-            p.unlink(missing_ok=True)
-    if video.muxed_filename:
-        mp = settings.videos_dir / video.muxed_filename
-        mp.unlink(missing_ok=True)
-    if video.upscale_filename:
-        (settings.videos_dir / video.upscale_filename).unlink(missing_ok=True)
-    if video.grain_filename:
-        (settings.videos_dir / video.grain_filename).unlink(missing_ok=True)
-    (settings.videos_dir / _grain_preview_name(video_id)).unlink(missing_ok=True)
-    thumb = settings.videos_dir / f"{video_id}_thumb.jpg"
-    thumb.unlink(missing_ok=True)
-    seg_dir = _segments_dir(video_id)
-    if seg_dir.exists():
-        shutil.rmtree(seg_dir, ignore_errors=True)
+    for p in _video_owned_paths(video):
+        p.unlink(missing_ok=True)
+    shutil.rmtree(_segments_dir(video_id), ignore_errors=True)
     await db.delete(video)
     await db.commit()
 
@@ -3038,13 +3194,10 @@ def _render_version(v: Video, primary_name: str | None) -> str | None:
 
 
 def _serialize(v: Video) -> dict:
-    # Derived variants take precedence in the order they are produced —
-    # soundtrack, then upscale, then grain — each pass reading the one before
-    # it, so the last one present is always the most complete rendition. The
-    # clean original stays available via `original_url`.
-    # services/instagram/media.py::resolve_video_path mirrors this precedence
-    # — keep the two in step.
-    primary_name = v.grain_filename or v.upscale_filename or v.muxed_filename or v.filename
+    # Derived variants take precedence in the order they are produced (see
+    # _video_primary_name); the clean original stays available via
+    # `original_url`.
+    primary_name = _video_primary_name(v)
     version = _render_version(v, primary_name)
     primary_url = f"/api/video/file/{primary_name}" if primary_name else None
     if primary_url and version:

@@ -31,6 +31,8 @@ from core.models import InstagramPost, Video
 from core.scheduling import companion_at
 from services.instagram.collaborators import container_field as collaborators_field
 from services.instagram.companions import find_companion, get_or_create_companion
+from services.instagram.crops import ensure_post_crops
+from services.instagram.graph import ai_label_field
 from services.instagram.ig_video import ensure_ig_compatible
 from services.instagram.media import load_media_refs, resolve_video_path
 from services.instagram.reel_concat import concat_reel_videos
@@ -119,6 +121,11 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
         post = await db.get(InstagramPost, post_id)
         if not post or post.outpost_id:
             return
+        # Same reason as the local path: refresh the baked crops first so an
+        # image enhanced after scheduling is re-cropped from its current
+        # rendition, not published from the crop it had at save time.
+        await ensure_post_crops(post, db)
+        await db.commit()
         media_refs = await load_media_refs(post, db)
         if not media_refs:
             await _record_failure(post_id, "Feed post has no media items")
@@ -126,6 +133,7 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
 
         caption = post.caption or ""
         collaborators = post.collaborators or None
+        ai_label = post.ai_label
         scheduled_at = post.scheduled_at
         reel_companion = find_companion(post, "reel")
         story_companion = find_companion(post, "story")
@@ -213,10 +221,15 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
 
     # `collaborators` rides along as the same JSON array the Graph API takes;
     # a Pi that predates collaborator support just ignores the extra field.
+    # `is_ai_generated` rides along the same way `collaborators` does: a Pi
+    # that predates AI-label support simply ignores the extra field, and the
+    # images it uploads are already cropped because the crop is baked into the
+    # file it re-encodes.
     data = {
         "caption": caption,
         "scheduled_at": _iso(scheduled_at),
         **collaborators_field(collaborators),
+        **ai_label_field(ai_label),
     }
     if reel_publish_at is not None:
         data["reel_publish_at"] = _iso(reel_publish_at)
@@ -300,6 +313,7 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
 
         caption = post.caption or ""
         collaborators = post.collaborators or None
+        ai_label = post.ai_label
         scheduled_at = post.scheduled_at
         story_companion = find_companion(post, "story")
         story_publish_at = (
@@ -324,10 +338,15 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
     # ── Multipart upload to /enqueue-reel ──────────────────────────────────
     # Streamed from disk (not read into bytes) so httpx doesn't hold the
     # whole concatenated reel resident in RAM.
+    # `is_ai_generated` rides along the same way `collaborators` does: a Pi
+    # that predates AI-label support simply ignores the extra field, and the
+    # images it uploads are already cropped because the crop is baked into the
+    # file it re-encodes.
     data = {
         "caption": caption,
         "scheduled_at": _iso(scheduled_at),
         **collaborators_field(collaborators),
+        **ai_label_field(ai_label),
     }
     if story_publish_at is not None:
         data["story_publish_at"] = _iso(story_publish_at)

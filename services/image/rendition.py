@@ -1,9 +1,35 @@
 """Which rendition of an image the rest of the system should use.
 
-The auto-enhance pass (services/image/enhance.py) writes a *sibling* file
-rather than overwriting the original, exactly as the video post-passes do. So
-every consumer has to decide which file it means, and the decision must be
-made in one place or the answers drift apart.
+The auto-enhance pass (services/image/enhance.py) and the film-grain pass
+(services/image/grain.py) each write a *sibling* file rather than overwriting
+the original, exactly as the video post-passes do. So every consumer has to
+decide which file it means, and the decision must be made in one place or the
+answers drift apart.
+
+There are four files at most, in a fixed order:
+
+    original  →  _upscaled  →  _enhanced  →  _grain
+
+Each pass reads the one before it. The order follows from what each pass is
+for, and from what it costs:
+
+- **The upscale reads the original, always.** It is a diffusion pass: handing
+  it a tone-corrected or grained picture makes the model repaint the correction
+  and reinterpret the noise as texture. It wants the rawest pixels there are.
+- **The two Pillow passes sit on top of it**, because they are cheap enough to
+  be re-rendered whenever anything below them moves — milliseconds against the
+  upscale's GPU minutes. That asymmetry is the whole reason for this order: the
+  expensive pass must never be invalidated by a cheap one. Playing with the
+  wand or the grain slider on an upscaled image therefore re-renders *those*
+  files at the upscale's resolution and leaves the upscale alone. Only removing
+  the upscale itself takes the picture back to its original size.
+- **Grain lands last**, at delivery resolution, and never reads its own output —
+  so changing the strength replaces the grain instead of stacking a second
+  field onto the first.
+
+The last file that exists is the one viewers get; removing one puts whatever is
+under it straight back, because none of them are ever rendered from each
+other's output except in that one direction.
 
 The rule, chosen deliberately:
 
@@ -37,18 +63,36 @@ def is_enhanced(image: Image) -> bool:
     return bool(image.enhanced_filepath and image.enhanced_filename)
 
 
+def is_upscaled(image: Image) -> bool:
+    """True when a diffusion-upscaled rendition exists for this image."""
+    return bool(image.upscaled_filepath and image.upscaled_filename)
+
+
+def is_grained(image: Image) -> bool:
+    """True when a grained rendition exists for this image."""
+    return bool(image.grained_filepath and image.grained_filename)
+
+
 def primary_filename(image: Image) -> str:
     """The bare filename of the rendition viewers should get.
 
     Used for `/share/image/<name>` and `/api/image/<name>` URLs, both of which
     look files up by name across the date-sharded tree.
     """
-    return image.enhanced_filename if is_enhanced(image) else image.filename
+    if is_grained(image):
+        return image.grained_filename
+    if is_enhanced(image):
+        return image.enhanced_filename
+    return image.upscaled_filename if is_upscaled(image) else image.filename
 
 
 def primary_filepath(image: Image) -> str:
     """Storage-relative path of the viewer-facing rendition."""
-    return image.enhanced_filepath if is_enhanced(image) else image.filepath
+    if is_grained(image):
+        return image.grained_filepath
+    if is_enhanced(image):
+        return image.enhanced_filepath
+    return image.upscaled_filepath if is_upscaled(image) else image.filepath
 
 
 def resolve_image_path(image: Image) -> Path:
@@ -63,8 +107,8 @@ def resolve_image_path(image: Image) -> Path:
 def original_path(image: Image) -> Path:
     """Absolute path of the untouched original.
 
-    The enhance pass itself reads this (never its own output, so strength
-    changes replace rather than stack), and so do the generation paths.
+    The upscale pass reads this unconditionally, and so do the generation
+    paths.
     """
     return settings.storage_dir / image.filepath
 
@@ -74,6 +118,18 @@ def enhanced_path(image: Image) -> Path | None:
     if not is_enhanced(image):
         return None
     return settings.storage_dir / image.enhanced_filepath
+
+
+def enhance_source_path(image: Image) -> Path:
+    """Absolute path of the file the enhance pass must read.
+
+    The upscaled rendition when there is one, the original otherwise — and
+    never a previous enhancement, so re-running at a new strength replaces the
+    correction instead of stacking it. Reading the upscale is what keeps the
+    wand from quietly dropping the image back to its generated size: the
+    correction is simply re-rendered at the larger resolution.
+    """
+    return upscaled_path(image) or original_path(image)
 
 
 def enhanced_rel_path(image: Image) -> tuple[str, str]:
@@ -87,4 +143,56 @@ def enhanced_rel_path(image: Image) -> tuple[str, str]:
     """
     original = Path(image.filepath)
     name = f"{original.stem}_enhanced.png"
+    return str(original.with_name(name)).replace("\\", "/"), name
+
+
+def upscaled_path(image: Image) -> Path | None:
+    """Absolute path of the upscaled rendition, or None if there isn't one."""
+    if not is_upscaled(image):
+        return None
+    return settings.storage_dir / image.upscaled_filepath
+
+
+def upscale_source_path(image: Image) -> Path:
+    """Absolute path of the file the upscale pass must read: the original.
+
+    Always the original, never a derived rendition. Two reasons, and both
+    matter: a diffusion model handed a grained picture reinterprets the noise
+    as texture and paints it in permanently, and one handed a tone-corrected
+    one repaints the correction as if it were the subject. And because this
+    pass reads the bottom of the stack, nothing above it can invalidate it —
+    which is what lets the wand and the grain be played with freely on an
+    image that has already been upscaled.
+    """
+    return original_path(image)
+
+
+def grained_path(image: Image) -> Path | None:
+    """Absolute path of the grained rendition, or None if there isn't one."""
+    if not is_grained(image):
+        return None
+    return settings.storage_dir / image.grained_filepath
+
+
+def grain_source_path(image: Image) -> Path:
+    """Absolute path of the file the grain pass must read.
+
+    The topmost rendition below it — enhanced, else upscaled, else the
+    original — but never the grain pass's own output, so changing the strength
+    replaces the grain instead of stacking a second field on top of the first.
+    Reading the enhanced/upscaled file is what keeps grain at delivery
+    resolution rather than leaving a small grained file to be stretched later.
+    """
+    return enhanced_path(image) or upscaled_path(image) or original_path(image)
+
+
+def grained_rel_path(image: Image) -> tuple[str, str]:
+    """(storage-relative path, bare filename) the grained rendition should use.
+
+    Named off the *original* rather than off the enhanced file it may have been
+    rendered from, so an image has exactly one grain file whether or not it is
+    also enhanced — otherwise toggling the wand would strand the other one.
+    """
+    original = Path(image.filepath)
+    name = f"{original.stem}_grain.png"
     return str(original.with_name(name)).replace("\\", "/"), name

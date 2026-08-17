@@ -1,7 +1,7 @@
 importScripts('/shared/sw-base.js');
 
 artRiumSetupSw({
-  cache: 'z-image-v4',
+  cache: 'z-image-v5',
   shell: [
     '/tools/z-image/',
     '/tools/z-image/manifest.json',

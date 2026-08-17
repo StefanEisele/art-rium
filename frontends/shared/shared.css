@@ -123,6 +123,50 @@ html, body {
 .btn.ghost:hover { background: var(--accent-soft); }
 .btn.danger   { background: none; border-color: var(--red); color: var(--red); }
 
+/* ── Chip button — the compact inline control ──
+   Two jobs, told apart by *shape* rather than by colour alone:
+
+   .chip-btn        → one option out of a small set (rounded rectangle)
+   .chip-btn.on     → …and this is the one that is picked: filled accent
+   .chip-btn.apply  → an action, not an option (pill, like .btn)
+   .chip-btn.remove → a destructive action (pill, outlined red)
+
+   The picked state is a solid fill on purpose. Tinted text on a tinted border
+   is legible next to its neighbours in a mockup and genuinely ambiguous on a
+   phone in daylight, which is exactly where these get used. */
+.chip-btn {
+  background: var(--surface2);
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 12px; font-weight: 700;
+  padding: 7px 12px;
+  cursor: pointer; font-family: inherit;
+  white-space: nowrap;
+  transition: transform 0.12s, background 0.12s, border-color 0.12s, color 0.12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.chip-btn:hover:not(:disabled)  { color: var(--text); border-color: var(--accent-border); }
+.chip-btn:active:not(:disabled) { transform: scale(0.96); }
+.chip-btn:disabled { opacity: 0.45; cursor: default; transform: none; }
+.chip-btn.on {
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+}
+.chip-btn.on:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.chip-btn.apply {
+  border-radius: var(--radius-pill);
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent);
+}
+.chip-btn.apply:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
+.chip-btn.remove {
+  border-radius: var(--radius-pill);
+  background: none; border-color: var(--red); color: var(--red);
+}
+.chip-btn.remove:hover:not(:disabled) { background: rgba(197,74,59,0.12); border-color: var(--red); color: var(--red); }
+
+/* One choice's worth of chips, kept together and away from the next choice. */
+.chip-group { display: inline-flex; gap: 5px; flex-wrap: wrap; }
+
 /* ── Toast notification ── */
 #toast {
   position: fixed; left: 16px; right: 16px;

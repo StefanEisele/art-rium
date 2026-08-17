@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0a0a0c">
+  <title>Video Cloud — art-rium</title>
+  <link rel="stylesheet" href="/shared/shared.css">
+  <style>
+    .app { max-width: 760px; min-height: 100dvh; padding-bottom: 40px; }
+    main { padding: 14px 16px; }
+
+    /* ── Budget ── */
+    .budget-card { position: sticky; top: 0; z-index: 20; }
+    .budget-head { display: flex; align-items: baseline; gap: 10px; }
+    .budget-head .amount { font-size: 22px; font-weight: 700; letter-spacing: -0.5px; }
+    .budget-head .of { font-size: 13px; color: var(--text-dim); flex: 1; }
+    .budget-head .free { font-size: 13px; font-weight: 700; color: var(--green); }
+    .budget-card.warn .budget-head .free { color: var(--accent); }
+    .budget-card.exhausted .budget-head .free { color: var(--red); }
+
+    /* Three segments in one track: spent, blocked by running jobs, free. The
+       middle one matters — it is money that is committed but not yet charged,
+       and hiding it is what makes a budget bar lie. */
+    .budget-bar {
+      display: flex; height: 10px; border-radius: 5px; overflow: hidden;
+      background: var(--surface2);
+    }
+    .budget-bar .seg { height: 100%; transition: width 0.4s ease; }
+    .budget-bar .settled  { background: var(--accent); }
+    .budget-bar .reserved { background: var(--accent-2); }
+    .budget-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--text-dim); }
+    .budget-legend .key { display: inline-flex; align-items: center; gap: 5px; }
+    .budget-legend .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+    .budget-legend .swatch.settled  { background: var(--accent); }
+    .budget-legend .swatch.reserved { background: var(--accent-2); }
+    .budget-legend .swatch.free     { background: var(--surface3); }
+
+    .budget-actions { display: flex; gap: 8px; }
+    .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .settings-grid .full { grid-column: 1 / -1; }
+    .field-input {
+      width: 100%; background: var(--surface2);
+      border: 1.5px solid var(--border); border-radius: 8px;
+      color: var(--text); font-size: 15px; padding: 9px 11px;
+      outline: none; font-family: inherit;
+    }
+    .field-input:focus { border-color: var(--accent); }
+    .rate-note { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
+
+    /* ── Ledger ── */
+    .ledger-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+    .ledger-row {
+      display: flex; align-items: center; gap: 10px;
+      background: var(--surface2); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+    }
+    .ledger-row .when { color: var(--text-dim); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+    .ledger-row .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .ledger-row .amt { font-weight: 700; font-variant-numeric: tabular-nums; }
+    .ledger-row .state {
+      font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
+      padding: 2px 6px; border-radius: 4px;
+    }
+    .state.reserved { background: var(--accent-2-soft); color: var(--accent-2); }
+    .state.settled  { background: var(--accent-soft);   color: var(--accent); }
+    .state.released { background: var(--surface3);      color: var(--text-dim); }
+
+    /* ── Form ── */
+    .prompt-area {
+      width: 100%; min-height: 96px; resize: vertical;
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 10px; color: var(--text);
+      font-size: 14px; line-height: 1.5; padding: 11px 13px;
+      outline: none; font-family: inherit;
+    }
+    .prompt-area:focus { border-color: var(--accent); }
+    .field-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .field-row .label { margin-bottom: 0; flex-shrink: 0; min-width: 84px; }
+    #duration { flex: 1; min-width: 120px; accent-color: var(--accent); }
+    .duration-value { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 34px; text-align: right; }
+
+    /* Frame + reference slots */
+    .slot-row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .slot {
+      width: 76px; height: 76px; border-radius: 10px;
+      border: 1.5px dashed var(--border-strong); background: var(--surface2);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 3px; cursor: pointer; position: relative; overflow: hidden; flex-shrink: 0;
+      color: var(--text-dim); font-size: 10px; text-align: center; padding: 4px;
+    }
+    .slot:hover { border-color: var(--accent); color: var(--text); }
+    .slot.filled { border-style: solid; border-color: var(--accent); }
+    .slot img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .slot .clear {
+      position: absolute; top: 3px; right: 3px; z-index: 2;
+      width: 20px; height: 20px; border-radius: 50%; border: none;
+      background: rgba(0,0,0,0.7); color: #fff; font-size: 12px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .slot .caption {
+      position: absolute; left: 0; right: 0; bottom: 0; z-index: 1;
+      background: rgba(0,0,0,0.65); color: #fff; font-size: 9px; padding: 2px 4px;
+      text-transform: uppercase; letter-spacing: .4px;
+    }
+
+    /* ── Cost preview ── */
+    .cost-box {
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 10px; padding: 11px 13px;
+      display: flex; flex-direction: column; gap: 5px;
+    }
+    .cost-box .line { display: flex; align-items: baseline; gap: 8px; }
+    .cost-box .spec { font-size: 12px; color: var(--text-dim); flex: 1; }
+    .cost-box .price { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+    .cost-box .usd { font-size: 12px; color: var(--text-dim); }
+    .cost-box .after { font-size: 12px; color: var(--text-dim); }
+    .cost-box.blocked { border-color: var(--red); }
+    .cost-box .blocked-msg { font-size: 13px; color: var(--red); line-height: 1.5; }
+
+    /* ── Jobs ── */
+    .job-card {
+      background: var(--surface); border: 1.5px solid var(--border);
+      border-radius: var(--radius); padding: 12px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .job-card + .job-card { margin-top: 10px; }
+    .job-head { display: flex; align-items: center; gap: 9px; }
+    .job-head .title { flex: 1; min-width: 0; font-size: 14px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .job-meta { font-size: 11px; color: var(--text-dim); display: flex; gap: 8px; flex-wrap: wrap; }
+    .job-prompt { font-size: 12px; color: var(--text); opacity: .85; line-height: 1.45;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .job-card video { width: 100%; border-radius: 10px; background: #000; max-height: 320px; }
+    .job-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .status-queued     { background: var(--surface3); color: var(--text-dim); }
+    .status-generating { background: var(--accent-2-soft); color: var(--accent-2); animation: step-pulse 1.6s ease-in-out infinite; }
+    .status-done       { background: rgba(78,168,112,0.15); color: var(--green); }
+    .status-failed     { background: rgba(197,74,59,0.18); color: var(--red); }
+    .job-error { font-size: 12px; color: var(--red); line-height: 1.45; }
+
+    .empty { color: var(--text-dim); font-size: 14px; text-align: center; padding: 26px 10px; line-height: 1.6; }
+    .not-configured {
+      background: rgba(217,165,68,0.12); border: 1.5px solid rgba(217,165,68,0.35);
+      color: var(--yellow); border-radius: 10px; padding: 11px 13px; font-size: 13px; line-height: 1.55;
+    }
+    .picker-search { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    #picker-search {
+      width: 100%; background: var(--surface2); border: 1.5px solid transparent;
+      border-radius: 10px; color: var(--text); font-size: 15px; padding: 9px 14px;
+      outline: none; font-family: inherit;
+    }
+    #picker-search:focus { border-color: var(--accent); }
+
+    @media (min-width: 860px) {
+      .app { max-width: 1000px; }
+      main { padding: 18px 28px; }
+    }
+  </style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <a class="back-btn" href="/" title="Dashboard">‹</a>
+    <h1>Video Cloud</h1>
+    <span class="status-badge" id="header-badge" style="background:var(--surface2);color:var(--text-dim)">H3</span>
+  </header>
+
+  <main>
+    <div class="not-configured" id="not-configured" style="display:none"></div>
+
+    <!-- ── Budget ── -->
+    <div class="card budget-card" id="budget-card">
+      <div class="budget-head">
+        <span class="amount" id="budget-used">–</span>
+        <span class="of" id="budget-of"></span>
+        <span class="free" id="budget-free"></span>
+      </div>
+      <div class="budget-bar">
+        <div class="seg settled"  id="seg-settled"  style="width:0%"></div>
+        <div class="seg reserved" id="seg-reserved" style="width:0%"></div>
+      </div>
+      <div class="budget-legend">
+        <span class="key"><span class="swatch settled"></span>verbraucht</span>
+        <span class="key"><span class="swatch reserved"></span>reserviert (läuft)</span>
+        <span class="key"><span class="swatch free"></span>frei</span>
+        <span class="key" id="budget-month"></span>
+      </div>
+      <div class="budget-actions">
+        <button class="chip-btn" type="button" onclick="toggleSettings()">Einstellungen</button>
+        <button class="chip-btn" type="button" onclick="toggleLedger()">Buchungen</button>
+      </div>
+
+      <div id="settings-panel" style="display:none">
+        <div class="settings-grid">
+          <div>
+            <label class="label" for="limit-input">Monatslimit (€)</label>
+            <input class="field-input" id="limit-input" inputmode="decimal">
+          </div>
+          <div>
+            <label class="label" for="warn-input">Warnschwelle (%)</label>
+            <input class="field-input" id="warn-input" type="number" min="1" max="100">
+          </div>
+          <div>
+            <label class="label" for="rate-input">USD/EUR-Kurs</label>
+            <input class="field-input" id="rate-input" inputmode="decimal">
+          </div>
+          <div style="display:flex;align-items:flex-end">
+            <button class="btn primary" type="button" onclick="saveSettings()">Speichern</button>
+          </div>
+          <div class="rate-note full" id="rate-note"></div>
+        </div>
+      </div>
+
+      <div id="ledger-panel" style="display:none">
+        <div class="ledger-list" id="ledger-list"></div>
+      </div>
+    </div>
+
+    <!-- ── New video ── -->
+    <div class="card">
+      <h2>Neues Video</h2>
+
+      <div>
+        <label class="label" for="prompt">Prompt</label>
+        <textarea class="prompt-area" id="prompt" maxlength="7000"
+                  placeholder="Was soll passieren? Eine Einstellung, nicht mehrere Schnitte."></textarea>
+      </div>
+
+      <div class="field-row">
+        <span class="label">Dauer</span>
+        <input type="range" id="duration" min="4" max="15" step="1" value="6">
+        <span class="duration-value" id="duration-value">6 s</span>
+      </div>
+
+      <div class="field-row">
+        <span class="label">Auflösung</span>
+        <span class="chip-group" id="resolution-chips"></span>
+      </div>
+
+      <div class="field-row">
+        <span class="label">Format</span>
+        <span class="chip-group" id="ratio-chips"></span>
+      </div>
+
+      <div>
+        <span class="label">Bilder aus der Gallery</span>
+        <div class="slot-row" id="slot-row"></div>
+        <div class="rate-note" style="margin-top:6px">
+          Erste 5 Bilder sind frei, danach 0,04 $ pro Bild. Start- und Endbild zählen mit.
+        </div>
+      </div>
+
+      <div class="cost-box" id="cost-box">
+        <div class="line">
+          <span class="spec" id="cost-spec"></span>
+          <span class="price" id="cost-price">–</span>
+        </div>
+        <div class="line">
+          <span class="usd" id="cost-usd"></span>
+          <span class="after" id="cost-after"></span>
+        </div>
+        <div class="blocked-msg" id="cost-blocked" style="display:none"></div>
+      </div>
+
+      <button class="btn primary" id="generate-btn" onclick="generate()">Generieren</button>
+    </div>
+
+    <!-- ── Jobs ── -->
+    <div class="card">
+      <h2>Aufträge</h2>
+      <div id="jobs"></div>
+    </div>
+  </main>
+</div>
+
+<!-- Gallery picker (shared shell from shared.css) -->
+<div id="picker-modal">
+  <div class="picker-header">
+    <button class="back-btn" onclick="closePicker()">‹</button>
+    <h2 id="picker-title">Bild wählen</h2>
+    <button class="picker-done-btn" onclick="closePicker()">Fertig</button>
+  </div>
+  <div class="picker-search">
+    <input id="picker-search" type="search" placeholder="Prompts durchsuchen…"
+           autocomplete="off" spellcheck="false">
+  </div>
+  <div id="picker-grid"></div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/shared/shared.js"></script>
+<script>
+// ══════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════
+const state = {
+  apiKey: ArtRium.getApiKey(),
+  config: null,          // GET /status
+  budget: null,          // GET /budget
+  estimate: null,        // POST /estimate for the current form
+  resolution: '768P',    // iterate cheap, promote the keepers
+  ratio: 'adaptive',
+  firstFrame: null,      // {id, thumb_url}
+  lastFrame: null,
+  references: [],        // [{id, thumb_url}]
+  jobs: [],
+  pickerMode: null,      // 'first' | 'last' | 'reference'
+  pickerImages: [],
+  pickerSearch: '',
+  pollTimer: null,
+};
+
+const $ = id => document.getElementById(id);
+const api = ArtRium.makeApiFetch(() => state.apiKey);
+const withAuth = url => ArtRium.withAuth(url, state.apiKey);
+
+/** German money formatting — the whole feature is about euros, so it reads in euros. */
+const eur = v => Number(v).toLocaleString('de-DE', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' €';
+const usd = v => '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+// ══════════════════════════════════════════════════════════
+// BUDGET
+// ══════════════════════════════════════════════════════════
+async function loadBudget() {
+  try {
+    state.budget = await (await api('/api/video-api/budget')).json();
+    renderBudget();
+  } catch (e) {
+    ArtRium.toast('Budget konnte nicht geladen werden: ' + e.message, true);
+  }
+}
+
+function renderBudget() {
+  const b = state.budget;
+  if (!b) return;
+  const limit = Number(b.limit_eur) || 0;
+  const pct = v => limit > 0 ? Math.min(100, (Number(v) / limit) * 100) : 0;
+
+  $('budget-used').textContent = eur(b.committed_eur);
+  $('budget-of').textContent = 'von ' + eur(b.limit_eur);
+  $('budget-free').textContent = eur(b.available_eur) + ' frei';
+  $('seg-settled').style.width = pct(b.settled_eur) + '%';
+  $('seg-reserved').style.width = pct(b.reserved_eur) + '%';
+  $('budget-month').textContent = b.month;
+
+  const card = $('budget-card');
+  card.classList.toggle('warn', !!b.warning && !b.exhausted);
+  card.classList.toggle('exhausted', !!b.exhausted);
+
+  $('limit-input').value = Number(b.limit_eur).toFixed(2).replace('.', ',');
+  $('warn-input').value = b.warn_threshold_pct;
+  $('rate-input').value = Number(b.usd_eur_rate).toFixed(4).replace('.', ',');
+  $('rate-note').textContent =
+    `Kurs zuletzt geändert am ${new Date(b.rate_updated_at).toLocaleDateString('de-DE')}. ` +
+    `Reservierungen bekommen ${b.safety_factor}× Puffer; abgerechnet wird der echte Preis. ` +
+    `Preisliste geprüft am ${b.rate_checked_on}.`;
+}
+
+function toggleSettings() {
+  const el = $('settings-panel');
+  el.style.display = el.style.display === 'none' ? '' : 'none';
+}
+
+async function toggleLedger() {
+  const el = $('ledger-panel');
+  const showing = el.style.display === 'none';
+  el.style.display = showing ? '' : 'none';
+  if (showing) await loadLedger();
+}
+
+async function loadLedger() {
+  try {
+    const rows = await (await api('/api/video-api/ledger?limit=100')).json();
+    $('ledger-list').innerHTML = rows.length
+      ? rows.map(r => `
+        <div class="ledger-row">
+          <span class="when">${new Date(r.created_at).toLocaleDateString('de-DE', {day:'2-digit', month:'2-digit'})}</span>
+          <span class="what">${ArtRium.escHtml(kindLabel(r.kind))} · ${r.duration_s}s</span>
+          <span class="amt">${eur(r.amount_eur)}</span>
+          <span class="state ${r.state}">${stateLabel(r.state)}</span>
+        </div>`).join('')
+      : '<div class="empty">Noch nichts gebucht.</div>';
+  } catch (e) {
+    ArtRium.toast('Buchungen konnten nicht geladen werden', true);
+  }
+}
+
+const kindLabel = k => ({
+  generate_768p: '768P',
+  generate_2k: '2K',
+  regenerate_2k: '2K-Hochzug',
+}[k] || k);
+
+const stateLabel = s => ({
+  reserved: 'reserviert', settled: 'gebucht', released: 'frei',
+}[s] || s);
+
+async function saveSettings() {
+  const body = {
+    limit_eur: $('limit-input').value.trim(),
+    warn_threshold_pct: parseInt($('warn-input').value, 10),
+    usd_eur_rate: $('rate-input').value.trim(),
+  };
+  try {
+    state.budget = await (await api('/api/video-api/budget', {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    })).json();
+    renderBudget();
+    refreshEstimate();
+    ArtRium.toast('Gespeichert');
+  } catch (e) {
+    ArtRium.toast(e.message || 'Speichern fehlgeschlagen', true);
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// FORM
+// ══════════════════════════════════════════════════════════
+function renderChips() {
+  $('resolution-chips').innerHTML = (state.config?.resolutions || ['768P', '2K']).map(r =>
+    `<button class="chip-btn ${r === state.resolution ? 'on' : ''}" type="button"
+             onclick="pickResolution('${r}')">${r}</button>`
+  ).join('');
+  $('ratio-chips').innerHTML = (state.config?.ratios || ['adaptive']).map(r =>
+    `<button class="chip-btn ${r === state.ratio ? 'on' : ''}" type="button"
+             onclick="pickRatio('${r}')">${r === 'adaptive' ? 'auto' : r}</button>`
+  ).join('');
+}
+
+function pickResolution(r) { state.resolution = r; renderChips(); refreshEstimate(); }
+function pickRatio(r)      { state.ratio = r; renderChips(); }
+
+function imageCount() {
+  return (state.firstFrame ? 1 : 0) + (state.lastFrame ? 1 : 0) + state.references.length;
+}
+
+function renderSlots() {
+  const slot = (item, caption, onPick, onClear) => item
+    ? `<div class="slot filled" onclick="${onPick}">
+         <img src="${withAuth(item.thumb_url)}" alt="">
+         <button class="clear" type="button" onclick="event.stopPropagation(); ${onClear}">✕</button>
+         <span class="caption">${caption}</span>
+       </div>`
+    : `<div class="slot" onclick="${onPick}"><span>+</span><span>${caption}</span></div>`;
+
+  const refs = state.references.map((r, i) =>
+    `<div class="slot filled" onclick="openPicker('reference')">
+       <img src="${withAuth(r.thumb_url)}" alt="">
+       <button class="clear" type="button" onclick="event.stopPropagation(); removeReference(${i})">✕</button>
+       <span class="caption">Ref ${i + 1}</span>
+     </div>`).join('');
+
+  $('slot-row').innerHTML =
+    slot(state.firstFrame, 'Startbild', "openPicker('first')", 'clearFrame(\'first\')') +
+    slot(state.lastFrame, 'Endbild', "openPicker('last')", 'clearFrame(\'last\')') +
+    refs +
+    (state.references.length < 9
+      ? `<div class="slot" onclick="openPicker('reference')"><span>+</span><span>Referenz</span></div>`
+      : '');
+}
+
+function clearFrame(which) {
+  if (which === 'first') state.firstFrame = null; else state.lastFrame = null;
+  renderSlots();
+  refreshEstimate();
+}
+
+function removeReference(i) {
+  state.references.splice(i, 1);
+  renderSlots();
+  refreshEstimate();
+}
+
+// ── Cost preview ──────────────────────────────────────────
+let estimateTimer = null;
+
+function refreshEstimate() {
+  clearTimeout(estimateTimer);
+  // Debounced: the duration slider fires per pixel and each one is a request.
+  estimateTimer = setTimeout(loadEstimate, 180);
+}
+
+async function loadEstimate() {
+  const duration = parseInt($('duration').value, 10);
+  try {
+    state.estimate = await (await api('/api/video-api/estimate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        duration_s: duration,
+        resolution: state.resolution,
+        image_count: imageCount(),
+      }),
+    })).json();
+    renderEstimate();
+  } catch (e) {
+    $('cost-price').textContent = '–';
+  }
+}
+
+function renderEstimate() {
+  const est = state.estimate;
+  if (!est) return;
+  const n = imageCount();
+  const box = $('cost-box');
+
+  $('cost-spec').textContent =
+    `${est.duration_s} s · ${state.resolution}` + (n ? ` · ${n} Bild${n === 1 ? '' : 'er'}` : '');
+  $('cost-price').textContent = 'ca. ' + eur(est.cost_eur);
+  $('cost-usd').textContent = usd(est.cost_usd);
+
+  box.classList.toggle('blocked', !est.ok);
+  const blocked = $('cost-blocked');
+  if (est.ok) {
+    blocked.style.display = 'none';
+    $('cost-after').textContent = 'Danach frei: ' + eur(est.available_after_eur);
+  } else {
+    $('cost-after').textContent = '';
+    blocked.style.display = '';
+    // Plain language and a way out — never a silent disable, and deliberately
+    // no "generate anyway": raising the limit is a decision, not a click.
+    blocked.textContent =
+      `Dieser Clip würde ${eur(est.reserve_eur)} kosten, frei sind noch ` +
+      `${eur(est.available_eur)}. Kürze auf ${suggestDuration()} s oder erhöhe das ` +
+      `Monatslimit in den Einstellungen.`;
+  }
+  updateGenerateButton();
+}
+
+/** Longest duration that would still fit, or the minimum if nothing does. */
+function suggestDuration() {
+  const est = state.estimate;
+  if (!est || !state.budget) return 4;
+  const perSecond = Number(est.reserve_eur) / Math.max(1, est.duration_s);
+  const fits = Math.floor(Number(est.available_eur) / perSecond);
+  return Math.max(4, Math.min(15, fits));
+}
+
+function updateGenerateButton() {
+  const btn = $('generate-btn');
+  const configured = state.config?.configured;
+  const ok = state.estimate?.ok && configured && $('prompt').value.trim().length > 0;
+  btn.disabled = !ok;
+  btn.textContent = !configured ? 'Kein API-Key hinterlegt'
+    : state.estimate && !state.estimate.ok ? 'Limit erreicht'
+    : 'Generieren';
+}
+
+// ══════════════════════════════════════════════════════════
+// GENERATE
+// ══════════════════════════════════════════════════════════
+async function generate() {
+  const btn = $('generate-btn');
+  btn.disabled = true;
+  btn.textContent = 'Wird eingereiht…';
+  try {
+    const job = await (await api('/api/video-api/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        prompt: $('prompt').value.trim(),
+        duration_s: parseInt($('duration').value, 10),
+        resolution: state.resolution,
+        ratio: state.ratio,
+        first_frame_image_id: state.firstFrame?.id || null,
+        last_frame_image_id: state.lastFrame?.id || null,
+        reference_image_ids: state.references.map(r => r.id),
+        // Stable per attempt, so a double click lands on one reservation.
+        idempotency_key: crypto.randomUUID(),
+      }),
+    })).json();
+    ArtRium.toast(`Eingereiht — ${eur(job.cost?.amount_eur || 0)} reserviert`);
+    await Promise.all([loadBudget(), loadJobs()]);
+    startPolling();
+  } catch (e) {
+    ArtRium.toast(e.message || 'Konnte nicht eingereiht werden', true);
+    await loadBudget();
+  } finally {
+    updateGenerateButton();
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// JOBS
+// ══════════════════════════════════════════════════════════
+async function loadJobs() {
+  try {
+    state.jobs = await (await api('/api/video-api/jobs?limit=50')).json();
+    renderJobs();
+  } catch (e) { /* transient — the next poll tries again */ }
+}
+
+function renderJobs() {
+  const host = $('jobs');
+  if (!state.jobs.length) {
+    host.innerHTML = '<div class="empty">Noch nichts generiert.<br>' +
+      'Tipp: in 768P iterieren, nur die Treffer auf 2K hochziehen.</div>';
+    return;
+  }
+  host.innerHTML = state.jobs.map(jobCard).join('');
+}
+
+function jobCard(j) {
+  const cost = j.cost
+    ? `${eur(j.cost.amount_eur)} ${j.cost.state === 'reserved' ? 'reserviert' : j.cost.state === 'released' ? 'freigegeben' : 'gebucht'}`
+    : '';
+  const meta = [
+    j.resolution, j.duration_s ? `${j.duration_s}s` : null,
+    j.width && j.height ? `${j.width}×${j.height}` : null,
+    cost,
+    new Date(j.created_at).toLocaleString('de-DE', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}),
+  ].filter(Boolean);
+
+  // 2K is only offered on a finished 768P take that has no 2K sibling — the
+  // "keeper" step, and the only place the cost model works out.
+  const hasTwoK = state.jobs.some(o => o.source_video_id === j.id);
+  const canPromote = j.status === 'done' && j.resolution === '768P' && !hasTwoK;
+
+  return `
+    <div class="job-card">
+      <div class="job-head">
+        <span class="title">${ArtRium.escHtml(j.title || j.prompt || 'Ohne Titel')}</span>
+        ${j.source_video_id ? '<span class="status-badge" style="background:var(--accent-soft);color:var(--accent)">2K-Hochzug</span>' : ''}
+        <span class="status-badge status-${j.status}">${statusLabel(j.status)}</span>
+      </div>
+      <div class="job-meta">${meta.map(m => `<span>${ArtRium.escHtml(m)}</span>`).join('')}</div>
+      ${j.prompt ? `<div class="job-prompt">${ArtRium.escHtml(j.prompt)}</div>` : ''}
+      ${j.status === 'done' && j.url
+        ? `<video src="${withAuth(j.url)}" controls playsinline preload="metadata"></video>` : ''}
+      ${j.error ? `<div class="job-error">${ArtRium.escHtml(j.error)}</div>` : ''}
+      <div class="job-actions">
+        ${canPromote ? `<button class="chip-btn apply" type="button" onclick="promote('${j.id}')">Auf 2K hochziehen</button>` : ''}
+        ${j.status === 'done' && j.url ? `<a class="chip-btn" href="${withAuth(j.url)}" download>Download</a>` : ''}
+        <button class="chip-btn remove" type="button" onclick="removeJob('${j.id}', '${j.status}')">
+          ${j.status === 'queued' ? 'Abbrechen' : 'Löschen'}
+        </button>
+      </div>
+    </div>`;
+}
+
+const statusLabel = s => ({
+  queued: 'wartet', generating: 'läuft', done: 'fertig', failed: 'fehlgeschlagen',
+}[s] || s);
+
+async function promote(videoId) {
+  const job = state.jobs.find(j => j.id === videoId);
+  let est = null;
+  try {
+    est = await (await api('/api/video-api/estimate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({duration_s: job.duration_s, kind: 'regenerate_2k'}),
+    })).json();
+  } catch (_) { /* the estimate is a courtesy */ }
+
+  const price = est ? ` Kosten: ca. ${eur(est.cost_eur)}.` : '';
+  if (!confirm(`Diesen Take auf 2K hochziehen?${price}`)) return;
+
+  try {
+    await api(`/api/video-api/jobs/${videoId}/regenerate`, {method: 'POST'});
+    ArtRium.toast('2K-Hochzug eingereiht');
+    await Promise.all([loadBudget(), loadJobs()]);
+    startPolling();
+  } catch (e) {
+    ArtRium.toast(e.message || 'Hochzug nicht möglich', true);
+  }
+}
+
+async function removeJob(videoId, status) {
+  const msg = status === 'queued'
+    ? 'Diesen Auftrag abbrechen? Er wurde noch nicht abgeschickt, es entstehen keine Kosten.'
+    : 'Dieses Video löschen?';
+  if (!confirm(msg)) return;
+  try {
+    await api(`/api/video-api/jobs/${videoId}`, {method: 'DELETE'});
+    ArtRium.toast(status === 'queued' ? 'Abgebrochen' : 'Gelöscht');
+    await Promise.all([loadBudget(), loadJobs()]);
+  } catch (e) {
+    ArtRium.toast(e.message || 'Nicht möglich', true);
+  }
+}
+
+// Poll only while something is actually in flight.
+function startPolling() {
+  if (state.pollTimer) return;
+  state.pollTimer = setInterval(async () => {
+    await loadJobs();
+    const busy = state.jobs.some(j => j.status === 'queued' || j.status === 'generating');
+    if (busy) {
+      await loadBudget();
+    } else {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+      await loadBudget();
+    }
+  }, 5000);
+}
+
+// ══════════════════════════════════════════════════════════
+// GALLERY PICKER
+// ══════════════════════════════════════════════════════════
+async function openPicker(mode) {
+  state.pickerMode = mode;
+  $('picker-title').textContent =
+    mode === 'first' ? 'Startbild wählen' : mode === 'last' ? 'Endbild wählen' : 'Referenzbilder wählen';
+  $('picker-modal').classList.add('show');
+  document.body.style.overflow = 'hidden';
+  await loadPickerImages();
+}
+
+function closePicker() {
+  $('picker-modal').classList.remove('show');
+  document.body.style.overflow = '';
+  state.pickerMode = null;
+}
+
+async function loadPickerImages() {
+  const p = new URLSearchParams({limit: 60});
+  if (state.pickerSearch) p.set('search', state.pickerSearch);
+  try {
+    state.pickerImages = await (await api('/api/images?' + p)).json();
+    renderPicker();
+  } catch (e) {
+    ArtRium.toast('Bilder konnten nicht geladen werden', true);
+  }
+}
+
+function renderPicker() {
+  $('picker-grid').innerHTML = state.pickerImages.map(img => {
+    const selected = isPicked(img.id);
+    return `
+      <div class="picker-cell ${selected ? 'selected' : ''}" onclick="pickImage('${img.id}')">
+        <img src="${withAuth(img.thumb_url)}" alt="" loading="lazy">
+        <div class="sel-overlay">✓</div>
+      </div>`;
+  }).join('');
+}
+
+function isPicked(id) {
+  return state.firstFrame?.id === id || state.lastFrame?.id === id
+      || state.references.some(r => r.id === id);
+}
+
+function pickImage(id) {
+  const img = state.pickerImages.find(i => i.id === id);
+  if (!img) return;
+  const picked = {id: img.id, thumb_url: img.thumb_url};
+
+  if (state.pickerMode === 'first') {
+    state.firstFrame = picked;
+    closePicker();
+  } else if (state.pickerMode === 'last') {
+    state.lastFrame = picked;
+    closePicker();
+  } else {
+    const at = state.references.findIndex(r => r.id === id);
+    if (at >= 0) state.references.splice(at, 1);
+    else if (state.references.length < 9) state.references.push(picked);
+    else return ArtRium.toast('Höchstens 9 Referenzbilder', true);
+    renderPicker();
+  }
+  renderSlots();
+  refreshEstimate();
+}
+
+let pickerSearchTimer;
+function onPickerSearch() {
+  clearTimeout(pickerSearchTimer);
+  pickerSearchTimer = setTimeout(() => {
+    state.pickerSearch = $('picker-search').value.trim();
+    loadPickerImages();
+  }, 350);
+}
+
+// ══════════════════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════════════════
+window.addEventListener('load', async () => {
+  $('duration').addEventListener('input', () => {
+    $('duration-value').textContent = $('duration').value + ' s';
+    refreshEstimate();
+  });
+  $('prompt').addEventListener('input', updateGenerateButton);
+  $('picker-search').addEventListener('input', onPickerSearch);
+
+  try {
+    state.config = await (await api('/api/video-api/status')).json();
+    if (!state.config.configured) {
+      $('not-configured').style.display = '';
+      $('not-configured').textContent =
+        'MINIMAX_API_KEY ist nicht gesetzt — trage ihn in .env ein und starte den Server neu. ' +
+        'Budget und Kostenvorschau funktionieren auch ohne Key, generiert wird nichts.';
+    }
+    $('header-badge').textContent = state.config.model || 'H3';
+  } catch (e) { /* the page still works with defaults */ }
+
+  renderChips();
+  renderSlots();
+  await Promise.all([loadBudget(), loadJobs()]);
+  await loadEstimate();
+  if (state.jobs.some(j => j.status === 'queued' || j.status === 'generating')) startPolling();
+});
+</script>
+</body>
+</html>

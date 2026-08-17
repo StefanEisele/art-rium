@@ -56,6 +56,21 @@ def share_url(filename: str, kind: ShareKind = "image") -> str:
     return url
 
 
+def ai_label_field(enabled: bool) -> dict[str, str]:
+    """Meta's `is_ai_generated` self-disclosure for a container payload.
+
+    Documented as "an optional parameter to provide a self-disclosure of AI
+    usage in the post. Not available for carousel children" — so it belongs on
+    a single-media container, a carousel PARENT, a reel or a story, and never
+    on a child. Misplaced container params are rejected outright rather than
+    ignored (see `collaborators`), so the distinction is not cosmetic.
+
+    Off yields an empty dict: the parameter is absent, which is the documented
+    default and leaves the post unlabelled.
+    """
+    return {"is_ai_generated": "true"} if enabled else {}
+
+
 # ── Error handling ────────────────────────────────────────────────────────────
 
 def check_response(body: dict, context: str) -> None:

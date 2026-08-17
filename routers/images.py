@@ -1,17 +1,22 @@
 """
-Image gallery API — list, search, tag, rate, delete and auto-enhance
+Image gallery API — list, search, tag, rate, delete, auto-enhance and grain
 ingested images.
 
-The auto-enhance ("Zauberstab") endpoints follow the same shape as the video
-tool's grain pass: a sibling file rendered from the original, a live preview
-so the strength can be judged before committing, and a delete that puts the
-original back. See services/image/enhance.py for what it does to the pixels
-and services/image/rendition.py for who gets which rendition afterwards.
+The auto-enhance ("Zauberstab") and film-grain endpoints follow the same shape
+as the video tool's post-passes: a sibling file rendered from the rendition
+below it, a live preview so the strength can be judged before committing, and
+a delete that puts the previous state back. See services/image/enhance.py and
+services/image/grain.py for what they do to the pixels, and
+services/image/rendition.py for the order they stack in and who gets which
+rendition afterwards.
 """
-import uuid
+import asyncio
 import logging
+import shutil
+import uuid
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -20,9 +25,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth
 from core.config import settings
-from core.db import get_db
+from core.db import AsyncSessionLocal, get_db
 from core.models import Image
+from core.tasks import safe_create_task
 from core.thumbnail import make_thumbnail, thumb_rel_path
+from services.comfy.client import poll_history, post_workflow, upload_image
+from services.comfy.progress import attach_live_stage
+from workers.comfy_listener import get_listener
+from services.image import grain as grain_service
 from services.image.enhance import (
     STRENGTH_DEFAULT,
     STRENGTH_MAX,
@@ -30,16 +40,30 @@ from services.image.enhance import (
     enhance_file,
     preview_bytes,
 )
+from services.image import upscale as upscale_service
 from services.image.rendition import (
+    enhance_source_path,
     enhanced_path,
     enhanced_rel_path,
+    grain_source_path,
+    grained_path,
+    grained_rel_path,
     is_enhanced,
-    original_path,
+    is_grained,
+    is_upscaled,
     primary_filename,
+    primary_filepath,
+    upscale_source_path,
+    upscaled_path,
 )
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/images", dependencies=[Depends(require_auth)])
+
+# A tiled redraw is one small generation per tile; a 4x portrait is ~48 of
+# them. Generous enough that a big job finishes rather than being abandoned
+# halfway through with a half-written file.
+_UPSCALE_TIMEOUT = 3600
 
 
 class ImageUpdate(BaseModel):
@@ -51,6 +75,20 @@ class ImageUpdate(BaseModel):
 
 class EnhanceRequest(BaseModel):
     strength: int = STRENGTH_DEFAULT
+
+
+class GrainRequest(BaseModel):
+    strength: int = grain_service.STRENGTH_DEFAULT
+
+
+class UpscaleRequest(BaseModel):
+    # The one control that matters: low = the picture it already is, only
+    # bigger; high = the model repaints detail into it. Named after what the
+    # user is choosing rather than after the sampler parameter it sets.
+    denoise: float = upscale_service.DENOISE_DEFAULT
+    scale: float = upscale_service.SCALE_DEFAULT
+    model: str = upscale_service.DEFAULT_UPSCALE_MODEL
+    seed: Optional[int] = None
 
 
 class BulkDeleteRequest(BaseModel):
@@ -124,14 +162,62 @@ async def update_image(
 async def _refresh_thumbnail(img: Image) -> None:
     """Re-cut the thumbnail from whichever rendition is now current.
 
-    Cheap, and it is what makes the enhancement visible everywhere at once:
-    the gallery grid, the Instagram picker and the articles picker all render
+    Cheap, and it is what makes an edit visible everywhere at once: the gallery
+    grid, the Instagram picker and the articles picker all render
     `/api/image/{filename}/thumb`, so refreshing this one file updates every
     surface without any of them knowing renditions exist.
     """
-    src = enhanced_path(img) if is_enhanced(img) else original_path(img)
-    if src and src.exists():
+    src = settings.storage_dir / primary_filepath(img)
+    if src.exists():
         await make_thumbnail(src, settings.storage_dir / thumb_rel_path(img.filename))
+
+
+async def _rerender_enhancement(img: Image) -> None:
+    """Re-run the wand after the rendition underneath it changed.
+
+    The enhancement reads the upscale when there is one, so finishing an
+    upscale — or removing it again — invalidates it. Re-rendering rather than
+    dropping is what keeps an enhanced image from shrinking back to its
+    generated size the moment it is upscaled: the same correction, at the new
+    resolution. Costs a Pillow pass, which is nothing next to the GPU minutes
+    that produced the source.
+
+    The analysis runs again on the new source, so `enhance_params` follows the
+    picture that is actually being corrected; the user's chosen strength is
+    what carries over.
+    """
+    if not img.enhance_strength:
+        return
+    src = enhance_source_path(img)
+    if not src.exists():
+        return
+    rel, name = enhanced_rel_path(img)
+    img.enhance_params = await enhance_file(
+        src, settings.storage_dir / rel, img.enhance_strength,
+    )
+    img.enhanced_filename = name
+    img.enhanced_filepath = rel
+
+
+async def _rerender_grain(img: Image) -> None:
+    """Re-run the grain pass after the rendition underneath it changed.
+
+    Grain reads the enhanced file when there is one and the upscale otherwise,
+    so enhancing, re-enhancing at a new strength, clearing the enhancement and
+    upscaling all invalidate it. Same rule as `_reapply_grain_if_any` in
+    routers/video.py, and the reason grain can be left switched on while the
+    wand is played with. Always call it *after* `_rerender_enhancement`, since
+    it reads that pass's output.
+    """
+    if not img.grain_strength:
+        return
+    src = grain_source_path(img)
+    if not src.exists():
+        return
+    rel, name = grained_rel_path(img)
+    await grain_service.grain_file(src, settings.storage_dir / rel, img.grain_strength)
+    img.grained_filename = name
+    img.grained_filepath = rel
 
 
 @router.get("/{image_id}/enhance/preview")
@@ -150,7 +236,7 @@ async def preview_enhance(
     img = await db.get(Image, image_id)
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
-    src = original_path(img)
+    src = enhance_source_path(img)
     if not src.exists():
         raise HTTPException(status_code=404, detail="Source image missing on disk")
 
@@ -173,10 +259,12 @@ async def enhance_image_endpoint(
 ):
     """Render (or re-render) the enhanced rendition of this image.
 
-    Always reads the original, so re-running at a new strength replaces the
-    correction rather than stacking it. Strength 0 means "off" and is routed
-    to the same teardown the DELETE performs, so there is one way to end up
-    unenhanced instead of two.
+    Always reads the rendition *below* it — the upscale when there is one, the
+    original otherwise — so re-running at a new strength replaces the
+    correction rather than stacking it, and an upscaled image stays upscaled
+    while the wand is played with. Strength 0 means "off" and is routed to the
+    same teardown the DELETE performs, so there is one way to end up unenhanced
+    instead of two.
     """
     img = await db.get(Image, image_id)
     if not img:
@@ -186,7 +274,7 @@ async def enhance_image_endpoint(
     if strength <= 0:
         return await _clear_enhancement(img, db)
 
-    src = original_path(img)
+    src = enhance_source_path(img)
     if not src.exists():
         raise HTTPException(status_code=404, detail="Source image missing on disk")
 
@@ -197,6 +285,7 @@ async def enhance_image_endpoint(
     img.enhanced_filename = name
     img.enhanced_filepath = rel
     img.enhance_params = params
+    await _rerender_grain(img)
     await _refresh_thumbnail(img)
     await db.commit()
     logger.info("Enhanced image %s at strength %d", image_id, strength)
@@ -213,7 +302,11 @@ async def remove_enhancement(image_id: uuid.UUID, db: AsyncSession = Depends(get
 
 
 async def _clear_enhancement(img: Image, db: AsyncSession) -> dict:
-    """Delete the rendition file, null the columns, restore the thumbnail."""
+    """Delete the rendition file, null the columns, restore the thumbnail.
+
+    The upscale is deliberately untouched: it sits *under* the enhancement, so
+    removing the correction puts the upscaled picture back, not the small one.
+    """
     path = enhanced_path(img)
     if path and path.exists():
         try:
@@ -227,6 +320,347 @@ async def _clear_enhancement(img: Image, db: AsyncSession) -> dict:
     img.enhanced_filename = None
     img.enhanced_filepath = None
     img.enhance_params = None
+    await _rerender_grain(img)
+    await _refresh_thumbnail(img)
+    await db.commit()
+    return _serialize(img)
+
+
+# ── Film grain ───────────────────────────────────────────────────────────────
+# Same three endpoints as the enhancement, one layer up the rendition stack.
+
+
+@router.get("/{image_id}/grain/preview")
+async def preview_grain(
+    image_id: uuid.UUID,
+    strength: int = Query(
+        grain_service.STRENGTH_DEFAULT, ge=0, le=grain_service.STRENGTH_MAX,
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """A downscaled JPEG of what `strength` would produce. Writes nothing.
+
+    Rendered off the same source the real pass uses, so the preview shows the
+    grain sitting on the enhanced picture when the wand is on.
+    """
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+    src = grain_source_path(img)
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="Source image missing on disk")
+
+    jpg = await grain_service.preview_bytes(src, strength)
+    return Response(
+        content=jpg,
+        media_type="image/jpeg",
+        # Short-lived: the noise field is regenerated per render, so a longer
+        # cache would pin one arbitrary field for the rest of the session.
+        headers={"Cache-Control": "private, max-age=30"},
+    )
+
+
+@router.post("/{image_id}/grain")
+async def grain_image_endpoint(
+    image_id: uuid.UUID,
+    body: GrainRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Render (or re-render) the grained rendition of this image.
+
+    Always reads the rendition *below* the grain, so re-running at a new
+    strength replaces the grain instead of piling a second field onto the
+    first. Strength 0 means "off" and is routed to the same teardown the
+    DELETE performs.
+    """
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    strength = grain_service.clamp_strength(body.strength)
+    if strength <= 0:
+        return await _clear_grain(img, db)
+
+    src = grain_source_path(img)
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="Source image missing on disk")
+
+    rel, name = grained_rel_path(img)
+    await grain_service.grain_file(src, settings.storage_dir / rel, strength)
+
+    img.grain_strength = strength
+    img.grained_filename = name
+    img.grained_filepath = rel
+    await _refresh_thumbnail(img)
+    await db.commit()
+    logger.info("Grained image %s at strength %d", image_id, strength)
+    return _serialize(img)
+
+
+@router.delete("/{image_id}/grain")
+async def remove_grain(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Drop the grained rendition and put the rendition under it back in front."""
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return await _clear_grain(img, db)
+
+
+async def _clear_grain(img: Image, db: AsyncSession) -> dict:
+    """Delete the rendition file, null the columns, restore the thumbnail."""
+    path = grained_path(img)
+    if path and path.exists():
+        try:
+            path.unlink()
+        except OSError as exc:
+            # Not fatal: the row decides which rendition is served, so a
+            # stranded file is wasted disk, not a wrong picture.
+            logger.warning("Could not delete grained rendition %s: %s", path, exc)
+
+    img.grain_strength = None
+    img.grained_filename = None
+    img.grained_filepath = None
+    await _refresh_thumbnail(img)
+    await db.commit()
+    return _serialize(img)
+
+
+# ── Diffusion upscale (Z-Image Turbo + Ultimate SD Upscale) ──────────────────
+# Unlike the wand and the grain, this one is GPU minutes rather than
+# milliseconds, so it runs as a background task with a polled progress entry —
+# the same shape routers/video.py uses for its own upscale pass. One at a time,
+# process-wide: two tiled diffusion runs on one card would just thrash.
+#
+# It reads the *original* regardless of what the wand and the grain are set to,
+# and both of those are re-rendered on top of the result when it lands — so an
+# upscale never has to be redone because something cheap above it changed, and
+# never has to be dropped to honour one.
+
+_upscale_progress: dict[str, dict] = {}
+_image_upscale_gate = asyncio.Lock()
+
+
+def _set_upscale_progress(
+    key: str, phase: str, message: str, pct: int, **extra,
+) -> None:
+    _upscale_progress[key] = {"phase": phase, "message": message, "pct": pct, **extra}
+
+
+@router.get("/{image_id}/upscale/options")
+async def upscale_options(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """What this image can be upscaled to, and what it would cost in time.
+
+    Server-side because the clamps are: the scale a request actually gets is
+    bounded by the output-size budget, and the client should show the honest
+    number before the user commits, not after.
+    """
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    src_w, src_h = img.width or 0, img.height or 0
+    scales = []
+    for choice in upscale_service.SCALE_CHOICES:
+        allowed = upscale_service.clamp_scale(choice, src_w, src_h)
+        w, h = upscale_service.output_size(src_w, src_h, allowed)
+        scales.append({
+            "scale": choice,
+            "effective_scale": allowed,
+            "capped": allowed < choice - 0.01,
+            "width": w, "height": h,
+            "seconds": upscale_service.estimate_seconds(src_w, src_h, allowed),
+            "tiles": upscale_service.tile_count(w, h),
+        })
+    return {
+        "denoise_min": upscale_service.DENOISE_MIN,
+        "denoise_max": upscale_service.DENOISE_MAX,
+        "denoise_default": upscale_service.DENOISE_DEFAULT,
+        "scale_default": upscale_service.SCALE_DEFAULT,
+        "models": [
+            {"key": "realesrgan", "label": "RealESRGAN 4x+", "hint": "Allrounder, ruhige Kanten"},
+            {"key": "nomos8ksc",  "label": "4x Nomos8kSC",   "hint": "Schärfer, foto-orientiert"},
+        ],
+        "default_model": upscale_service.DEFAULT_UPSCALE_MODEL,
+        "scales": scales,
+        "source": {"width": src_w, "height": src_h},
+    }
+
+
+@router.get("/{image_id}/upscale/progress")
+async def upscale_progress(image_id: uuid.UUID):
+    """Live progress for a running pass. `detail` carries ComfyUI's own
+    per-node/step readout when the listener has one — a tiled run is minutes
+    of silence otherwise."""
+    entry = dict(_upscale_progress.get(str(image_id)) or {})
+    if not entry:
+        return {"phase": "idle", "message": "", "pct": 0}
+    return attach_live_stage(entry)
+
+
+@router.post("/{image_id}/upscale", status_code=202)
+async def upscale_image_endpoint(
+    image_id: uuid.UUID,
+    body: UpscaleRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue the Z-Image + Ultimate SD Upscale pass for this image.
+
+    Returns immediately; poll `/upscale/progress` and re-fetch the image when
+    the phase reads `done`. The pass reads the untouched original, so re-running
+    it replaces the previous upscale instead of enlarging it a second time —
+    and the wand and grain settings on the image are simply re-applied on top
+    of the new result.
+    """
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+    if _upscale_progress.get(str(image_id), {}).get("phase") not in (None, "done", "failed"):
+        raise HTTPException(status_code=409, detail="An upscale is already running for this image")
+
+    src = upscale_source_path(img)
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="Source image missing on disk")
+
+    denoise = upscale_service.clamp_denoise(body.denoise)
+    scale = upscale_service.clamp_scale(body.scale, img.width or 0, img.height or 0)
+    model = body.model if body.model in upscale_service.UPSCALE_MODELS else upscale_service.DEFAULT_UPSCALE_MODEL
+
+    _set_upscale_progress(str(image_id), "queued", "Warte auf die GPU…", 3)
+    safe_create_task(
+        _run_image_upscale(image_id, denoise=denoise, scale=scale, model=model, seed=body.seed),
+        name=f"image_upscale:{image_id}",
+    )
+    logger.info(
+        "Queued image upscale %s — %.2fx, denoise %.2f, %s",
+        image_id, scale, denoise, model,
+    )
+    return {
+        "status": "queued",
+        "scale": scale,
+        "denoise": denoise,
+        "model": model,
+        "seconds": upscale_service.estimate_seconds(img.width or 0, img.height or 0, scale),
+    }
+
+
+async def _run_image_upscale(
+    image_id: uuid.UUID, *, denoise: float, scale: float, model: str, seed: int | None,
+) -> None:
+    """Background task: submit to ComfyUI, wait, persist the rendition."""
+    key = str(image_id)
+    try:
+        async with AsyncSessionLocal() as db:
+            img = await db.get(Image, image_id)
+            if not img:
+                raise RuntimeError("Image row gone")
+            src = upscale_source_path(img)
+            prompt = img.prompt or ""
+            rel, name = upscale_service.upscaled_rel_path(img.filepath)
+
+        if _image_upscale_gate.locked():
+            _set_upscale_progress(key, "queued", "Warte auf die GPU (ein anderer Upscale läuft)…", 5)
+
+        async with _image_upscale_gate:
+            _set_upscale_progress(key, "uploading", "Bild wird an ComfyUI übergeben…", 10)
+            async with httpx.AsyncClient(timeout=120) as client:
+                uploaded = await upload_image(client, src, f"artrium_up_{image_id.hex[:10]}.png")
+                wf, save_node = upscale_service.build_image_upscale_workflow(
+                    uploaded, prompt=prompt, denoise=denoise, scale=scale,
+                    upscale_model=model, seed=seed,
+                    filename_prefix=f"artrium_imgup_{image_id.hex[:8]}",
+                )
+                _set_upscale_progress(key, "submitting", "Workflow wird gestartet…", 15)
+                prompt_id = await post_workflow(client, wf)
+                listener = get_listener()
+                if listener:
+                    listener.register_node_labels(prompt_id, wf)
+                _set_upscale_progress(
+                    key, "running", "Kacheln werden neu gezeichnet…", 25,
+                    # The band the tiled redraw owns: ComfyUI's own step counter
+                    # maps into it, so the bar moves through the tiles instead
+                    # of sitting at 25% for several minutes.
+                    _prompt_id=prompt_id, _band=(25, 90),
+                )
+                logger.info("Image upscale %s submitted (prompt %s)", image_id, prompt_id)
+                outputs = await poll_history(
+                    client, prompt_id, timeout=_UPSCALE_TIMEOUT, interval=5,
+                )
+
+        entry = (outputs.get(save_node) or {}).get("images") or []
+        if not entry:
+            raise RuntimeError(f"ComfyUI returned no image: {outputs.get(save_node)}")
+        comfy_src = settings.comfyui_output_dir / entry[0].get("subfolder", "") / entry[0]["filename"]
+        if not comfy_src.exists():
+            raise FileNotFoundError(f"Upscaled file not found at {comfy_src}")
+
+        _set_upscale_progress(key, "finalizing", "Wird gespeichert…", 92)
+        dest = settings.storage_dir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(shutil.copy2, comfy_src, dest)
+        out_w, out_h = await asyncio.to_thread(_png_size, dest)
+
+        async with AsyncSessionLocal() as db:
+            img = await db.get(Image, image_id)
+            if img:
+                img.upscaled_filename = name
+                img.upscaled_filepath = rel
+                img.upscale_scale = scale
+                img.upscale_denoise = denoise
+                img.upscale_model = model
+                img.upscale_width, img.upscale_height = out_w, out_h
+                # Both Pillow passes live on top of this and were rendered from
+                # the smaller source; re-run them in stack order so the delivery
+                # file carries them at the new size instead of dropping back to
+                # a stale small one.
+                await _rerender_enhancement(img)
+                await _rerender_grain(img)
+                await _refresh_thumbnail(img)
+                await db.commit()
+
+        _set_upscale_progress(key, "done", f"Fertig — {out_w}×{out_h}", 100)
+        logger.info("Image %s upscaled to %dx%d", image_id, out_w, out_h)
+    except Exception as exc:
+        logger.exception("Image upscale %s failed", image_id)
+        _set_upscale_progress(key, "failed", f"{type(exc).__name__}: {exc}", 0)
+
+
+def _png_size(path) -> tuple[int, int]:
+    from PIL import Image as PILImage
+    with PILImage.open(path) as im:
+        return im.width, im.height
+
+
+@router.delete("/{image_id}/upscale")
+async def remove_upscale(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Drop the upscaled rendition and put the one under it back in front."""
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return await _clear_upscale(img, db)
+
+
+async def _clear_upscale(img: Image, db: AsyncSession) -> dict:
+    path = upscaled_path(img)
+    if path and path.exists():
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning("Could not delete upscaled rendition %s: %s", path, exc)
+
+    img.upscaled_filename = None
+    img.upscaled_filepath = None
+    img.upscale_scale = None
+    img.upscale_denoise = None
+    img.upscale_model = None
+    img.upscale_width = None
+    img.upscale_height = None
+    _upscale_progress.pop(str(img.id), None)
+    # Both Pillow passes were rendered on top of the upscale; without it they
+    # have to come from the original again, or the gallery would serve a 4K
+    # rendition of a picture that is back to 1K. This is the one path that is
+    # *meant* to take the image back to its original size.
+    await _rerender_enhancement(img)
+    await _rerender_grain(img)
     await _refresh_thumbnail(img)
     await db.commit()
     return _serialize(img)
@@ -268,9 +702,13 @@ async def delete_image(
 
 
 def _delete_files(img: Image) -> None:
-    """Remove the full image, its enhanced rendition and its thumbnail from
+    """Remove the full image, its derived renditions and its thumbnail from
     disk (best-effort)."""
-    for rel in filter(None, [img.filepath, img.enhanced_filepath, img.thumbnail_path]):
+    rels = [
+        img.filepath, img.enhanced_filepath, img.upscaled_filepath,
+        img.grained_filepath, img.thumbnail_path,
+    ]
+    for rel in filter(None, rels):
         path = settings.storage_dir / rel
         if path.exists():
             try:
@@ -280,12 +718,20 @@ def _delete_files(img: Image) -> None:
 
 
 def _serialize(img: Image) -> dict:
-    # The thumbnail is re-cut in place whenever the enhancement changes, so its
-    # URL has to carry a version or every cache between here and the browser
-    # keeps showing the previous rendition. `url` stays the original on
-    # purpose: the gallery modal needs both to offer a before/after compare,
-    # and `primary_url` is the one that means "what viewers get".
-    version = f"?v=e{img.enhance_strength}" if is_enhanced(img) else ""
+    # The thumbnail is re-cut in place whenever a rendition changes, so its URL
+    # has to carry a version or every cache between here and the browser keeps
+    # showing the previous one. Both passes go into the marker: switching grain
+    # on and off at a fixed enhance strength has to bust it too. `url` stays the
+    # original on purpose — the gallery modal needs both to offer a before/after
+    # compare, and `primary_url` is the one that means "what viewers get".
+    # The upscale goes into the marker too: it replaces the primary file and
+    # re-cuts the thumbnail, so a cached copy of either would otherwise survive
+    # the change.
+    version = (
+        f"?v=e{img.enhance_strength or 0}g{img.grain_strength or 0}u{img.upscale_scale or 0}"
+        if (is_enhanced(img) or is_grained(img) or is_upscaled(img))
+        else ""
+    )
     return {
         "id": str(img.id),
         "filename": img.filename,
@@ -297,6 +743,17 @@ def _serialize(img: Image) -> dict:
         "enhance_params": img.enhance_params,
         "enhanced_url": (
             f"/api/image/{img.enhanced_filename}{version}" if is_enhanced(img) else None
+        ),
+        "grained": is_grained(img),
+        "grain_strength": img.grain_strength,
+        "upscaled": is_upscaled(img),
+        "upscale_scale": img.upscale_scale,
+        "upscale_denoise": img.upscale_denoise,
+        "upscale_model": img.upscale_model,
+        "upscale_width": img.upscale_width,
+        "upscale_height": img.upscale_height,
+        "upscaled_url": (
+            f"/api/image/{img.upscaled_filename}{version}" if is_upscaled(img) else None
         ),
         "title": img.title,
         "prompt": img.prompt,

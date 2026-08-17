@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     instagram_access_token: str = ""
     image_share_token: str = ""
     instagram_graph_api_base: str = "https://graph.facebook.com/v18.0"
+    # Meta's `is_ai_generated` self-disclosure ("AI info" label). Applied per
+    # post at container creation; this is only what a NEW post starts with, and
+    # every post carries its own flag from then on. Everything this tool
+    # publishes is generated, so it defaults to on.
+    instagram_ai_label_default: bool = True
 
     # ── Public URL (needed for Instagram to fetch images) ────────────────────
     public_base_url: str = ""  # e.g. https://xyz.trycloudflare.com
@@ -59,6 +64,22 @@ class Settings(BaseSettings):
     # ── Outpost (Pi posting service for cloud-scheduled posts) ───────────────
     outpost_base_url: str = ""        # e.g. https://ig.stefaneisele.com
     outpost_shared_secret: str = ""   # X-Outpost-Key
+
+    # ── MiniMax H3 cloud video API (services/video_api/) ─────────────────────
+    # Paid, per-second billing. The budget ledger in services/video_api/budget.py
+    # is what stops a runaway from becoming a runaway bill; these are its knobs.
+    minimax_api_key: str = ""
+    minimax_api_base: str = "https://api.minimax.io"
+    # MiniMax allows 2 concurrent tasks on pay-as-you-go; more just fails.
+    video_api_max_concurrent: int = 2
+    # Defaults for a brand-new month. An existing period carries its own
+    # settings forward instead, so editing the limit in the UI sticks.
+    video_api_default_limit_eur: float = 20.00
+    video_api_warn_threshold_pct: int = 80
+    video_api_usd_eur_rate: float = 1.08     # USD per EUR; editable in the UI
+    # Applied to reservations only, never to the displayed price. Covers rate
+    # drift and rounding between reserving and being billed.
+    video_api_safety_factor: float = 1.10
 
     # ── ffmpeg (needed for Reel video generation) ─────────────────────────────
     ffmpeg_path: str = "ffmpeg"  # override if ffmpeg is not on PATH

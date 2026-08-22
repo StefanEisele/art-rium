@@ -15,6 +15,7 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 WORKFLOW_NAME = "z-image_turbo"
+ZIMAGE_VARIANT_WORKFLOW_NAME = "z-image_turbo_variant"
 ARTIVISION_WORKFLOW_NAME = "artivision_xl"
 ERNIE_WORKFLOW_NAME = "ernie_image_turbo"
 

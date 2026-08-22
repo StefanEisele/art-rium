@@ -359,11 +359,81 @@
 
     /* ── Model toggle (reuses .mode-toggle look, but 3 buttons not 2) ── */
     #model-toggle { grid-template-columns: 1fr 1fr 1fr; }
+    #mode-toggle  { grid-template-columns: 1fr 1fr 1fr; }
+    /* Variants are Z-Image Turbo's own graph — the other two have no img2v
+       path here, so the toggle says so instead of failing at submit. */
+    .mode-toggle button:disabled { opacity: 0.35; cursor: not-allowed; }
     #negative-prompt-field { display: none; }
     #negative-prompt-field.show { display: flex; }
 
     /* ── LoRA field hidden entirely for models with no LoRA in the library (e.g. Ernie Turbo) ── */
     #lora-field.hidden { display: none; }
+
+    /* ── Variant mode: source picture + the denoise slider ── */
+    #variant-panel { display: none; flex-direction: column; gap: 14px; }
+    #variant-panel.show { display: flex; }
+    #size-field.hidden { display: none; }
+
+    .src-card {
+      display: flex; gap: 12px; align-items: center;
+      background: var(--surface2);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 12px;
+    }
+    .src-card.empty {
+      justify-content: center; cursor: pointer;
+      color: var(--text-dim); font-size: 14px; font-weight: 600;
+      padding: 22px 12px; border-style: dashed;
+    }
+    .src-card img {
+      width: 62px; height: 62px; flex-shrink: 0;
+      object-fit: cover; border-radius: 8px; background: var(--surface);
+    }
+    .src-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+    .src-meta .dim { font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .src-meta .sub { font-size: 11px; color: var(--text-dim); line-height: 1.35; }
+    .src-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+    .src-actions button {
+      background: var(--surface); border: 1.5px solid var(--border);
+      color: var(--text); font-size: 11px; font-weight: 600;
+      padding: 5px 9px; border-radius: 7px; cursor: pointer; font-family: inherit;
+      white-space: nowrap;
+    }
+    .src-actions button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    /* The recommended band is painted onto the track itself — the number on
+       its own tells you nothing about where the useful part of the range is,
+       and the band moves depending on whether the prompt was edited. */
+    .dn-head { display: flex; justify-content: space-between; align-items: baseline; }
+    .dn-head .val { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .dn-head .band { font-size: 12px; font-weight: 700; color: var(--text-dim); }
+    .dn-head .band.rec { color: var(--accent); }
+    .dn-track-wrap { position: relative; padding: 9px 0 4px; }
+    /* Inset by half a thumb so the painted band lines up with where the
+       handle can actually stop. */
+    .dn-rail { position: absolute; top: 0; left: 8px; right: 8px; height: 5px; }
+    .dn-zone {
+      position: absolute; top: 0; height: 5px; border-radius: 3px;
+      background: var(--accent); opacity: 0.5;
+      transition: left 0.18s ease, width 0.18s ease;
+    }
+    #denoise { width: 100%; margin: 0; accent-color: var(--accent); display: block; }
+    .dn-ends {
+      display: flex; justify-content: space-between;
+      font-size: 11px; color: var(--text-dim); margin-top: 2px;
+    }
+    .dn-effect {
+      font-size: 12px; color: var(--text-dim); line-height: 1.45;
+      min-height: 34px;
+    }
+    .dn-effect b { color: var(--text); font-weight: 600; }
+    .dn-jump {
+      background: transparent; border: 1.5px solid var(--accent);
+      color: var(--accent); font: inherit; font-size: 11px; font-weight: 700;
+      padding: 3px 9px; border-radius: 999px; cursor: pointer;
+      white-space: nowrap; margin-top: 2px;
+    }
   </style>
 </head>
 <body>
@@ -392,7 +462,34 @@
     <!-- Mode toggle -->
     <div class="mode-toggle" id="mode-toggle">
       <button type="button" id="mode-direct" class="active" onclick="setMode('direct')">Direct</button>
-      <button type="button" id="mode-enhance" onclick="setMode('enhance')">Enhance from idea</button>
+      <button type="button" id="mode-enhance" onclick="setMode('enhance')">Enhance</button>
+      <button type="button" id="mode-variant" onclick="setMode('variant')">Variante</button>
+    </div>
+
+    <!-- Variant mode: the source picture, and how far to move away from it.
+         The prompt textarea below is pre-filled from the source and stays
+         editable — how much editing it actually buys depends on the denoise,
+         which is why the recommended band shifts once the text differs. -->
+    <div id="variant-panel">
+      <div class="field">
+        <label>Quellbild</label>
+        <div class="src-card empty" id="src-card" onclick="openPicker()">+ Bild wählen</div>
+      </div>
+
+      <div class="field">
+        <div class="dn-head">
+          <label style="margin:0">Abweichung vom Original</label>
+          <span><span class="val" id="denoise-val">0.40</span>
+                <span class="band" id="denoise-band"></span></span>
+        </div>
+        <div class="dn-track-wrap">
+          <div class="dn-rail"><div class="dn-zone" id="denoise-zone"></div></div>
+          <input type="range" id="denoise" min="10" max="90" step="1" value="40"
+                 oninput="onDenoiseInput()">
+        </div>
+        <div class="dn-ends"><span>← Nah am Original</span><span>Freier →</span></div>
+        <div class="dn-effect" id="denoise-effect"></div>
+      </div>
     </div>
 
     <!-- Prompt -->
@@ -437,8 +534,9 @@
         <input type="number" id="seed" value="-1" min="-1" max="4294967295">
       </div>
 
-      <!-- Image size -->
-      <div class="field">
+      <!-- Image size — hidden in variant mode, where the latent carries the
+           source's own size and there is nothing to choose. -->
+      <div class="field" id="size-field">
         <label>Image Size</label>
         <div class="size-grid">
           <button class="size-btn active" onclick="setSize(1024,1024,this)">
@@ -509,6 +607,18 @@
   </main>
 </div>
 
+<!-- Source picker (variant mode) — single select, styles live in shared.css -->
+<div id="picker-modal">
+  <div class="picker-header">
+    <button class="back-btn" onclick="closePicker()">✕</button>
+    <h2>Quellbild wählen</h2>
+  </div>
+  <div class="picker-search">
+    <input type="search" id="picker-search" placeholder="Prompt durchsuchen…" autocomplete="off">
+  </div>
+  <div id="picker-grid"></div>
+</div>
+
 <div id="toast"></div>
 
 <script src="/shared/shared.js"></script>
@@ -524,6 +634,7 @@ const CONFIG = {
   maxBatchMin: 1,
   wsReconnectDelay: 3500,
   defaultSize: { width: 1024, height: 1024 },
+  pickerLimit: 60,
 };
 
 const DOM_IDS = {
@@ -551,10 +662,22 @@ const DOM_IDS = {
   shareInstagramBtn: 'share-instagram-btn',
   modeDirectBtn: 'mode-direct',
   modeEnhanceBtn: 'mode-enhance',
+  modeVariantBtn: 'mode-variant',
   modelZimageBtn: 'model-zimage',
   modelSdxlBtn: 'model-sdxl',
   modelErnieBtn: 'model-ernie',
   loraField: 'lora-field',
+  sizeField: 'size-field',
+  variantPanel: 'variant-panel',
+  srcCard: 'src-card',
+  denoise: 'denoise',
+  denoiseVal: 'denoise-val',
+  denoiseBand: 'denoise-band',
+  denoiseZone: 'denoise-zone',
+  denoiseEffect: 'denoise-effect',
+  pickerModal: 'picker-modal',
+  pickerGrid: 'picker-grid',
+  pickerSearch: 'picker-search',
   negativePromptField: 'negative-prompt-field',
   negativePrompt: 'negative-prompt',
   enhanceReview: 'enhance-review',
@@ -598,9 +721,22 @@ const state = {
   //   mode='enhance' → idea text → POST /api/prompts/enhance → review list → POST /api/generate{prompts}
   // enhancePhase tracks where the enhance flow is: 'idea' (enter idea, button reads "Enhance prompts")
   //                                                'review' (cards visible, button reads "Generate N images")
+  //   mode='variant' → pick a source image → its prompt is loaded into the
+  //                    textarea (editable) → POST /api/generate{source_image_id,
+  //                    denoise}: batch_count variants of that one picture.
   mode: 'direct',
   enhancePhase: 'idea',
   enhancedPrompts: [],  // [{style, name, prompt, selected: true}, ...] (+negative_prompt for model='sdxl')
+  // Variant mode. `sourcePrompt` is kept verbatim so the UI can tell whether
+  // the textarea still holds the source's own prompt — that decides which
+  // denoise band is the right one to recommend, and it is also what the
+  // "Prompt zurücksetzen" button puts back.
+  variantSource: null,     // the picked image row from /api/images
+  sourcePrompt: '',
+  denoise: 0.40,
+  denoiseOptions: null,    // GET /api/variant/options — the SSOT for the ranges
+  pickerImages: [], pickerSearch: '', pickerPage: 0,
+  pickerLoading: false, pickerDone: false,
   // Generator model: 'zimage' (Z-Image Turbo, ignores negative prompts) or
   // 'sdxl' (ArtiVision XL, active negative prompt + native-res hires-fix).
   // Drives which LoRA registry /api/loras returns and which enhancer
@@ -839,6 +975,7 @@ const onBatchDone = (onComplete) => {
 
 // Main button dispatcher — what "generate" means depends on mode + phase.
 const generate = async () => {
+  if (state.mode === 'variant') return generateVariant();
   if (state.mode === 'enhance' && state.enhancePhase === 'idea') return enhance();
   if (state.mode === 'enhance' && state.enhancePhase === 'review') return generateFromPrompts();
   return generateDirect();
@@ -946,6 +1083,232 @@ const startGenerationRequest = async (extra) => {
   }
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// VARIANT MODE — re-diffuse an existing picture into variants of itself
+// ═══════════════════════════════════════════════════════════════════════════
+
+// The ranges are the server's to define: they were measured off this exact
+// workflow (services/comfy/zimage.py), so hardcoding them here would let the
+// slider drift away from the sampler it is steering.
+const loadDenoiseOptions = async () => {
+  try {
+    const r = await apiFetch('/api/variant/options');
+    state.denoiseOptions = await r.json();
+  } catch (e) {
+    console.error('Failed to load variant options:', e);
+  }
+};
+
+const norm = (s) => (s || '').trim().split(/\s+/).join(' ');
+
+/** Does the textarea still hold the source's own prompt? Decides which of the
+ *  two recommended bands applies — an edited prompt needs materially more
+ *  denoise before it survives the source latent at all. */
+const promptWasChanged = () =>
+  !!state.variantSource && norm($(DOM_IDS.prompt).value) !== norm(state.sourcePrompt);
+
+const activeDenoiseBand = () => {
+  const o = state.denoiseOptions;
+  if (!o) return null;
+  return promptWasChanged() ? o.edited : o.kept;
+};
+
+/** Repaint value, band name, recommended zone and effect line together —
+ *  they are one readout and must never disagree. */
+const renderDenoise = () => {
+  const o = state.denoiseOptions;
+  setText(DOM_IDS.denoiseVal, state.denoise.toFixed(2));
+  if (!o) return;
+
+  const rec = activeDenoiseBand();
+  const span = o.denoise_max - o.denoise_min;
+  const zone = $(DOM_IDS.denoiseZone);
+  zone.style.left  = ((rec.recommended_min - o.denoise_min) / span * 100).toFixed(1) + '%';
+  zone.style.width = ((rec.recommended_max - rec.recommended_min) / span * 100).toFixed(1) + '%';
+
+  const inZone = state.denoise >= rec.recommended_min && state.denoise <= rec.recommended_max;
+  const band = o.bands.find(b => state.denoise < b.to) || o.bands[o.bands.length - 1];
+  const bandEl = $(DOM_IDS.denoiseBand);
+  bandEl.textContent = band ? `· ${band.band}` : '';
+  bandEl.classList.toggle('rec', inZone);
+
+  const effectEl = $(DOM_IDS.denoiseEffect);
+  effectEl.innerHTML = '';
+  effectEl.append(band ? band.effect : '', document.createElement('br'));
+
+  if (inZone) {
+    const strong = document.createElement('b');
+    strong.textContent = 'Empfohlen für diesen Fall. ';
+    effectEl.append(strong, rec.hint);
+  } else {
+    // Out of band: say so and offer the jump, rather than leaving the handle
+    // stranded where the previous recommendation used to be.
+    effectEl.append(rec.hint + ' ');
+    const jump = document.createElement('button');
+    jump.type = 'button';
+    jump.className = 'dn-jump';
+    jump.textContent = `→ ${rec.recommended_min.toFixed(2)}–${rec.recommended_max.toFixed(2)} übernehmen`;
+    jump.onclick = snapDenoiseToRecommended;
+    effectEl.append(jump);
+  }
+};
+
+const onDenoiseInput = () => {
+  state.denoise = parseInt($(DOM_IDS.denoise).value, 10) / 100;
+  renderDenoise();
+};
+
+/** Jump the slider to the middle of whichever band currently applies. Called
+ *  when a source is picked, and offered as a button once the prompt is edited
+ *  (where the old value is usually too low to do anything). */
+const snapDenoiseToRecommended = () => {
+  const rec = activeDenoiseBand();
+  if (!rec) return;
+  state.denoise = rec.default;
+  $(DOM_IDS.denoise).value = String(Math.round(rec.default * 100));
+  renderDenoise();
+};
+
+const renderSourceCard = () => {
+  const card = $(DOM_IDS.srcCard);
+  const img = state.variantSource;
+  if (!img) {
+    card.className = 'src-card empty';
+    card.onclick = openPicker;
+    card.textContent = '+ Bild wählen';
+    return;
+  }
+  card.className = 'src-card';
+  card.onclick = null;
+  card.innerHTML = '';
+
+  const thumb = document.createElement('img');
+  thumb.src = withAuth(img.thumb_url);
+  thumb.alt = '';
+
+  const meta = document.createElement('div');
+  meta.className = 'src-meta';
+  const dim = document.createElement('div');
+  dim.className = 'dim';
+  dim.textContent = `${img.width || '?'} × ${img.height || '?'}`;
+  const sub = document.createElement('div');
+  sub.className = 'sub';
+  sub.textContent = promptWasChanged()
+    ? 'Prompt geändert'
+    : 'Prompt übernommen — unten frei editierbar';
+  meta.append(dim, sub);
+
+  const actions = document.createElement('div');
+  actions.className = 'src-actions';
+  const swap = document.createElement('button');
+  swap.type = 'button';
+  swap.textContent = 'Wechseln';
+  swap.onclick = openPicker;
+  const reset = document.createElement('button');
+  reset.type = 'button';
+  reset.textContent = 'Prompt zurück';
+  reset.disabled = !promptWasChanged();
+  reset.onclick = resetVariantPrompt;
+  actions.append(swap, reset);
+
+  card.append(thumb, meta, actions);
+};
+
+const resetVariantPrompt = () => {
+  $(DOM_IDS.prompt).value = state.sourcePrompt;
+  onPromptInput();
+};
+
+/** Adopt a picked image: its prompt goes into the textarea, its LoRA stack
+ *  becomes the active one (a variant of a LoRA'd picture wants the same
+ *  LoRAs), and the slider lands in the band that fits. */
+const setVariantSource = (img) => {
+  state.variantSource = img;
+  state.sourcePrompt = img.prompt || '';
+  $(DOM_IDS.prompt).value = state.sourcePrompt;
+  onPromptInput();
+
+  // Only LoRAs the current registry still knows — the source may predate a
+  // library change, and a missing file would fail the whole submission.
+  const known = new Set(loraRegistry.list.map(l => l.filename));
+  const fromSource = (img.loras || []).filter(l => known.has(l.name));
+  if (fromSource.length) {
+    state.activeLoras = new Set(fromSource.map(l => l.name));
+    fromSource.forEach(l => { state.loraStrengths[l.name] = l.strength; });
+    renderLoraState();
+  }
+
+  snapDenoiseToRecommended();
+  renderSourceCard();
+  updateGenButton();
+};
+
+const generateVariant = async () => {
+  if (!state.variantSource) { ArtRium.toast('Bitte zuerst ein Quellbild wählen.'); return; }
+  const promptText = $(DOM_IDS.prompt).value.trim();
+  if (!promptText) { ArtRium.toast('Please enter a prompt.'); return; }
+  if (!wsConn.ready) { ArtRium.toast('Not connected yet — please wait.'); return; }
+
+  state.batchTotal = state.batchCount;
+  state.doneCount = 0;
+
+  await startGenerationRequest({
+    prompt: promptText,
+    batch_count: state.batchCount,
+    source_image_id: state.variantSource.id,
+    denoise: state.denoise,
+  });
+};
+
+// ── Source picker (single select) ──────────────────────────────────────────
+
+const openPicker = () => {
+  $(DOM_IDS.pickerModal).classList.add('show');
+  if (!state.pickerImages.length) loadPickerImages(true);
+};
+
+const closePicker = () => $(DOM_IDS.pickerModal).classList.remove('show');
+
+const loadPickerImages = async (reset = false) => {
+  if (state.pickerLoading) return;
+  if (!reset && state.pickerDone) return;
+  if (reset) {
+    state.pickerImages = []; state.pickerPage = 0; state.pickerDone = false;
+    $(DOM_IDS.pickerGrid).innerHTML = '';
+  }
+  state.pickerLoading = true;
+  const offset = state.pickerPage * CONFIG.pickerLimit;
+  const search = state.pickerSearch ? `&search=${encodeURIComponent(state.pickerSearch)}` : '';
+  try {
+    const r = await apiFetch(`/api/images?limit=${CONFIG.pickerLimit}&offset=${offset}${search}`);
+    const imgs = await r.json();
+    if (imgs.length < CONFIG.pickerLimit) state.pickerDone = true;
+    state.pickerPage++;
+    state.pickerImages.push(...imgs);
+    appendPickerCells(imgs);
+  } catch (e) {
+    ArtRium.toast('Bilder konnten nicht geladen werden.', true);
+  } finally {
+    state.pickerLoading = false;
+  }
+};
+
+const appendPickerCells = (imgs) => {
+  const grid = $(DOM_IDS.pickerGrid);
+  for (const img of imgs) {
+    const cell = document.createElement('div');
+    cell.className = 'picker-cell';
+    cell.dataset.id = img.id;
+    const pic = document.createElement('img');
+    pic.src = withAuth(img.thumb_url);
+    pic.alt = '';
+    cell.appendChild(pic);
+    // Single select: picking one is the whole interaction, so it closes.
+    cell.onclick = () => { setVariantSource(img); closePicker(); };
+    grid.appendChild(cell);
+  }
+};
+
 // ── Mode + enhance review ──────────────────────────────────────────────────
 
 /** Trigger words of every currently-active LoRA, joined for the prompt prefix. */
@@ -1017,6 +1380,11 @@ const setModel = async (model) => {
 
 const setMode = (mode) => {
   if (mode === state.mode) return;
+  // Variants run Z-Image Turbo's own img2img graph; the other two models have
+  // no equivalent, so entering the mode moves the model with it rather than
+  // letting the pair drift into a combination the server would reject.
+  if (mode === 'variant' && state.model !== 'zimage') setModel('zimage');
+
   state.mode = mode;
   state.enhancePhase = 'idea';
   state.enhancedPrompts = [];
@@ -1024,12 +1392,24 @@ const setMode = (mode) => {
   // Toggle buttons
   $(DOM_IDS.modeDirectBtn).classList.toggle('active', mode === 'direct');
   $(DOM_IDS.modeEnhanceBtn).classList.toggle('active', mode === 'enhance');
+  $(DOM_IDS.modeVariantBtn).classList.toggle('active', mode === 'variant');
+  [DOM_IDS.modelSdxlBtn, DOM_IDS.modelErnieBtn].forEach(id => {
+    $(id).disabled = mode === 'variant';
+  });
+  $(DOM_IDS.variantPanel).classList.toggle('show', mode === 'variant');
+  // The latent carries the source's size — there is nothing left to choose.
+  $(DOM_IDS.sizeField).classList.toggle('hidden', mode === 'variant');
   updateNegativePromptVisibility();
 
+  if (mode === 'variant') {
+    renderSourceCard();
+    renderDenoise();
+  }
+
   // Field decorations + trigger handling:
-  //   direct  → prompt textarea owns the trigger at position 0
-  //   enhance → idea text must NOT contain the trigger (Qwen would treat
-  //             it as a literal noun); we strip it on entry, re-add on exit.
+  //   direct/variant → prompt textarea owns the trigger at position 0
+  //   enhance        → idea text must NOT contain the trigger (Qwen would treat
+  //                    it as a literal noun); we strip it on entry, re-add on exit.
   const promptEl = $(DOM_IDS.prompt);
   const trigger = combinedTrigger();
 
@@ -1042,8 +1422,10 @@ const setMode = (mode) => {
       promptEl.value = promptEl.value.slice(trigger.length).replace(/^[\s,]+/, '');
     }
   } else {
-    setText(DOM_IDS.promptLabel, 'Prompt');
-    promptEl.placeholder = 'Describe your image…';
+    setText(DOM_IDS.promptLabel, mode === 'variant' ? 'Prompt vom Quellbild' : 'Prompt');
+    promptEl.placeholder = mode === 'variant'
+      ? 'Wird beim Wählen des Quellbilds gefüllt — hier frei änderbar…'
+      : 'Describe your image…';
     promptEl.maxLength = CONFIG.maxPromptLength;
     setText(DOM_IDS.charLimit, String(CONFIG.maxPromptLength));
     if (trigger && !promptEl.value.startsWith(trigger)) {
@@ -1120,6 +1502,14 @@ const updateGenButton = () => {
     btn.textContent = 'Generate';
     return;
   }
+  if (state.mode === 'variant') {
+    const n = state.batchCount;
+    btn.textContent = state.variantSource
+      ? `${n} Variante${n === 1 ? '' : 'n'} erzeugen`
+      : 'Quellbild wählen';
+    btn.disabled = !state.variantSource;
+    return;
+  }
   if (state.enhancePhase === 'idea') {
     btn.textContent = 'Enhance prompts';
     return;
@@ -1181,6 +1571,12 @@ const saveImage = async (url, filename) => {
 
 const onPromptInput = () => {
   setText(DOM_IDS.charCount, $(DOM_IDS.prompt).value.length);
+  // Editing the prompt moves the recommended denoise band, so the slider's
+  // advice has to follow the keystrokes rather than the submit.
+  if (state.mode === 'variant' && state.variantSource) {
+    renderSourceCard();
+    renderDenoise();
+  }
 };
 
 const toggleAdv = () => {
@@ -1197,6 +1593,7 @@ const setSize = (w, h, btn) => {
 const setBatch = (n, btn) => {
   state.batchCount = n;
   selectButton('.batch-btn', btn);
+  if (state.mode === 'variant') updateGenButton();
 };
 
 // LoRA registry — populated by buildLoraList() from GET /api/loras
@@ -1205,20 +1602,39 @@ const loraRegistry = {
   triggerOf: (filename) => (loraRegistry.list.find(l => l.filename === filename) || {}).trigger || '',
 };
 
+// Direct and Variant both keep the *final* prompt in the textarea, so the
+// LoRA trigger words belong at position 0 in either. Enhance keeps an idea
+// there instead, which the trigger must stay out of.
+const isPromptMode = () => state.mode === 'direct' || state.mode === 'variant';
+
+// Push state.activeLoras / state.loraStrengths back into the already-built
+// LoRA rows, without refetching the registry — used when a variant source
+// brings its own LoRA stack along.
+const renderLoraState = () => {
+  loraRegistry.list.forEach((l, i) => {
+    const item = $(`lora-item-${i}`);
+    if (!item) return;
+    item.classList.toggle('active', state.activeLoras.has(l.filename));
+    const slider = item.querySelector('input[type=range]');
+    const strength = state.loraStrengths[l.filename];
+    if (slider && strength !== undefined) {
+      slider.value = String(strength);
+      setText(`lora-strength-val-${i}`, strength.toFixed(2));
+    }
+  });
+};
+
 // Toggle one LoRA on/off. Several can be active at once — each carries its
 // own strength, applied as a chain in the order they were switched on.
 const toggleLora = (filename, i) => {
-  // Direct mode: massage the prompt textarea so the trigger word(s) live at
-  // position 0. Enhance mode: the textarea holds the idea, not the final
-  // prompt — leave it alone and re-render the review cards instead.
-  const oldPrefix = state.mode === 'direct' ? combinedTrigger() : null;
+  const oldPrefix = isPromptMode() ? combinedTrigger() : null;
 
   if (state.activeLoras.has(filename)) state.activeLoras.delete(filename);
   else state.activeLoras.add(filename);
 
   $(`lora-item-${i}`).classList.toggle('active', state.activeLoras.has(filename));
 
-  if (state.mode === 'direct') {
+  if (isPromptMode()) {
     const promptEl = $(DOM_IDS.prompt);
     promptEl.value = swapTriggerPrefix(promptEl.value, oldPrefix, combinedTrigger());
     onPromptInput();
@@ -1339,10 +1755,30 @@ const buildLoraList = async () => {
   });
 };
 
+/** `?variant=<image_id>` — the gallery's "Varianten" button lands here with a
+ *  picture already chosen, so the tool opens in variant mode on that image
+ *  instead of making the user find it again in the picker. */
+const applyVariantDeepLink = async () => {
+  const id = new URLSearchParams(location.search).get('variant');
+  if (!id) return;
+  setMode('variant');
+  try {
+    const r = await apiFetch(`/api/images/${encodeURIComponent(id)}`);
+    setVariantSource(await r.json());
+  } catch (e) {
+    ArtRium.toast('Quellbild konnte nicht geladen werden.', true);
+  }
+  // Drop the param so a reload does not re-pick over a changed selection.
+  history.replaceState(null, '', location.pathname);
+};
+
 window.addEventListener('load', async () => {
   buildBatchRow();
   buildHeaderButtons();
   await buildLoraList();
+  // Awaited: the deep link below snaps the slider into the recommended band,
+  // which needs the ranges to already be here.
+  await loadDenoiseOptions();
   state.generatedImages = storage.loadImages();
   gallery.render();
 
@@ -1352,6 +1788,19 @@ window.addEventListener('load', async () => {
     promptEl.value = combinedTrigger();
     onPromptInput();
   }
+
+  let _pickerSearchTimer;
+  $(DOM_IDS.pickerSearch).addEventListener('input', (e) => {
+    clearTimeout(_pickerSearchTimer);
+    state.pickerSearch = e.target.value;
+    _pickerSearchTimer = setTimeout(() => loadPickerImages(true), 350);
+  });
+  $(DOM_IDS.pickerGrid).addEventListener('scroll', () => {
+    const el = $(DOM_IDS.pickerGrid);
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 80) loadPickerImages(false);
+  });
+
+  await applyVariantDeepLink();
 
   wsConn = ArtRium.connectWs({
     clientId:      state.clientId,

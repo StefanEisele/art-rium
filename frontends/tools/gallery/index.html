@@ -840,6 +840,20 @@
       <div class="fx-hint" id="upscale-hint"></div>
     </div>
 
+    <!-- Varianten — the only pass here that makes *new* pictures rather than
+         another rendition of this one, so it hands off to the generator tool
+         instead of running in the gallery. -->
+    <div>
+      <div class="section-label fx-head"><span>Varianten</span></div>
+      <div class="fx-row">
+        <button class="wand-btn" id="variant-btn" onclick="openVariants()"
+                title="Varianten dieses Bildes erzeugen">⧉</button>
+      </div>
+      <div class="fx-hint">
+        Öffnet z-Image mit diesem Bild als Latent — Prompt übernommen und änderbar.
+      </div>
+    </div>
+
     <!-- Title -->
     <div>
       <div class="section-label">Title</div>
@@ -1800,6 +1814,15 @@ const initUpscaleControls = () => {
 // overlay on the title field so a title can be picked without leaving the
 // image being looked at.
 const titlerState = { imageId: null, busy: false };
+
+// Hand off to the generator tool with this image pre-picked. Not an in-gallery
+// pass: it produces new Image rows of its own, so it belongs where generation
+// already lives, with the batch, LoRA and progress machinery it needs.
+const openVariants = () => {
+  const img = state.modal.image;
+  if (!img) return;
+  location.href = `/tools/z-image/?variant=${encodeURIComponent(img.id)}`;
+};
 
 const openTitler = () => {
   const img = state.modal.image;

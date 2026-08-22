@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import random
 import re
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import require_auth, ws_auth_ok
 from core.comfy import ARTIVISION_WORKFLOW_NAME, ERNIE_WORKFLOW_NAME
 from core.comfy import WORKFLOW_NAME as ZIMAGE_WORKFLOW_NAME
-from core.comfy import post_prompt
+from core.comfy import ZIMAGE_VARIANT_WORKFLOW_NAME, post_prompt
 from core.config import settings
 from core.db import get_db
 from core.loras import (
@@ -28,9 +29,12 @@ from core.loras import (
 )
 from core.models import Image
 from core.thumbnail import make_thumbnail, thumb_rel_path
+from services.comfy import zimage as zimage_service
 from services.comfy.artivision import build_artivision_workflow
+from services.comfy.client import upload_image
 from services.comfy.ernie import build_ernie_workflow
-from services.comfy.zimage import build_zimage_workflow
+from services.comfy.zimage import build_zimage_variant_workflow, build_zimage_workflow
+from services.image.rendition import original_path
 
 # Models with no LoRA in the library yet — /api/loras returns an empty
 # catalogue and /api/generate skips LoRA resolution entirely for these.
@@ -59,6 +63,12 @@ class GenerateRequest(BaseModel):
     # None/omitted = that model's single default LoRA (resolved server-side).
     # Z-Image chains every entry; SDXL/Ernie only ever use the first one.
     loras: list[LoraSelection] | None = None
+    # ── Variant mode (Z-Image Turbo only) ───────────────────────────────────
+    # When set, the batch starts from this image's latent instead of from
+    # noise: every prompt in the batch becomes a variant of the same picture.
+    # `width`/`height` are then ignored — the latent carries the source's size.
+    source_image_id: uuid.UUID | None = None
+    denoise: float | None = None  # variant only; clamped server-side
 
 
 class EnhancePromptsRequest(BaseModel):
@@ -85,10 +95,72 @@ async def list_loras(model: str = "zimage"):
     return {"loras": LORAS, "default": DEFAULT_LORA}
 
 
+def _prompt_was_changed(prompts: list[str], source_prompt: str | None) -> bool:
+    """Did the user edit the prompt they were handed, or run the source's own?
+
+    Decided here rather than trusted from a client flag: it picks the default
+    denoise, and getting it wrong is the difference between an edit landing and
+    being silently overruled by the latent (see services/comfy/zimage.py).
+    Whitespace-insensitive, because the textarea round-trip adds and eats it.
+    """
+    original = " ".join((source_prompt or "").split())
+    return any(" ".join(p.split()) != original for p in prompts)
+
+
+async def _resolve_variant_source(
+    image_id: uuid.UUID, db: AsyncSession,
+) -> tuple[Path, int, int, str]:
+    """(file to encode, output width, output height, the source's own prompt).
+
+    The *original* rendition, always — never the upscale, the wand or the
+    grain. That is the rule the whole project follows for anything a model
+    reads (services/image/rendition.py), and here it is also what keeps the
+    job finishable: the variant KSampler works on the whole latent at once, so
+    a 4x upscale as source would be sixteen times the area of the canvas
+    Z-Image is distilled for.
+    """
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Source image not found")
+
+    src = original_path(img)
+    if not src.is_file():
+        raise HTTPException(status_code=404, detail="Source image missing on disk")
+
+    width, height = img.width or 0, img.height or 0
+    if width <= 0 or height <= 0:
+        # Pre-metadata rows exist; the file itself is the fallback authority.
+        width, height = await asyncio.to_thread(_png_size, src)
+
+    out_w, out_h = zimage_service.latent_size(width, height)
+    return src, out_w, out_h, img.prompt or ""
+
+
+def _png_size(path: Path) -> tuple[int, int]:
+    from PIL import Image as PILImage
+
+    with PILImage.open(path) as im:
+        return im.width, im.height
+
+
 @router.post("/api/generate", dependencies=[Depends(require_auth)])
-async def generate(req: GenerateRequest, request: Request):
+async def generate(
+    req: GenerateRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     is_sdxl = req.model == "sdxl"
     is_ernie = req.model == "ernie"
+    is_variant = req.source_image_id is not None
+
+    # The variant graph is Z-Image Turbo's own; SDXL and Ernie have no
+    # img2img path here, and silently ignoring the source image would produce
+    # a plain generation the user did not ask for.
+    if is_variant and req.model != "zimage":
+        raise HTTPException(
+            status_code=400,
+            detail="Variants are Z-Image Turbo only — switch the model to zimage.",
+        )
 
     # Resolve the prompt list — either one-prompt × batch_count (classic mode)
     # or an explicit list of N distinct prompts (enhancer mode).
@@ -118,6 +190,30 @@ async def generate(req: GenerateRequest, request: Request):
                 raise HTTPException(status_code=400, detail=f"Unknown LoRA: {sel.name}")
         loras = [{"name": sel.name, "strength": sel.strength} for sel in selections]
 
+    # Variant mode: hand the source to ComfyUI once, then every prompt in the
+    # batch encodes the same uploaded file. The size the images come back at
+    # is the source's, cropped to the VAE's multiple of 8 — the DB rows have
+    # to carry that rather than whatever the client had in its size grid.
+    source_name = None
+    out_width, out_height = req.width, req.height
+    denoise, prompt_changed = zimage_service.DENOISE_DEFAULT, False
+    if is_variant:
+        src, out_width, out_height, source_prompt = await _resolve_variant_source(
+            req.source_image_id, db,
+        )
+        prompt_changed = _prompt_was_changed(prompt_list, source_prompt)
+        denoise = zimage_service.clamp_denoise(req.denoise, prompt_changed=prompt_changed)
+        async with httpx.AsyncClient(timeout=120) as client:
+            try:
+                source_name = await upload_image(
+                    client, src, f"artrium_var_{req.source_image_id.hex[:10]}.png",
+                )
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Could not hand the source image to ComfyUI: {exc}",
+                )
+
     listener = request.app.state.comfy_listener
     total = len(prompt_list)
     batch_id = str(uuid.uuid4())
@@ -125,7 +221,12 @@ async def generate(req: GenerateRequest, request: Request):
 
     for i, prompt_text in enumerate(prompt_list):
         seed = (req.seed + i) if req.seed >= 0 else random.randint(0, 2**32 - 1)
-        if is_sdxl:
+        if is_variant:
+            workflow = build_zimage_variant_workflow(
+                source_name, prompt_text, seed, denoise, loras,
+            )
+            workflow_name = ZIMAGE_VARIANT_WORKFLOW_NAME
+        elif is_sdxl:
             workflow = build_artivision_workflow(
                 prompt_text, negative_list[i], seed, req.width, req.height,
                 loras[0]["name"], loras[0]["strength"],
@@ -152,19 +253,58 @@ async def generate(req: GenerateRequest, request: Request):
             batch_id=batch_id,
             prompt_text=prompt_text,
             seed=seed,
-            width=req.width,
-            height=req.height,
+            width=out_width,
+            height=out_height,
             loras=loras,
             workflow_name=workflow_name,
         )
-        # Node ids differ per model (Z-Image / SDXL / Ernie), so the stage
-        # names shown while this prompt runs are derived from the workflow
-        # actually submitted rather than guessed client-side.
+        # Node ids differ per model (Z-Image / SDXL / Ernie / variant), so the
+        # stage names shown while this prompt runs are derived from the
+        # workflow actually submitted rather than guessed client-side.
         listener.register_node_labels(prompt_id, workflow)
         prompt_ids.append(prompt_id)
         logger.info(f"Queued [{i+1}/{total}] prompt={prompt_id}")
 
-    return {"batch_id": batch_id, "prompt_ids": prompt_ids, "batch_count": total}
+    response = {"batch_id": batch_id, "prompt_ids": prompt_ids, "batch_count": total}
+    if is_variant:
+        # The client's size grid was ignored — say what it actually gets.
+        response |= {
+            "width": out_width,
+            "height": out_height,
+            "prompt_changed": prompt_changed,
+            **zimage_service.describe_denoise(denoise, prompt_changed=prompt_changed),
+        }
+    return response
+
+
+@router.get("/api/variant/options", dependencies=[Depends(require_auth)])
+async def variant_options():
+    """The denoise range for Z-Image Turbo variants, and what each part of it
+    does.
+
+    Server-side because the numbers are a property of this workflow — they were
+    measured off it (see services/comfy/zimage.py) and would drift the moment
+    the sampler or the shift is retuned. Both recommended bands are returned:
+    which one applies depends on whether the user edited the prompt, and the
+    client knows that before it submits.
+    """
+    return {
+        "denoise_min": zimage_service.DENOISE_MIN,
+        "denoise_max": zimage_service.DENOISE_MAX,
+        "kept": {
+            "default": zimage_service.DENOISE_DEFAULT,
+            "recommended_min": zimage_service.KEPT_SWEET_MIN,
+            "recommended_max": zimage_service.KEPT_SWEET_MAX,
+            "hint": "Prompt übernommen — Varianten desselben Bildes.",
+        },
+        "edited": {
+            "default": zimage_service.DENOISE_DEFAULT_EDITED,
+            "recommended_min": zimage_service.EDITED_SWEET_MIN,
+            "recommended_max": zimage_service.EDITED_SWEET_MAX,
+            "hint": "Prompt geändert — darunter überstimmt das Quellbild die Änderung.",
+        },
+        "bands": zimage_service.denoise_bands(),
+    }
 
 
 @router.get("/api/prompts/styles", dependencies=[Depends(require_auth)])

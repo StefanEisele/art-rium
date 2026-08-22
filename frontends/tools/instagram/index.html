@@ -454,6 +454,7 @@
     .collab-input::placeholder { color: var(--text-dim); }
     .collab-input:disabled { opacity: 0.55; cursor: not-allowed; }
     .collab-hint { font-size: 12px; color: var(--text-dim); margin-top: 5px; }
+    .collab-warning { font-size: 12px; color: #d08a2e; margin-top: 4px; }
 
     /* Offset scheduling row */
     .schedule-row {
@@ -865,6 +866,11 @@
                placeholder="Collaborators — @username, @username">
         <div class="delay-chips collab-chip-row" id="collab-chips"></div>
         <div class="collab-hint">Up to 3 public accounts, invited as co-authors. They must accept before the post shows on their profile. Not available on stories.</div>
+        <!-- Shown only while the field is empty. A cloud-scheduled post reaches
+             the Pi within seconds of being created and the collaborators are
+             baked into the container there, so this is genuinely the last
+             moment they can be set. -->
+        <div class="collab-warning" id="collab-warning">Keine Coop-Partner — nach dem Anlegen nicht mehr änderbar.</div>
       </div>
 
       <!-- Offset scheduling -->
@@ -2309,6 +2315,9 @@ async function schedulePost() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
+    // Only after the post is accepted: a rejected one should not change what
+    // the next form comes up with.
+    rememberCollaborators(collaborators);
     if (state.mode === 'reel') {
       ArtRium.toast(`Reel (${state.selectedReelVideos.length} clip${state.selectedReelVideos.length > 1 ? 's' : ''}) scheduled ✓`);
     } else {
@@ -2333,8 +2342,10 @@ async function schedulePost() {
     state.frameRatio = 'auto';
     $('picker-grid').innerHTML = '';
     $('caption-input').value = '';
-    $('collab-input').value = '';
-    syncCollabChips('collab-chips', '');
+    // Carried over rather than cleared — see COLLAB_MEMORY_KEY. The partners
+    // are the same from post to post, and the one time they were not carried
+    // over is the one time the post went out without them.
+    restoreCollaborators();
     _syncChips('reel-chips', null);
     _syncChips('story-chips', null);
     $('companion-time-input').value = '18:23';
@@ -2758,7 +2769,45 @@ function formatCollaborators(list) {
 // Quick-pick chips for accounts we tag often. Clicking a chip toggles that
 // username in the input (respecting the same 3-max / de-dupe rules as free
 // typing); typing manually keeps the chips in sync via the 'input' listener.
-const COLLAB_PRESETS = ['iiii.ai', 'epicworldaiart', 'art.ai.future', 'aicccreatorshub', 'echoesmag.ai'];
+// Corrected 2026-08-22: this list said 'iiii.ai', which has never appeared on
+// a published post. Every post that carries this partner carries 'iiiil.ai'
+// (four i's, then an l) and Instagram reports it as Accepted, so the chip was
+// inviting an account that either does not exist or is not the intended one.
+const COLLAB_PRESETS = ['iiiil.ai', 'epicworldaiart', 'art.ai.future', 'aicccreatorshub', 'echoesmag.ai'];
+
+// Collaborators are the same handful of partners on almost every post, and the
+// window to set them is tiny: a cloud-scheduled post is handed to the Pi within
+// seconds of being created, and from then on the container is built there and
+// the field is read-only. An empty box that had to be refilled from memory
+// every single time was the whole failure — the last post went out with none
+// because the box was simply not filled in again.
+const COLLAB_MEMORY_KEY = 'artrium.ig.collaborators';
+
+function rememberCollaborators(list) {
+  try {
+    if (list && list.length) localStorage.setItem(COLLAB_MEMORY_KEY, formatCollaborators(list));
+    else localStorage.removeItem(COLLAB_MEMORY_KEY);
+  } catch (e) { /* private mode — the prefill is a convenience, not state */ }
+}
+
+function rememberedCollaborators() {
+  try { return localStorage.getItem(COLLAB_MEMORY_KEY) || ''; } catch (e) { return ''; }
+}
+
+/** Prefill the create form from the last post's partners. */
+function restoreCollaborators() {
+  $('collab-input').value = rememberedCollaborators();
+  syncCollabChips('collab-chips', $('collab-input').value);
+  updateCollabWarning();
+}
+
+// Says out loud what cannot be undone later, and only while it is still true.
+function updateCollabWarning() {
+  const el = $('collab-warning');
+  if (!el) return;
+  const empty = parseCollaborators($('collab-input').value).length === 0;
+  el.style.display = empty ? '' : 'none';
+}
 
 function renderCollabChips(chipsId, inputId) {
   $(chipsId).innerHTML = COLLAB_PRESETS.map(u =>
@@ -2791,11 +2840,16 @@ function toggleCollabPreset(inputId, chipsId, btnEl) {
   }
   input.value = formatCollaborators(list);
   syncCollabChips(chipsId, input.value);
+  if (inputId === 'collab-input') updateCollabWarning();
 }
 
 renderCollabChips('collab-chips', 'collab-input');
 renderCollabChips('detail-collab-chips', 'detail-collab');
-$('collab-input').addEventListener('input', () => syncCollabChips('collab-chips', $('collab-input').value));
+$('collab-input').addEventListener('input', () => {
+  syncCollabChips('collab-chips', $('collab-input').value);
+  updateCollabWarning();
+});
+restoreCollaborators();
 $('detail-collab').addEventListener('input', () => syncCollabChips('detail-collab-chips', $('detail-collab').value));
 
 // ── Init ──────────────────────────────────────────────────────────────────────

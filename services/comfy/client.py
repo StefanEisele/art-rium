@@ -35,11 +35,34 @@ async def upload_image(client: httpx.AsyncClient, filepath: Path, name: str) -> 
     return r.json()["name"]
 
 
-async def post_workflow(client: httpx.AsyncClient, workflow: dict) -> str:
-    """Submit a workflow to ComfyUI's /prompt endpoint, return the prompt_id."""
+async def post_workflow(
+    client: httpx.AsyncClient, workflow: dict, client_id: str | None = None,
+) -> str:
+    """Submit a workflow to ComfyUI's /prompt endpoint, return the prompt_id.
+
+    The submission carries the listener's `client_id`, and that is not
+    cosmetic. ComfyUI routes execution events to the session that submitted the
+    prompt — `server.send_sync("executing", …, server.client_id)` in
+    execution.py — so a prompt posted without one leaves the listener with no
+    `executing` or `progress` events for it at all. Every caller here registers
+    node labels and expects `GET …/progress` to read out ComfyUI's live stage;
+    without the id those readouts stay empty for the whole render, which is
+    exactly what a multi-minute job can least afford.
+    """
+    if client_id is None:
+        # Imported here: workers.comfy_listener pulls in services.comfy.ingest,
+        # and a module-level import back the other way would close the loop.
+        from workers.comfy_listener import get_listener
+
+        listener = get_listener()
+        client_id = listener.client_id if listener else None
+
+    payload: dict = {"prompt": workflow}
+    if client_id:
+        payload["client_id"] = client_id
     r = await client.post(
         f"http://{settings.comfyui_host}/prompt",
-        json={"prompt": workflow},
+        json=payload,
         timeout=30,
     )
     if r.status_code != 200:

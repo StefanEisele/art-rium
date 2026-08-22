@@ -1,0 +1,19 @@
+{
+  "name": "Struktur",
+  "short_name": "Struktur",
+  "description": "Blender-Geometrie und ein Referenzbild werden zu einem Video",
+  "start_url": "/tools/vace/",
+  "scope": "/tools/vace/",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -9,6 +9,10 @@ song rather than discarding it — a MiniMax H3 clip's room and material stay
 audible under the music. Same idea, same levels and same filter shape as the
 improv tool's ambient bed; see services/video/audio_bed.py.
 
+`song_start` skips into the track before muxing, for a beat cut that was told
+to begin at a later bar. It is an input-level `-ss`, so the seek happens before
+decoding and the fade-out is still measured from the *video's* length.
+
 Mirrors the shape of services/improv/mux.py — single async function +
 private cmd builder + a thin _run_ffmpeg wrapper.
 """
@@ -37,6 +41,7 @@ async def mux_soundtrack(
     fade_out_seconds: float = 1.0,
     include_bed: bool = False,
     bed_volume: float = BED_VOLUME_DEFAULT,
+    song_start: float = 0.0,
 ) -> None:
     """Mux video stream from `video_path` with audio from `song_path` into
     `out_path`. Audio is trimmed to the video's duration with a fade-out of
@@ -46,6 +51,8 @@ async def mux_soundtrack(
     `bed_volume` instead of being dropped. Silently a no-op on a silent
     source — probing beats trusting the caller, since the same video can be
     silent or not depending on which workflow rendered it.
+
+    `song_start` seconds are skipped at the head of the song.
     """
     duration = await _probe_duration(video_path, ffmpeg_path=ffmpeg_path)
     fade_start = max(0.0, duration - fade_out_seconds)
@@ -54,7 +61,8 @@ async def mux_soundtrack(
     extra = {"bed_volume": clamp_bed_volume(bed_volume)} if use_bed else {}
     cmd = builder(
         ffmpeg_path, video_path, song_path, out_path,
-        fade_start=fade_start, fade_duration=fade_out_seconds, **extra,
+        fade_start=fade_start, fade_duration=fade_out_seconds,
+        song_start=max(0.0, float(song_start)), **extra,
     )
     await _run_ffmpeg(cmd, label="soundtrack_mux")
 
@@ -67,11 +75,13 @@ def _mux_cmd(
     *,
     fade_start: float,
     fade_duration: float,
+    song_start: float = 0.0,
 ) -> list[str]:
     afade = f"afade=t=out:st={fade_start:.3f}:d={fade_duration:.3f}"
     return [
         ffmpeg, "-y",
         "-i", str(video),
+        *(("-ss", f"{song_start:.3f}") if song_start > 0 else ()),
         "-i", str(song),
         "-map", "0:v:0",
         "-map", "1:a:0",
@@ -93,6 +103,7 @@ def _mux_cmd_with_bed(
     fade_start: float,
     fade_duration: float,
     bed_volume: float,
+    song_start: float = 0.0,
 ) -> list[str]:
     """Like `_mux_cmd`, but keeps the video's own audio quietly under the song.
 
@@ -109,6 +120,7 @@ def _mux_cmd_with_bed(
     return [
         ffmpeg, "-y",
         "-i", str(video),
+        *(("-ss", f"{song_start:.3f}") if song_start > 0 else ()),
         "-i", str(song),
         "-filter_complex", bed_mix_filter(
             "0:a", "1:a", bed_volume=bed_volume, tail=f"alimiter=limit=0.95,{afade}",

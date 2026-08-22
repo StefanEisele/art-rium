@@ -97,6 +97,13 @@ async def sweep_stuck_jobs() -> None:
             logger.info("Startup sweep: no orphaned jobs found")
 
 
+# routers/vace.py parks its two-stage AnimateLCM renders in status 'review'
+# between the base pass and the hires pass. Kept here as a literal rather than
+# imported, because a startup sweep importing a router would drag the whole
+# request layer into process start.
+LCM_REVIEW_WORKFLOW = "vace_control"
+
+
 async def backfill_review_clips() -> None:
     """One-time adoption of legacy status='review' video jobs into the clip
     library.
@@ -105,11 +112,24 @@ async def backfill_review_clips() -> None:
     'review' with their segments described by a sidecar meta.json. The review/
     assemble flow is gone; nothing would ever move those rows again. Import
     each job's segments as VideoClip rows (idempotent — skipped if the job
-    already has clips) and mark the job 'done'; if the sidecar or files are
-    gone, mark it failed instead of leaving it stuck.
+    already has clips) and mark the job 'done'.
+
+    **'review' means something else now.** routers/vace.py parks an AnimateLCM
+    job there on purpose, between its base pass and the hires pass, waiting for
+    the user to look at the preview and decide. Those rows must survive a
+    restart — being swept would turn "your preview is ready" into "your job
+    failed" every time the server came back. Hence the workflow filter, and
+    hence a missing sidecar now means "not mine, leave it alone" rather than
+    "failed": this backfill is a one-time adoption that has already run, so
+    there is nothing left for it to legitimately fail.
     """
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(Video).where(Video.status == "review"))
+        result = await db.execute(
+            select(Video).where(
+                Video.status == "review",
+                Video.workflow.is_distinct_from(LCM_REVIEW_WORKFLOW),
+            )
+        )
         videos = list(result.scalars().all())
         if not videos:
             return
@@ -119,9 +139,7 @@ async def backfill_review_clips() -> None:
             seg_dir = settings.videos_dir / "segments" / str(video.id)
             meta_path = seg_dir / "meta.json"
             if not meta_path.exists():
-                video.status = "failed"
-                video.error = "Legacy review job: segment metadata missing"
-                continue
+                continue        # not a legacy clip job — see the docstring
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
             except Exception as exc:

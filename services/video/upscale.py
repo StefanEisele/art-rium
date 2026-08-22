@@ -30,6 +30,8 @@ second-GPU variant of this pass to fall back on.
 """
 from __future__ import annotations
 
+import math
+
 from pathlib import Path
 
 # 3B rather than 7B: the 7B fp16 is 15.35 GB and leaves nothing for
@@ -103,6 +105,83 @@ _SECONDS_PER_OUTPUT_PIXEL_SECOND = 8.94e-5
 _RIFE_SECONDS_PER_OUTPUT_PIXEL_SECOND = 2.32e-6
 
 
+# ── Target frame rate ────────────────────────────────────────────────────────
+# Until now an interpolated upscale kept the source's frame rate, so RIFE 4x
+# turned an 8 fps clip into the same clip at 8 fps and four times the length —
+# slow motion, with the audio stretched afterwards to match. That is one use of
+# interpolation. The other, and the one people usually mean, is *the same clip,
+# played smoothly*: interpolate and raise the rate together so the duration does
+# not move.
+#
+# Which of the two happens is decided by `target_fps`. None keeps the old
+# behaviour; a number sets the output rate outright.
+FPS_PRESETS = (24, 30, 60)
+FPS_MIN, FPS_MAX = 1, 120
+
+
+def clamp_fps(value: int | float | None) -> int | None:
+    """None (keep the source rate) or a sane target. Garbage reads as None."""
+    if value is None:
+        return None
+    try:
+        return max(FPS_MIN, min(FPS_MAX, int(round(float(value)))))
+    except (TypeError, ValueError):
+        return None
+
+
+def plan_frame_rate(
+    source_fps: float | None,
+    target_fps: int | None,
+    rife_multiplier: int | None = None,
+) -> dict:
+    """Work out the interpolation factor, the rate to render at, and whether a
+    conform pass is needed afterwards.
+
+    The rule the whole thing follows: **the clip keeps its duration.** RIFE
+    multiplies the frames, so the rate has to rise by the same factor or the
+    picture turns into slow motion — which is what used to happen.
+
+    RIFE only does 2/3/4, so an arbitrary target is reached in two moves:
+    interpolate to the nearest reachable rate at or above it, then let ffmpeg
+    conform to the exact target. Dropping frames out of a denser sequence keeps
+    both the duration and the smoothness; interpolating to 32 and *writing* 24
+    would keep neither.
+
+        8 fps  -> 24:  RIFE 3x, render 24, no conform      (exact)
+        16 fps -> 24:  RIFE 2x, render 32, conform to 24
+        16 fps -> 60:  RIFE 4x, render 64, conform to 60
+    """
+    src = float(source_fps) if source_fps and source_fps > 0 else 0.0
+    target = clamp_fps(target_fps)
+
+    if target is None:
+        # No target: the old behaviour, kept because slow motion is a real use
+        # of interpolation and someone may still want it.
+        mult = clamp_rife(rife_multiplier)
+        return {
+            "rife_multiplier": mult, "render_fps": None, "target_fps": None,
+            "needs_conform": False, "duration_factor": float(mult), "exact": True,
+        }
+
+    if rife_multiplier is None:
+        wanted = target / src if src else 1.0
+        mult = clamp_rife(max(1, min(4, math.ceil(wanted - 1e-9))))
+    else:
+        mult = clamp_rife(rife_multiplier)
+
+    render = src * mult if src else float(target)
+    return {
+        "rife_multiplier": mult,
+        # What VHS writes: the true interpolated rate, so the duration holds.
+        "render_fps": round(render, 3),
+        "target_fps": target,
+        # Only when interpolation cannot land on the target exactly.
+        "needs_conform": abs(render - target) > 0.01,
+        "duration_factor": 1.0,
+        "exact": abs(render - target) < 0.01,
+    }
+
+
 def clamp_rife(value: int | float | None) -> int:
     """Interpolation factor onto the supported set. None/garbage reads as off."""
     try:
@@ -174,6 +253,7 @@ def build_upscale_workflow(
     filename_prefix: str,
     has_audio: bool,
     rife_multiplier: int = 1,
+    render_fps: float | None = None,
 ) -> tuple[dict, str]:
     """SEEDVR2 restoration of a finished mp4. Returns (workflow, save_node_id).
 
@@ -188,10 +268,15 @@ def build_upscale_workflow(
     from the loader to the muxer directly.
 
     `rife_multiplier` > 1 interpolates *after* the restoration, so SEEDVR2
-    only ever sees the source's real frames. Like the generation path, RIFE
-    lengthens the picture while VHS_VideoCombine's frame_rate stays put, so
-    the audio comes out short and the caller must re-sync it afterwards with
-    services.video.audio_stretch.stretch_audio_to_video.
+    only ever sees the source's real frames.
+
+    `render_fps` decides what the interpolation is *for*. Left None, VHS keeps
+    the source's rate and the picture comes out `rife_multiplier` times longer —
+    slow motion, and the caller must then re-sync the audio with
+    services.video.audio_stretch.stretch_audio_to_video. Set to the interpolated
+    rate (source x multiplier) the duration holds instead, and no audio fix is
+    needed. `plan_frame_rate` works out which is which, and whether an ffmpeg
+    conform pass has to follow to hit an exact target.
     """
     p = "sv_"
     wf: dict = {
@@ -266,7 +351,10 @@ def build_upscale_workflow(
         frames_node = [p+"rife", 0]
 
     wf[SAVE_NODE] = {"class_type": "VHS_VideoCombine", "inputs": {
-        "frame_rate":      [p+"info", 0],
+        # The source's own rate unless a target was asked for. Writing the
+        # target is what turns an interpolated pass from slow motion into a
+        # smooth clip of the same length.
+        "frame_rate":      render_fps if render_fps else [p+"info", 0],
         "loop_count":      0,
         "filename_prefix": filename_prefix,
         "format":          "video/h264-mp4",

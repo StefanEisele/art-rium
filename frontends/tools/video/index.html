@@ -207,14 +207,39 @@
     #merge-bar.show { transform: translateX(-50%) translateY(0); }
     #merge-bar .bar-head { display: flex; align-items: center; gap: 10px; }
     #merge-count { flex: 1; font-size: 13px; font-weight: 700; }
-    #merge-bar .bar-actions { display: flex; align-items: center; gap: 8px; }
-    #merge-bar label { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+    /* Two rows that behave as one on a wide screen and as two on a phone.
+       `margin-left: auto` is what keeps the buttons hard right at desktop
+       width, so no spacer element is needed to do it — and a spacer is exactly
+       what stopped this row from wrapping when a third button was added. */
+    #merge-bar .bar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    #merge-bar label {
+      display: flex; align-items: center; gap: 7px; font-size: 12px;
+      color: var(--text-dim); cursor: pointer;
+      flex: 1 1 170px; min-width: 0;
+    }
+    #merge-bar .bar-buttons {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      margin-left: auto; justify-content: flex-end;
+    }
     #merge-go-btn {
       padding: 9px 16px; border-radius: var(--radius-pill); border: none;
       background: var(--accent); color: var(--on-accent);
       font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit;
+      white-space: nowrap;
     }
     #merge-go-btn:disabled { opacity: 0.4; cursor: default; }
+
+    /* Phone: the checkbox takes its own line, the two secondary actions share
+       the next one, and Merge gets a full-width row of its own. It is the
+       primary action and the only one whose label grows with the selection
+       ("Merge 12"), so it is the one that must never be the button that
+       overflows. */
+    @media (max-width: 480px) {
+      #merge-bar label { flex: 1 1 100%; }
+      #merge-bar .bar-buttons { width: 100%; margin-left: 0; justify-content: stretch; }
+      #merge-bar .bar-buttons > .chip-btn { flex: 1 1 0; min-width: 0; }
+      #merge-bar #merge-go-btn { flex: 1 1 100%; }
+    }
     #merge-clear-btn {
       background: none; border: 1.5px solid var(--border); border-radius: var(--radius-pill);
       color: var(--text-dim); font-size: 13px; font-weight: 600;
@@ -334,7 +359,9 @@
     }
 
     /* ── Song picker modal (vertical list, audio previews) ── */
-    #song-picker-modal { display: none; position: fixed; inset: 0; z-index: 101; background: var(--bg); flex-direction: column; padding-top: env(safe-area-inset-top); }
+    /* Above #cut-modal (102), not below it: the picker is an overlay on
+       whatever opened it, and the beat-cut planner opens it too. */
+    #song-picker-modal { display: none; position: fixed; inset: 0; z-index: 110; background: var(--bg); flex-direction: column; padding-top: env(safe-area-inset-top); }
     #song-picker-modal.show { display: flex; }
     #song-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px 16px; display: flex; flex-direction: column; gap: 8px; }
     .song-row {
@@ -355,6 +382,55 @@
     }
     .bed-row input { width: 16px; height: 16px; accent-color: var(--accent); flex-shrink: 0; margin-top: 1px; }
     .bed-row .hint { display: block; font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+
+    /* ── Rhythmusschnitt (beat cut) ──
+       A full-screen planner: the controls decide the edit, the timeline shows
+       it, and nothing is rendered until the timeline looks right. The timeline
+       is the point — a list of timings is not something anyone can judge. */
+    #cut-modal { display: none; position: fixed; inset: 0; z-index: 102; background: var(--bg); flex-direction: column; padding-top: env(safe-area-inset-top); }
+    #cut-modal.show { display: flex; }
+    #cut-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px 20px; display: flex; flex-direction: column; gap: 14px; }
+    .cut-card { background: var(--surface); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; }
+    .cut-card > h3 { margin: 0 0 9px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; color: var(--text-dim); }
+    .cut-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .cut-chips button {
+      padding: 6px 12px; border-radius: 999px; cursor: pointer; font-family: inherit;
+      font-size: 12px; font-weight: 700; background: var(--surface2);
+      color: var(--text); border: 1.5px solid var(--border);
+    }
+    .cut-chips button.active { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+    .cut-hint { margin-top: 7px; font-size: 11px; color: var(--text-dim); line-height: 1.45; }
+    .cut-dial { display: flex; align-items: center; gap: 9px; margin-top: 8px; font-size: 12px; }
+    .cut-dial > span:first-child { width: 92px; flex-shrink: 0; color: var(--text-dim); }
+    .cut-dial input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 22px; }
+    .cut-dial .val { width: 62px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .cut-song { display: flex; align-items: center; gap: 10px; }
+    .cut-song .name { flex: 1; min-width: 0; font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cut-card audio { width: 100%; height: 32px; margin-top: 8px; }
+
+    /* The timeline. One row of shot blocks over one row of bar-energy bars,
+       sharing an x-axis, so "the cuts get shorter where the song gets louder"
+       is visible rather than asserted. */
+    #cut-timeline { position: relative; margin-top: 4px; user-select: none; }
+    #cut-shots { position: relative; height: 40px; border-radius: 6px; overflow: hidden; background: var(--surface2); }
+    #cut-shots .shot { position: absolute; top: 0; bottom: 0; border-right: 1px solid var(--bg); overflow: hidden; }
+    #cut-shots .shot.sect { box-shadow: inset 2px 0 0 var(--text); }
+    #cut-shots .shot span { position: absolute; left: 3px; top: 2px; font-size: 9px; font-weight: 700; color: rgba(0,0,0,.66); }
+    #cut-energy { position: relative; height: 26px; margin-top: 3px; }
+    #cut-energy div { border-radius: 1px 1px 0 0; min-height: 2px; }
+    #cut-playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); pointer-events: none; display: none; }
+    #cut-timeline.playing #cut-playhead { display: block; }
+    .cut-legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--text-dim); }
+    .cut-legend span { display: inline-flex; align-items: center; gap: 4px; }
+    .cut-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    .cut-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; font-size: 12px; color: var(--text-dim); }
+    .cut-facts b { color: var(--text); font-variant-numeric: tabular-nums; }
+    .cut-warn { margin-top: 8px; font-size: 11px; line-height: 1.45; color: #d08a2e; }
+    #cut-actions { display: flex; gap: 8px; padding: 10px 14px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--bg); }
+    #cut-actions button { flex: 1; padding: 12px; border-radius: 9px; border: none; font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer; }
+    #cut-reroll { flex: 0 0 auto; background: var(--surface2); color: var(--text); border: 1.5px solid var(--border); }
+    #cut-go { background: var(--accent); color: var(--on-accent); }
+    #cut-go:disabled { opacity: .45; cursor: default; }
 
     /* ── Picker modal (base in shared.css; deltas only below) ── */
     .picker-search { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
@@ -543,6 +619,74 @@
   <div id="song-list"><div style="color:var(--text-dim);padding:20px;text-align:center">Loading…</div></div>
 </div>
 
+<!-- Rhythmusschnitt — plan an edit against a song, then render it -->
+<div id="cut-modal">
+  <div class="picker-header">
+    <button class="back-btn" onclick="closeCutModal()">✕</button>
+    <h2>Rhythmusschnitt</h2>
+  </div>
+  <div id="cut-body">
+    <div class="cut-card">
+      <h3>Song</h3>
+      <div class="cut-song">
+        <div class="name" id="cut-song-name">Noch kein Song gewählt</div>
+        <button class="chip-btn" type="button" onclick="openCutSongPicker()">Wählen</button>
+      </div>
+      <audio id="cut-audio" controls preload="none"></audio>
+    </div>
+
+    <div class="cut-card">
+      <h3>Schnittart</h3>
+      <div class="cut-chips" id="cut-style-row"></div>
+      <div class="cut-hint" id="cut-style-hint"></div>
+    </div>
+
+    <div class="cut-card">
+      <h3>Feinheiten</h3>
+      <label class="cut-dial">
+        <span>Zeitlupe bis</span>
+        <input type="range" id="cut-stretch" min="100" max="400" step="10" value="200" oninput="onCutDial()">
+        <span class="val" id="cut-stretch-val">2.0×</span>
+      </label>
+      <label class="cut-dial">
+        <span>Vorlauf</span>
+        <input type="range" id="cut-antic" min="0" max="200" step="10" value="0" oninput="onCutDial()">
+        <span class="val" id="cut-antic-val">0 ms</span>
+      </label>
+      <label class="cut-dial">
+        <span>Ab Takt</span>
+        <input type="range" id="cut-startbar" min="0" max="0" step="1" value="0" oninput="onCutDial()">
+        <span class="val" id="cut-startbar-val">1</span>
+      </label>
+      <div class="cut-hint">
+        Zeitlupe füllt lange Einstellungen mit kurzen Clips. Vorlauf setzt jeden Schnitt
+        einen Hauch vor den Schlag — die wirksamste kleine Schraube am ganzen Werkzeug.
+      </div>
+      <label class="cut-dial" style="margin-top:10px">
+        <span>Ton der Clips</span>
+        <input type="checkbox" id="cut-bed" style="width:16px;height:16px;accent-color:var(--accent);flex:0 0 auto">
+        <span class="cut-hint" style="flex:1;margin:0">leise unter dem Song mitlaufen lassen</span>
+      </label>
+    </div>
+
+    <div class="cut-card">
+      <h3>Vorschau</h3>
+      <div id="cut-timeline">
+        <div id="cut-shots"></div>
+        <div id="cut-energy"></div>
+        <div id="cut-playhead"></div>
+      </div>
+      <div class="cut-legend" id="cut-legend"></div>
+      <div class="cut-facts" id="cut-facts"></div>
+      <div class="cut-warn" id="cut-warn"></div>
+    </div>
+  </div>
+  <div id="cut-actions">
+    <button id="cut-reroll" type="button" onclick="rerollCut()">🎲 Neu</button>
+    <button id="cut-go" type="button" onclick="startCut()" disabled>Schnitt rendern</button>
+  </div>
+</div>
+
 <!-- Floating merge bar — appears while clips and/or finished videos are selected -->
 <div id="merge-bar">
   <div class="bar-head">
@@ -556,13 +700,22 @@
              style="width:15px;height:15px;accent-color:var(--accent);">
       Delete sources after merge
     </label>
-    <span style="flex:1"></span>
-    <!-- Upscale before merging: SEEDVR2 and RIFE stay inside one continuous
-         shot this way, instead of interpolating across the cuts a merge makes.
-         The settings live in the menu this opens, not in the bar. -->
-    <button class="chip-btn" id="merge-upscale-btn" type="button"
-            onclick="openBulkUpscaleMenu(this)">⤢ Upscale</button>
-    <button id="merge-go-btn" type="button" onclick="startMerge()">Merge</button>
+    <!-- Grouped rather than laid out one by one: on a phone the whole group
+         drops to its own line under the checkbox, which it cannot do while a
+         spacer is pushing each button individually against the right edge. -->
+    <div class="bar-buttons">
+      <!-- Upscale before merging: SEEDVR2 and RIFE stay inside one continuous
+           shot this way, instead of interpolating across the cuts a merge makes.
+           The settings live in the menu this opens, not in the bar. -->
+      <button class="chip-btn" id="merge-upscale-btn" type="button"
+              onclick="openBulkUpscaleMenu(this)">⤢ Upscale</button>
+      <!-- The other way to join a selection: instead of one clip after another
+           at whatever length each happens to be, lay them on a song's beat grid.
+           Same selection, same sources — a different editor. -->
+      <button class="chip-btn" id="cut-open-btn" type="button"
+              onclick="openCutModal()">🎵 Musikschnitt</button>
+      <button id="merge-go-btn" type="button" onclick="startMerge()">Merge</button>
+    </div>
   </div>
 </div>
 
@@ -597,6 +750,7 @@ const state = {
   clipUpscaleRife: 1,
   clipUpscaling:   new Set(),    // clip ids queued locally, until the poller sees them finish
   deleteAfterMerge: false,       // remove the sources once the merge succeeds
+  songPickerForCut: false,       // the song picker is serving the beat-cut planner
   storyPollTimer: null,          // interval id while a story-frames job runs
   storySource: null,             // source image object captured when the job starts
   suggestI2vPollTimer: null,     // interval id while a suggest-i2v job runs
@@ -1654,6 +1808,10 @@ function renderMergeBar() {
   const upBtn = $('merge-upscale-btn');
   upBtn.textContent = todo ? `⤢ Upscale ${todo}` : (nClips ? '⤢ Upscaled' : '⤢ Upscale');
   upBtn.disabled = !todo;
+
+  // A beat cut needs sources and a song; one source is legal (the song still
+  // decides where it is cut), so the only gate here is the selection itself.
+  $('cut-open-btn').disabled = false;
 }
 
 function clearMergeSelection() {
@@ -1685,6 +1843,293 @@ async function startMerge() {
     renderMergeBar();
   }
 }
+
+// ── Rhythmusschnitt (beat cut) ────────────────────────────────────────────────
+// The same selection the merge bar holds, laid on a song's beat grid instead of
+// end to end. Two server calls do the work: /api/cut/plan is cheap and is
+// re-run on every knob, /api/cut/render is not and runs once.
+//
+// The timeline is the whole reason the plan endpoint exists separately. A cut
+// list as numbers is unjudgeable; as coloured blocks over the song's own energy,
+// with the track playing under a moving playhead, it takes two seconds to see
+// whether the edit is right.
+
+const CUT_COLORS = [
+  '#e2703a', '#5a8fc4', '#c9a227', '#7aa66f', '#9b6bab',
+  '#c4626f', '#4fa39a', '#b98a5e', '#7f8ec4', '#a3a33a',
+];
+
+const cutState = {
+  options: null,        // GET /api/cut/styles
+  song: null,           // the chosen song row
+  style: null,
+  seed: null,
+  startBar: 0,
+  stretch: 2.0,
+  anticipation: 0,
+  plan: null,
+  beatmap: null,
+  sources: [],
+  output: null,
+  planning: false,
+  pendingPlan: false,   // a knob moved while a plan was in flight
+  rafId: null,
+};
+
+function openCutModal() {
+  if (!_mergeSelectionKeys().length) {
+    ArtRium.toast('Erst Clips auswählen.', true);
+    return;
+  }
+  $('cut-modal').classList.add('show');
+  initCutModal();
+}
+
+function closeCutModal() {
+  $('cut-modal').classList.remove('show');
+  const audio = $('cut-audio');
+  try { audio.pause(); } catch (e) {}
+  if (cutState.rafId) { cancelAnimationFrame(cutState.rafId); cutState.rafId = null; }
+}
+
+async function initCutModal() {
+  if (!cutState.options) {
+    try {
+      cutState.options = await (await api('/api/cut/styles')).json();
+      cutState.style = cutState.options.default_style;
+      $('cut-stretch').max = Math.round(cutState.options.max_stretch_ceiling * 100);
+      $('cut-antic').max = Math.round(cutState.options.anticipation_max * 1000);
+      cutState.stretch = cutState.options.max_stretch_default;
+      $('cut-stretch').value = Math.round(cutState.stretch * 100);
+    } catch (e) {
+      ArtRium.toast('Schnittarten konnten nicht geladen werden.', true);
+      return;
+    }
+  }
+  renderCutStyles();
+  onCutDial();
+  // No song yet on the first open — the picker is the natural next step, and
+  // opening it saves the user a tap they were always going to make.
+  if (!cutState.song) openCutSongPicker();
+  else refreshCutPlan();
+}
+
+function renderCutStyles() {
+  const row = $('cut-style-row');
+  row.innerHTML = '';
+  for (const st of cutState.options.styles) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = st.label;
+    b.className = cutState.style === st.key ? 'active' : '';
+    b.onclick = () => { cutState.style = st.key; renderCutStyles(); refreshCutPlan(); };
+    row.appendChild(b);
+  }
+  const active = cutState.options.styles.find(x => x.key === cutState.style);
+  $('cut-style-hint').textContent = active ? active.hint : '';
+}
+
+function onCutDial() {
+  cutState.stretch = parseInt($('cut-stretch').value, 10) / 100;
+  cutState.anticipation = parseInt($('cut-antic').value, 10) / 1000;
+  cutState.startBar = parseInt($('cut-startbar').value, 10) || 0;
+  $('cut-stretch-val').textContent = cutState.stretch.toFixed(1) + '×';
+  $('cut-antic-val').textContent = Math.round(cutState.anticipation * 1000) + ' ms';
+  $('cut-startbar-val').textContent = (cutState.startBar + 1);
+  scheduleCutPlan();
+}
+
+function rerollCut() {
+  cutState.seed = Math.floor(Math.random() * 1e9);
+  refreshCutPlan();
+}
+
+// The song picker is shared with the soundtrack flow; a null videoId means the
+// pick lands here instead of being muxed onto an existing video.
+async function openCutSongPicker() {
+  state.songPickerVideoId = null;
+  state.songPickerForCut = true;
+  state.songPickerSearch = '';
+  $('song-picker-search').value = '';
+  $('song-picker-modal').classList.add('show');
+  $('song-list').innerHTML = '<div style="color:var(--text-dim);padding:20px;text-align:center">Loading…</div>';
+  await loadSongs();
+  renderSongList();
+}
+
+function useSongForCut(songId) {
+  closeSongPicker();
+  const song = state.songs.find(x => x.id === songId);
+  if (!song) return;
+  cutState.song = song;
+  cutState.seed = null;                    // a new song deserves a fresh roll
+  cutState.startBar = 0;
+  $('cut-startbar').value = 0;
+  // Duration only. The tempo shown anywhere in this modal is the one the
+  // analysis measured, not the one ACE was asked for — printing both invites
+  // the question of which one the edit is actually on.
+  const bits = song.duration_seconds ? ` — ${song.duration_seconds}s` : '';
+  $('cut-song-name').textContent = (song.title || 'Ohne Titel') + bits;
+  $('cut-audio').src = withAuth(song.url);
+  refreshCutPlan();
+}
+
+let _cutPlanTimer = null;
+function scheduleCutPlan() {
+  clearTimeout(_cutPlanTimer);
+  _cutPlanTimer = setTimeout(refreshCutPlan, 180);
+}
+
+function cutRequestBody() {
+  return {
+    song_id: cutState.song.id,
+    items: _mergeSelectionKeys().map(_splitMergeKey),
+    style: cutState.style,
+    seed: cutState.seed,
+    start_bar: cutState.startBar,
+    max_stretch: cutState.stretch,
+    anticipation: cutState.anticipation,
+  };
+}
+
+async function refreshCutPlan() {
+  if (!cutState.song || !$('cut-modal').classList.contains('show')) return;
+  // One request at a time: the dials fire faster than the round-trip and the
+  // answers would otherwise arrive out of order and paint the wrong plan.
+  if (cutState.planning) { cutState.pendingPlan = true; return; }
+  cutState.planning = true;
+  $('cut-go').disabled = true;
+  try {
+    const r = await api('/api/cut/plan', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(cutRequestBody()),
+    });
+    const d = await r.json();
+    cutState.plan = d.plan;
+    cutState.beatmap = d.beatmap;
+    cutState.sources = d.sources;
+    cutState.output = d.output;
+    cutState.seed = d.plan.seed;           // adopt the roll, so render repeats it
+    const maxBar = Math.max(0, d.beatmap.bar_count - 2);
+    if (parseInt($('cut-startbar').max, 10) !== maxBar) {
+      $('cut-startbar').max = maxBar;
+    }
+    renderCutPreview();
+    $('cut-go').disabled = false;
+  } catch (e) {
+    $('cut-facts').textContent = '';
+    $('cut-warn').textContent = e.message || 'Der Schnitt konnte nicht geplant werden.';
+    $('cut-shots').innerHTML = '';
+  } finally {
+    cutState.planning = false;
+    if (cutState.pendingPlan) { cutState.pendingPlan = false; refreshCutPlan(); }
+  }
+}
+
+function renderCutPreview() {
+  const plan = cutState.plan, bm = cutState.beatmap;
+  const span = Math.max(0.001, plan.song_end - plan.song_start);
+
+  $('cut-shots').innerHTML = plan.cuts.map(c => {
+    const left = ((c.start - plan.song_start) / span * 100).toFixed(3);
+    const width = Math.max(0.15, (c.end - c.start) / span * 100).toFixed(3);
+    const color = CUT_COLORS[c.source % CUT_COLORS.length];
+    // Slow motion is dimmed rather than labelled — at this width a label would
+    // not fit, and the eye reads "paler = slower" without being told.
+    const alpha = c.speed < 0.999 ? 0.55 : 1;
+    return `<div class="shot${c.section ? ' sect' : ''}" style="left:${left}%;width:${width}%;` +
+           `background:${color};opacity:${alpha}" title="${c.beats} Schläge · Clip ${c.source + 1}` +
+           `${c.speed < 0.999 ? ' · ' + Math.round(c.speed * 100) + '%' : ''}">` +
+           `<span>${c.beats}</span></div>`;
+  }).join('');
+
+  // The row underneath is the song's own loudness — as a rank among the bars,
+  // which is exactly the number that chose each shot's length. Placed by time
+  // rather than spaced evenly, so a bar sits under the shots it actually
+  // decided; the pickup at the head makes those two differ by up to a bar.
+  const times = bm.bar_times || [];
+  $('cut-energy').innerHTML = (bm.bar_energy || []).map((e, i) => {
+    const from = times[i], to = i + 1 < times.length ? times[i + 1] : plan.song_end;
+    if (from === undefined || to <= plan.song_start || from >= plan.song_end) return '';
+    const a = Math.max(from, plan.song_start), b = Math.min(to, plan.song_end);
+    const left = ((a - plan.song_start) / span * 100).toFixed(3);
+    const width = Math.max(0.2, (b - a) / span * 100 - 0.15).toFixed(3);
+    const fill = bm.sections.includes(i) ? 'var(--accent)' : 'var(--border)';
+    return `<div style="position:absolute;bottom:0;left:${left}%;width:${width}%;` +
+           `height:${(10 + e * 90).toFixed(1)}%;background:${fill}"></div>`;
+  }).join('');
+
+  $('cut-legend').innerHTML = cutState.sources.map((src, i) =>
+    `<span><i style="background:${CUT_COLORS[i % CUT_COLORS.length]}"></i>${_esc(src.label)}</span>`
+  ).join('');
+
+  const pulse = bm.confidence >= 0.5 ? 'deutlicher Puls'
+              : bm.confidence >= 0.2 ? 'schwacher Puls'
+              : 'kein hörbarer Puls — das Raster ist ein Metronom';
+  $('cut-facts').innerHTML =
+    `<span><b>${plan.cuts.length}</b> Schnitte</span>` +
+    `<span><b>${bm.bpm.toFixed(1)}</b> BPM</span>` +
+    `<span><b>${bm.bar_count}</b> Takte · ${pulse}</span>` +
+    `<span><b>${cutState.output.duration.toFixed(1)}</b> s</span>` +
+    `<span>${cutState.output.width}×${cutState.output.height} · ${cutState.output.fps} fps</span>`;
+  $('cut-warn').innerHTML = (plan.warnings || []).map(_esc).join('<br>');
+}
+
+// Playhead: the preview is only worth anything while the song is playing under
+// it, so the position is driven off the audio element itself rather than a timer.
+function _cutTick() {
+  const audio = $('cut-audio'), plan = cutState.plan;
+  if (!plan) return;
+  const span = Math.max(0.001, plan.song_end - plan.song_start);
+  const at = (audio.currentTime - plan.song_start) / span;
+  $('cut-playhead').style.left = (Math.max(0, Math.min(1, at)) * 100).toFixed(3) + '%';
+  cutState.rafId = requestAnimationFrame(_cutTick);
+}
+
+async function startCut() {
+  if (!cutState.song || !cutState.plan) return;
+  const btn = $('cut-go');
+  btn.disabled = true;
+  const was = btn.textContent;
+  btn.textContent = 'Wird eingereiht…';
+  try {
+    const body = cutRequestBody();
+    body.include_bed = $('cut-bed').checked;
+    body.title = (cutState.song.title || 'Rhythmusschnitt');
+    const r = await api('/api/cut/render', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    ArtRium.toast(`Rhythmusschnitt läuft — ${d.cuts} Schnitte, ${d.duration.toFixed(1)} s`);
+    closeCutModal();
+    state.mergeSelection = new Map();
+    _refreshMergeSelectionUI();
+    await loadVideos();
+    startProgressPolling(d.video_id);
+  } catch (e) {
+    ArtRium.toast(e.message || 'Start fehlgeschlagen', true);
+    btn.textContent = was;
+    btn.disabled = false;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const audio = $('cut-audio');
+  if (!audio) return;
+  audio.addEventListener('play', () => {
+    $('cut-timeline').classList.add('playing');
+    if (!cutState.rafId) _cutTick();
+  });
+  const stop = () => {
+    $('cut-timeline').classList.remove('playing');
+    if (cutState.rafId) { cancelAnimationFrame(cutState.rafId); cutState.rafId = null; }
+  };
+  audio.addEventListener('pause', stop);
+  audio.addEventListener('ended', stop);
+});
 
 // ── Per-clip upscale ──────────────────────────────────────────────────────────
 // The same SEEDVR2 pass as the video-level one, run before the merge instead of
@@ -1962,6 +2407,11 @@ const PHASE_STEPS = [
 ];
 const PHASE_ORDER = Object.fromEntries(PHASE_STEPS.map((s, i) => [s.key, i]));
 PHASE_ORDER.processing = 0;
+// A beat cut's last step is muxing its song on, which happens while the row is
+// still 'assembling'. Without this the pill row would jump back to "Upload"
+// for the final second of a job that is nearly finished.
+PHASE_ORDER.assembling = PHASE_ORDER.running;
+PHASE_ORDER.muxing = PHASE_ORDER.finalizing;
 
 function applyProgress(videoId, prog) {
   const card = document.getElementById(`vc-${videoId}`);
@@ -2015,8 +2465,29 @@ function renderVideos() {
   for (const v of state.videos) list.appendChild(makeVideoCard(v));
 }
 
+const CUT_STYLE_LABELS = {
+  dramaturgie: 'Dramaturgie', atem: 'Atem', welle: 'Welle',
+  puls: 'Puls', stakkato: 'Stakkato',
+};
+
 function _videoMeta(v) {
   const n = v.n_images || '?';
+  if (v.workflow === 'beatcut') {
+    // What the piece is, in the terms it was made in: the cut count and the
+    // tempo say more about a music edit than its source count ever could.
+    const c = v.cut_plan || {};
+    const style = CUT_STYLE_LABELS[c.style] || c.style || '';
+    const bits = [`${c.cuts || '?'} Schnitte`];
+    if (c.bpm) bits.push(`${c.bpm.toFixed(1)} BPM`);
+    if (style) bits.push(style);
+    bits.push(`${n} Quelle${n > 1 ? 'n' : ''}`, `${v.width}×${v.height}`, `${v.fps}fps`);
+    return bits.join(' · ');
+  }
+  if (v.workflow === 'vace_control') {
+    // No key frames at all — this one is built from a control track and a
+    // reference picture, so the key-frame line below would read "0 key frames".
+    return `Struktur · ${v.width}×${v.height} · ${v.fps}fps`;
+  }
   if (v.workflow === 'merge') {
     // "sources", not "clips" — a merge may also join finished videos.
     return `Merged from ${n} source${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
@@ -2098,8 +2569,13 @@ function makeVideoCard(v) {
   card.id = `vc-${v.id}`;
 
   const statusClass = `status-${v.status}`;
+  // 'assembling' covers two different jobs — a plain concat and a beat cut —
+  // and 'review' is an AnimateLCM render parked between its two passes, which
+  // is a state this list shows but does not drive (the Struktur tool does).
   const statusLabel = {
-    generating:'Generating…', assembling:'Merging…',
+    generating:'Generating…',
+    assembling: v.workflow === 'beatcut' ? 'Cutting to the beat…' : 'Merging…',
+    review:'Preview — waiting in Struktur',
     done:'Done', failed:'Failed',
   }[v.status] || v.status;
   const meta = _videoMeta(v);
@@ -2250,6 +2726,10 @@ function _upscaleResolution(id) {
   return (v && v.upscale_resolution) || UPSCALE_DEFAULT;
 }
 
+function _upscaleFps(id) {
+  return state.upscaleFpsDraft.has(id) ? state.upscaleFpsDraft.get(id) : null;
+}
+
 function _upscaleRife(id) {
   if (state.upscaleRifeDraft.has(id)) return state.upscaleRifeDraft.get(id);
   const v = state.videos.find(x => x.id === id);
@@ -2277,7 +2757,8 @@ function _upscaleBlock(v) {
   }
   const r = _upscaleResolution(v.id);
   const rife = _upscaleRife(v.id);
-  const eta = state.upscaleEta.get(_etaKey(v.id, r, rife));
+  const fps = _upscaleFps(v.id);
+  const eta = state.upscaleEta.get(_etaKey(v.id, r, rife, fps));
   const chips = UPSCALE_RESOLUTIONS.map(res =>
     `<button class="chip-btn ${res === r ? 'on' : ''}"
              onclick="pickUpscaleResolution('${v.id}', ${res})">${res}p</button>`
@@ -2295,6 +2776,19 @@ function _upscaleBlock(v) {
                     onclick="pickUpscaleRife('${v.id}', ${m})">${m === 1 ? 'off' : m + '×'}</button>`
          ).join('')}</span>
        </div>`;
+  // Only meaningful once frames are being interpolated: at 1x there is
+  // nothing to raise the rate for, and offering it there would invite a
+  // retime nobody asked for.
+  const fpsRow = (rife > 1 && !v.has_soundtrack)
+    ? `<div class="row wrap">
+         <span class="label">Frame rate</span>
+         <span class="chip-group">${UPSCALE_FPS_OPTIONS.map(f =>
+           `<button class="chip-btn ${f === fps ? 'on' : ''}"
+                    onclick="pickUpscaleFps('${v.id}', ${f === null ? 'null' : f})">${
+             f === null ? 'keep (slow-mo)' : f + ' fps'}</button>`
+         ).join('')}</span>
+       </div>`
+    : '';
   // One labelled row per choice, in the same order and wording as the clip
   // menu — the two are the same pass, so they should not read as two features.
   return `<div class="post-chip" id="upscale-chip-${v.id}">
@@ -2308,6 +2802,7 @@ function _upscaleBlock(v) {
       <span class="chip-group">${chips}</span>
     </div>
     ${rifeRow}
+    ${fpsRow}
     <div class="row">
       <button class="chip-btn apply" onclick="applyUpscale('${v.id}')">${v.has_upscale ? 'Re-run' : 'Run'}</button>
       ${v.has_upscale ? `<button class="chip-btn remove" onclick="removeUpscale('${v.id}')">Remove</button>` : ''}
@@ -2315,25 +2810,45 @@ function _upscaleBlock(v) {
   </div>`;
 }
 
-function _etaKey(id, res, rife) {
-  return `${id}:${res}:${rife}`;
+function _etaKey(id, res, rife, fps) {
+  return `${id}:${res}:${rife}:${fps === null || fps === undefined ? 'src' : fps}`;
 }
 
 function _etaText(eta) {
   const rife = eta.rife_multiplier > 1 ? ` · ${eta.rife_multiplier}× frames` : '';
-  return `→ ${eta.width}×${eta.height}${rife} · ${fmtEta(eta.seconds)}`;
+  // Say what the rate choice actually does. Without a target the clip gets
+  // longer; with one the duration holds, and an unreachable target is met by
+  // interpolating past it and conforming down — worth stating, because the
+  // frame count then does not match the interpolation factor.
+  let rate = '';
+  if (eta.target_fps) {
+    rate = ` · ${eta.target_fps} fps`;
+    if (eta.needs_conform) rate += ` (aus ${Math.round(eta.render_fps)})`;
+  } else if (eta.duration_factor > 1) {
+    rate = ` · ${eta.duration_factor}× länger`;
+  }
+  return `→ ${eta.width}×${eta.height}${rife}${rate} · ${fmtEta(eta.seconds)}`;
 }
 
 function pickUpscaleResolution(id, res) {
   state.upscaleDraft.set(id, res);
   _redrawUpscaleChip(id);
-  loadUpscaleEstimate(id, res, _upscaleRife(id));
+  loadUpscaleEstimate(id, res, _upscaleRife(id), _upscaleFps(id));
 }
 
 function pickUpscaleRife(id, mult) {
   state.upscaleRifeDraft.set(id, mult);
+  // Turning interpolation off takes the rate choice with it — the row
+  // disappears, and a target left behind would still be sent.
+  if (mult <= 1) state.upscaleFpsDraft.delete(id);
   _redrawUpscaleChip(id);
-  loadUpscaleEstimate(id, _upscaleResolution(id), mult);
+  loadUpscaleEstimate(id, _upscaleResolution(id), mult, _upscaleFps(id));
+}
+
+function pickUpscaleFps(id, fps) {
+  state.upscaleFpsDraft.set(id, fps);
+  _redrawUpscaleChip(id);
+  loadUpscaleEstimate(id, _upscaleResolution(id), _upscaleRife(id), fps);
 }
 
 function _redrawUpscaleChip(id) {
@@ -2344,14 +2859,15 @@ function _redrawUpscaleChip(id) {
   if (v && chip) chip.outerHTML = _upscaleBlock(v);
 }
 
-async function loadUpscaleEstimate(id, res, rife) {
+async function loadUpscaleEstimate(id, res, rife, fps) {
   // Fetched on intent rather than on render: it costs two ffprobe calls per
   // video server-side, and a library page would fire one for every card.
-  const key = _etaKey(id, res, rife);
+  const key = _etaKey(id, res, rife, fps);
   if (state.upscaleEta.has(key)) return state.upscaleEta.get(key);
   try {
     const r = await api(
-      `/api/video/jobs/${id}/upscale/estimate?resolution=${res}&rife_multiplier=${rife}`);
+      `/api/video/jobs/${id}/upscale/estimate?resolution=${res}&rife_multiplier=${rife}`
+      + (fps ? `&fps=${fps}` : ''));
     const d = await r.json();
     state.upscaleEta.set(key, d);
     const el = document.getElementById(`upscale-eta-${id}`);
@@ -2367,16 +2883,25 @@ async function applyUpscale(id) {
   // request the server refuses — the chip hides the control, so the value
   // has to be neutralised here rather than left to 409.
   const rife = (v0 && v0.has_soundtrack) ? 1 : _upscaleRife(id);
+  const fps = rife > 1 ? _upscaleFps(id) : null;
   // The estimate is what makes this decision informed, so it is worth waiting
   // for before the confirm rather than showing a bare "are you sure".
-  const eta = await loadUpscaleEstimate(id, resolution, rife);
+  const eta = await loadUpscaleEstimate(id, resolution, rife, fps);
   const cost = eta ? ` It should take ${fmtEta(eta.seconds)} and produce ${eta.width}×${eta.height}.` : '';
-  const interp = rife > 1 ? ` with ${rife}× interpolation` : '';
+  // Name the outcome, not the setting: with a target rate the clip keeps its
+  // length, without one it gets that many times longer, and those are two
+  // different things to be agreeing to.
+  const interp = rife > 1
+    ? (fps ? ` with ${rife}× interpolation at ${fps} fps (same length)`
+           : ` with ${rife}× interpolation (${rife}× longer, slow motion)`)
+    : '';
   // A merge has hard cuts in it, and this pass reads across them: SEEDVR2
   // restores several frames jointly and RIFE invents frames between pairs, so
   // an edit gets morphed instead of staying an edit. Upscaling the clips first
   // avoids that entirely, which is worth saying before the minutes are spent.
-  const cutWarning = (v0 && v0.workflow === 'merge' && (v0.n_images || 0) > 1)
+  // A beat cut is the same case, more so: it has a hard cut every few beats.
+  const cutWarning = (v0 && (v0.workflow === 'beatcut'
+                             || (v0.workflow === 'merge' && (v0.n_images || 0) > 1)))
     ? '\n\nNote: this video was merged from several clips. Upscaling across the ' +
       'cuts can smear the edits — upscaling the individual clips before merging ' +
       'avoids that.'
@@ -2387,7 +2912,7 @@ async function applyUpscale(id) {
     const r = await api(`/api/video/jobs/${id}/upscale`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({resolution, rife_multiplier: rife}),
+      body: JSON.stringify({resolution, rife_multiplier: rife, fps}),
     });
     updateVideoCard(await r.json());
     pollUpscale(id, resolution, eta ? eta.seconds : 0);
@@ -2403,6 +2928,7 @@ async function removeUpscale(id) {
     const r = await api(`/api/video/jobs/${id}/upscale`, {method: 'DELETE'});
     state.upscaleDraft.delete(id);
     state.upscaleRifeDraft.delete(id);
+    state.upscaleFpsDraft.delete(id);
     updateVideoCard(await r.json());
     ArtRium.toast('Upscale removed');
   } catch (e) {
@@ -2706,6 +3232,11 @@ state.grainPreviewUrl = new Map();  // videoId → last rendered preview URL
 state.upscalingVideos = new Set();  // videos with a SEEDVR2 render in flight
 state.upscaleDraft = new Map();     // videoId → target short edge currently picked
 state.upscaleRifeDraft = new Map(); // videoId → interpolation factor currently picked
+state.upscaleFpsDraft = new Map();  // videoId → target playback rate, null = keep source
+// Interpolation without a target rate keeps the source's frame rate, so the
+// clip comes out N times longer — slow motion. Picking a rate keeps the
+// duration and raises the rate instead; the server derives the factor from it.
+const UPSCALE_FPS_OPTIONS = [null, 24, 30, 60];
 state.upscaleEta = new Map();       // "videoId:resolution:rife" → {width, height, seconds, …}
 
 async function openSongPicker(videoId) {
@@ -2725,6 +3256,7 @@ async function openSongPicker(videoId) {
 function closeSongPicker() {
   $('song-picker-modal').classList.remove('show');
   state.songPickerVideoId = null;
+  state.songPickerForCut = false;
   // Stop any audio previews still playing inside the modal
   document.querySelectorAll('#song-list audio').forEach(a => { try { a.pause(); } catch(e) {} });
 }
@@ -2780,6 +3312,14 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 async function useSong(songId) {
+  // The same picker serves two callers. Opened from the beat-cut planner it
+  // has no video to attach to — the pick is a parameter of an edit that has
+  // not been rendered yet.
+  if (state.songPickerForCut) {
+    state.songPickerForCut = false;
+    useSongForCut(songId);
+    return;
+  }
   const videoId = state.songPickerVideoId;
   if (!videoId) return;
   // Read before closing — closeSongPicker leaves the modal (and its checkbox)

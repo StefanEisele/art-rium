@@ -403,6 +403,12 @@ class Video(Base):
         UUID(as_uuid=True), ForeignKey("songs.id", ondelete="SET NULL"), nullable=True
     )
     muxed_filename: Mapped[str | None] = mapped_column(String(512))   # in storage/videos/, sibling of `filename`
+    # Where in the song the picture starts. Null/0 for every ordinary
+    # soundtrack; only a beat cut that was told to begin at a later bar carries
+    # one. Persisted rather than passed, because the mux is re-run from scratch
+    # after an upscale or a grain pass and would otherwise reset the offset and
+    # slide the whole edit off its music.
+    soundtrack_start_seconds: Mapped[float | None] = mapped_column(Float)
     # Optional SEEDVR2 upscale pass (/tools/video detail modal). Runs before
     # the grain pass — grain belongs at the delivery resolution, and feeding a
     # grained picture to a restorer would have it reconstruct the noise.
@@ -426,7 +432,12 @@ class Video(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="generating", index=True)
     error: Mapped[str | None] = mapped_column(Text)
     comfy_prompt_id: Mapped[str | None] = mapped_column(String(128))
-    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "minimax_i2v" | "flf2v" | "merge" | "minimax_api" (legacy rows may hold "ltx_i2v")
+    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "minimax_i2v" | "flf2v" | "merge" | "beatcut" | "minimax_api" (legacy rows may hold "ltx_i2v")
+    # The edit that produced a workflow="beatcut" row: style, seed, tempo and
+    # every shot (services/video/cut.py::EditPlan). Kept so the card can say
+    # what the piece is, and so the same cut can be rebuilt or re-rolled from
+    # the numbers it was made with instead of from a remembered UI state.
+    cut_plan: Mapped[dict | None] = mapped_column(JSONB)
     # ── Cloud generation (workflow == API_WORKFLOW) ──────────────────────────
     # These rows are rendered by MiniMax, not by the local GPU, so they behave
     # differently in one important way: the job keeps running when this process
@@ -447,6 +458,49 @@ class Video(Base):
     youtube_url: Mapped[str | None] = mapped_column(Text)               # canonical watch URL
     youtube_privacy: Mapped[str | None] = mapped_column(String(16))     # "public" | "unlisted" | "private"
     youtube_uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+
+
+class ControlTrack(Base):
+    """An uploaded control track for the VACE structure-video workflow.
+
+    A first-class asset rather than a job input, because that is how it is
+    used: the same Blender turntable gets rendered at a dozen strengths while
+    the look is being found, and re-uploading a 40 MB depth pass each time
+    would be the slowest part of the loop.
+
+    `kind` says how the track is read, and getting it wrong is a silent
+    failure rather than an error:
+      - "depth"   a rendered depth pass. Blender writes these with the
+                  background white, so they are inverted before use.
+      - "footage" ordinary video; DepthAnythingV2 derives the depth in-graph,
+                  and the result must NOT also be inverted.
+      - "mask"    flat object-ID colours, keyed into regions by ColorToMask.
+
+    Files live under storage/control/.
+    """
+    __tablename__ = "control_tracks"
+    __table_args__ = (
+        CheckConstraint("kind IN ('depth', 'footage', 'mask')", name="ck_control_tracks_kind"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    filepath: Mapped[str] = mapped_column(Text, nullable=False)      # relative to storage_dir
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(255))
+    thumbnail_path: Mapped[str | None] = mapped_column(Text)         # relative to storage_dir
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    # Probed on upload, not trusted from the client: `length` is clamped to it
+    # so VACE is never asked for frames the track cannot guide, which it would
+    # otherwise pad with flat grey.
+    frame_count: Mapped[int | None] = mapped_column(Integer)
+    fps: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

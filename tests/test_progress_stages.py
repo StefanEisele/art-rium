@@ -141,3 +141,115 @@ def test_no_live_prompt_leaves_the_payload_alone(live_listener):
     _set_progress("v3", "finalizing", "Saving video…", 94)
     out = _attach_live_stage(dict(video_module._progress["v3"]))
     assert out == {"phase": "finalizing", "message": "Saving video…", "pct": 94}
+
+
+# ── Band ownership ────────────────────────────────────────────────────────────
+# Every ComfyUI node reports a step counter, and most of them are not a
+# fraction of the job. A VHS loader reading a 93-frame control track announces
+# "93/93" a second in; mapped into the band that reads as almost-finished, and
+# the bar then falls back once the sampler starts. `band_node` names the node
+# whose counter is allowed to move the percentage.
+
+class _FixedListener:
+    """Stands in for the live listener with one canned step event."""
+
+    def __init__(self, step):
+        self._step = step
+
+    def get_step_progress(self, prompt_id):
+        return self._step
+
+
+def _staged(monkeypatch, step, **kw):
+    import services.comfy.progress as progress_module
+
+    monkeypatch.setattr(progress_module, "get_listener", lambda: _FixedListener(step))
+    _set_progress("job", "generating", "…", 5, prompt_id="p1", band=(5, 95), **kw)
+    return progress_module.attach_live_stage(dict(video_module._progress["job"]))
+
+
+def test_a_loader_counter_does_not_drive_a_named_band(monkeypatch):
+    loader = {"value": 93, "max": 93, "node": "vc_ctrl", "label": "Reading source video…"}
+    out = _staged(monkeypatch, loader, band_node="vc_ks")
+    assert out["pct"] == 5, "the loader finished, the job did not"
+    # The stage text is still worth showing — only the percentage is withheld.
+    assert "Reading source video…" in out["detail"]
+
+
+def test_the_named_node_does_drive_the_band(monkeypatch):
+    sampler = {"value": 3, "max": 6, "node": "vc_ks", "label": "Sampling…"}
+    out = _staged(monkeypatch, sampler, band_node="vc_ks")
+    assert out["pct"] == 50
+    assert out["step"] == {"value": 3, "max": 6}
+
+
+def test_without_a_named_node_any_counter_still_drives_the_band(monkeypatch):
+    # The older callers (video generation, image upscale) pass no band_node and
+    # must keep behaving exactly as before.
+    loader = {"value": 93, "max": 93, "node": "vc_ctrl", "label": "Reading source video…"}
+    assert _staged(monkeypatch, loader)["pct"] == 95
+
+
+def test_private_keys_never_reach_the_client(monkeypatch):
+    sampler = {"value": 1, "max": 6, "node": "vc_ks", "label": "Sampling…"}
+    out = _staged(monkeypatch, sampler, band_node="vc_ks")
+    assert not [k for k in out if k.startswith("_")]
+
+
+# ── Submissions must be addressed to the listener ─────────────────────────────
+# ComfyUI routes execution events to the session that submitted the prompt
+# (execution.py: send_sync("executing", …, server.client_id)). A prompt posted
+# without a client_id therefore produces no `executing` or `progress` events
+# for the listener, and every live stage readout in the app stays empty for the
+# whole render.
+
+@pytest.mark.asyncio
+async def test_post_workflow_addresses_the_listener(monkeypatch):
+    import services.comfy.client as client_module
+
+    sent = {}
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"prompt_id": "p-1"}
+
+    class _Client:
+        async def post(self, url, json=None, timeout=None):
+            sent.update(json or {})
+            return _Resp()
+
+    class _Listener:
+        client_id = "listener-sid"
+
+    monkeypatch.setattr(client_module, "get_listener", lambda: _Listener(), raising=False)
+    import workers.comfy_listener as listener_module
+    monkeypatch.setattr(listener_module, "get_listener", lambda: _Listener())
+
+    pid = await client_module.post_workflow(_Client(), {"1": {"class_type": "KSampler"}})
+    assert pid == "p-1"
+    assert sent.get("client_id") == "listener-sid", "events would go nowhere without this"
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_client_id_wins(monkeypatch):
+    import services.comfy.client as client_module
+
+    sent = {}
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"prompt_id": "p-2"}
+
+    class _Client:
+        async def post(self, url, json=None, timeout=None):
+            sent.update(json or {})
+            return _Resp()
+
+    await client_module.post_workflow(_Client(), {}, client_id="explicit")
+    assert sent.get("client_id") == "explicit"

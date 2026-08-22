@@ -82,6 +82,7 @@ from core.video_thumb import (
     probe_has_audio,
     probe_video_dimensions,
     probe_video_duration,
+    probe_video_frames,
 )
 from services.comfy.client import (
     free_memory,
@@ -112,6 +113,9 @@ from services.video.merge import MergeInput, merge_clips
 from services.video.audio_bed import BED_VOLUME_DEFAULT, clamp_bed_volume
 from services.video.soundtrack import mux_soundtrack
 from services.video.upscale import (
+    FPS_PRESETS,
+    clamp_fps,
+    plan_frame_rate,
     RESOLUTION_MAX,
     RESOLUTION_MIN,
     RIFE_MULTIPLIERS,
@@ -729,18 +733,26 @@ def _set_progress(
     *,
     prompt_id: str | None = None,
     band: tuple[int, int] | None = None,
+    band_node: str | None = None,
 ) -> None:
     """Record the job's coarse phase, plus what ComfyUI submission (if any) owns it.
 
     `prompt_id` + `band` are what let GET /jobs/{id}/progress replace a static
     "generating frames…" with ComfyUI's own live stage and sampler step,
     scaled into the slice of the bar this submission is responsible for.
+
+    `band_node` narrows which node's counter is allowed to move the bar. Every
+    node reports one, and most are not a fraction of the job — a VHS loader
+    announces "93/93" a second in. Naming the sampler keeps the bar monotonic;
+    omitting it keeps the original behaviour.
     """
     entry = {"phase": phase, "message": message, "pct": pct}
     if prompt_id:
         entry["_prompt_id"] = prompt_id
     if band:
         entry["_band"] = band
+    if band_node:
+        entry["_band_node"] = band_node
     _progress[vid_key] = entry
 
 
@@ -986,8 +998,18 @@ async def _run_i2v_multi(
     await _finalize_clip_job(video_id, vid_key)
 
 
-async def _finalize_video_done(video_id: uuid.UUID, dest: Path, vid_key: str) -> None:
-    """Common success path: thumbnail + persist filename/filepath + status='done'."""
+async def _finalize_video_done(
+    video_id: uuid.UUID, dest: Path, vid_key: str, *, status: str = "done",
+) -> None:
+    """Common success path: thumbnail + persist filename/filepath + status.
+
+    `status` exists for a job whose picture is finished but whose *piece* is
+    not. A beat cut is the case: its song is muxed on afterwards, and flipping
+    the row to 'done' before that would let the poller stop, the card latch the
+    silent rendition, and an upscale start against the file the mux is about to
+    replace. Such a caller lands the file as 'assembling' and finishes the row
+    itself once the last step is really done.
+    """
     _set_progress(vid_key, "finalizing", "Saving video…", 94)
     rel_path = dest.relative_to(settings.storage_dir)
     logger.info("Video stored: %s", dest)
@@ -1000,10 +1022,11 @@ async def _finalize_video_done(video_id: uuid.UUID, dest: Path, vid_key: str) ->
         if video:
             video.filename = dest.name
             video.filepath = str(rel_path)
-            video.status   = "done"
+            video.status   = status
             video.error    = None
             await db.commit()
-    _progress.pop(vid_key, None)
+    if status == "done":
+        _progress.pop(vid_key, None)
 
 
 async def _evict_ollama() -> None:
@@ -2006,6 +2029,14 @@ async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
             "phase": "failed", "message": video.error or "Generation failed", "pct": 0,
             **clip_counts,
         }
+    if video.status == "review":
+        # A two-stage AnimateLCM render, parked between its base pass and its
+        # hires pass (routers/vace.py). Read off the row rather than out of
+        # `_progress`, because the decision can outlive this process by days
+        # and a restart must not turn "waiting for you" back into "processing".
+        return {
+            "phase": "review", "message": "Preview ready", "pct": 100, **clip_counts,
+        }
 
     prog = live or {"phase": "processing", "message": "Processing…", "pct": 30}
 
@@ -2285,6 +2316,10 @@ async def _run_soundtrack_mux(
                 raise RuntimeError("Song row gone or has no file")
             video_path = settings.storage_dir / video.filepath
             song_path = settings.storage_dir / song.filepath
+            # A beat cut that starts at a later bar carries the offset on the
+            # row, not in this call: the mux is re-run after every upscale and
+            # grain pass, and a caller-supplied offset would be lost there.
+            song_start = video.soundtrack_start_seconds or 0.0
 
         out_name = f"{video_id}_muxed.mp4"
         out_path = settings.videos_dir / out_name
@@ -2300,6 +2335,7 @@ async def _run_soundtrack_mux(
             fade_out_seconds=1.0,
             include_bed=bed_volume is not None,
             bed_volume=bed_volume if bed_volume is not None else BED_VOLUME_DEFAULT,
+            song_start=song_start,
         )
 
         async with AsyncSessionLocal() as db:
@@ -2362,12 +2398,19 @@ async def attach_soundtrack(
                    "interpolation first.",
         )
 
+    # A beat cut's song offset belongs to the cut that was planned against that
+    # track. Swapping in a different song throws the sync away regardless, so
+    # the offset goes with it rather than silently skipping into the new one.
+    # Re-attaching the *same* song keeps it, which is the case it exists for.
+    if body.song_id != video.soundtrack_song_id:
+        video.soundtrack_start_seconds = None
+
     # Clear any stale error from a previous failed attempt — otherwise the
     # frontend poller can misread it as this attempt failing before the new
     # mux job has even finished.
     if video.error is not None:
         video.error = None
-        await db.commit()
+    await db.commit()
 
     # Optimistic UI signal — the actual write happens in the background task.
     _progress[str(video_id)] = {
@@ -2392,6 +2435,7 @@ async def detach_soundtrack(video_id: uuid.UUID, db: AsyncSession = Depends(get_
         mp.unlink(missing_ok=True)
     video.muxed_filename = None
     video.soundtrack_song_id = None
+    video.soundtrack_start_seconds = None
     await db.commit()
     await db.refresh(video)
 
@@ -2418,6 +2462,10 @@ async def detach_soundtrack(video_id: uuid.UUID, db: AsyncSession = Depends(get_
 class UpscaleApply(BaseModel):
     resolution: int = 1080     # target SHORT edge in px; validated in the endpoint
     rife_multiplier: int = 1   # 1 = no interpolation; 2/3/4 run RIFE after the restore
+    # Target playback rate. None keeps the source's rate, which with RIFE means
+    # slow motion — the clip gets `rife_multiplier` times longer. A number keeps
+    # the duration and raises the rate instead, deriving the multiplier from it.
+    fps: int | None = None
 
 
 def _upscale_source(video: Video) -> Path:
@@ -2444,6 +2492,7 @@ async def _upscale_plan_from_file(
     fallback_w: int | None = None,
     fallback_h: int | None = None,
     rife_multiplier: int = 1,
+    target_fps: int | None = None,
 ) -> dict:
     """Source facts the upscale needs: output size and a wall-clock estimate.
 
@@ -2453,10 +2502,17 @@ async def _upscale_plan_from_file(
     file.
     """
     duration = await probe_video_duration(src)
+    _, source_fps = await probe_video_frames(src)
     w, h = await probe_video_dimensions(src)
     w = w or fallback_w or resolution
     h = h or fallback_h or resolution
     out_w, out_h = output_dimensions(w, h, resolution)
+    # With a target rate the multiplier is derived from it — asking for 24 fps
+    # out of an 8 fps clip means 3x, and nobody should have to work that out.
+    rate = plan_frame_rate(
+        source_fps, target_fps,
+        None if target_fps else rife_multiplier,
+    )
     return {
         "width": out_w,
         "height": out_h,
@@ -2465,8 +2521,18 @@ async def _upscale_plan_from_file(
         # Unrounded: the audio re-sync after an interpolated run divides by
         # this, so display precision is not good enough.
         "duration": duration,
-        "rife_multiplier": clamp_rife(rife_multiplier),
-        "seconds": estimate_seconds(duration, out_w, out_h, rife_multiplier),
+        "rife_multiplier": rate["rife_multiplier"],
+        "seconds": estimate_seconds(duration, out_w, out_h, rate["rife_multiplier"]),
+        # What the frame rate will actually do, so the UI can say it before the
+        # user commits rather than after: the interpolation factor is derived
+        # from the target, and an unreachable target is conformed afterwards.
+        "source_fps": source_fps,
+        "target_fps": rate["target_fps"],
+        "render_fps": rate["render_fps"],
+        "needs_conform": rate["needs_conform"],
+        "duration_factor": rate["duration_factor"],
+        "fps_exact": rate["exact"],
+        "fps_presets": list(FPS_PRESETS),
     }
 
 
@@ -2476,6 +2542,32 @@ async def _upscale_plan_from_file(
 # pulls the models out from under it. Bulk-upscaling a stack of clips is the
 # normal case now, so the serialisation has to be here rather than in the UI.
 _upscale_gate = asyncio.Lock()
+
+
+async def _conform_frame_rate(
+    src: Path, dest: Path, fps: int, *, has_audio: bool,
+) -> None:
+    """Resample `src` to exactly `fps`, duration untouched.
+
+    `-vf fps=` drops or duplicates whole frames against the output clock, which
+    is what keeps the timeline in place. It is only ever asked to close the gap
+    between a reachable RIFE multiple and the requested rate, so it is dropping
+    out of a denser sequence rather than inventing anything.
+    """
+    args = [settings.ffmpeg_path, "-y", "-v", "error", "-i", str(src),
+            "-vf", f"fps={fps}", "-c:v", "libx264", "-preset", "medium",
+            "-crf", "17", "-pix_fmt", "yuv420p"]
+    args += ["-c:a", "copy"] if has_audio else ["-an"]
+    args.append(str(dest))
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0 or not dest.is_file():
+        raise RuntimeError(
+            f"frame-rate conform to {fps} failed: "
+            f"{err.decode(errors='replace')[:300]}"
+        )
 
 
 async def _seedvr2_render(
@@ -2503,7 +2595,8 @@ async def _seedvr2_render(
         resolution=resolution,
         filename_prefix=prefix,
         has_audio=has_audio,
-        rife_multiplier=rife,
+        rife_multiplier=plan["rife_multiplier"],
+        render_fps=plan.get("render_fps"),
     )
 
     # Three times the estimate, floored well above it: the estimate assumes
@@ -2550,9 +2643,19 @@ async def _seedvr2_render(
     comfy_src = _comfy_save_path(outputs.get(save_node, {}), "Upscale")
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    if rife > 1 and has_audio:
-        # RIFE lengthened the picture while frame_rate stayed put, so the
-        # track VHS carried through is now short (padded out with silence).
+    stretched = plan["duration_factor"] != 1.0
+
+    if plan.get("needs_conform"):
+        # RIFE reaches 2/3/4 only, so an exact 24 or 60 is met by interpolating
+        # past it and dropping frames here. Duration is untouched either way —
+        # that is the point of rendering at the interpolated rate rather than
+        # writing the target onto a denser sequence.
+        await _conform_frame_rate(
+            comfy_src, dest, plan["target_fps"], has_audio=has_audio,
+        )
+    elif stretched and has_audio:
+        # No target rate: the picture got longer while frame_rate stayed put,
+        # so the track VHS carried through is short (padded out with silence).
         # Same shape the generation path produces — same fix.
         await stretch_audio_to_video(
             comfy_src, dest,
@@ -2565,6 +2668,7 @@ async def _seedvr2_render(
 
 async def _apply_upscale(
     video_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+    target_fps: int | None = None,
 ) -> None:
     """Run the SEEDVR2 pass from the un-upscaled source and persist it.
 
@@ -2582,7 +2686,9 @@ async def _apply_upscale(
 
     if not src.exists():
         raise RuntimeError(f"Source file missing: {src.name}")
-    plan = await _upscale_plan_from_file(src, resolution, fallback_w, fallback_h, rife)
+    plan = await _upscale_plan_from_file(
+        src, resolution, fallback_w, fallback_h, rife, target_fps,
+    )
 
     out_name = _upscale_name(video_id)
     await _seedvr2_render(
@@ -2609,6 +2715,7 @@ async def _apply_upscale(
 
 async def _run_upscale(
     video_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+    target_fps: int | None = None,
 ) -> None:
     """Background task behind POST /jobs/{id}/upscale.
 
@@ -2620,7 +2727,7 @@ async def _run_upscale(
     video_key = str(video_id)
     _progress[video_key] = {"phase": "upscaling", "message": "Upscaling…", "pct": 30}
     try:
-        await _apply_upscale(video_id, resolution, rife_multiplier)
+        await _apply_upscale(video_id, resolution, rife_multiplier, target_fps)
         await _reapply_grain_if_any(video_id, video_key)
         _progress.pop(video_key, None)
     except Exception as exc:
@@ -2664,6 +2771,10 @@ async def _refresh_derived_renders(video_id: uuid.UUID, video_key: str) -> None:
         _progress[video_key] = {
             "phase": "upscaling", "message": "Re-running upscale…", "pct": 40,
         }
+        # No target rate here: the row records the resolution and the RIFE
+        # factor but not the rate that was asked for, so a re-run keeps the
+        # file's own. Re-running is for putting grain back on top, not for
+        # redeciding the timing.
         await _apply_upscale(video_id, resolution, rife)
     await _reapply_grain_if_any(video_id, video_key)
 
@@ -2726,6 +2837,7 @@ async def estimate_upscale(
     video_id: uuid.UUID,
     resolution: int = 1080,
     rife_multiplier: int = 1,
+    fps: int | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """Target size and expected wall-clock for an upscale, before committing.
@@ -2740,7 +2852,7 @@ async def estimate_upscale(
     if not src.exists():
         raise HTTPException(status_code=409, detail="Source video file is missing on disk")
     return await _upscale_plan_from_file(
-        src, resolution, video.width, video.height, rife_multiplier,
+        src, resolution, video.width, video.height, rife_multiplier, fps,
     )
 
 
@@ -2752,6 +2864,7 @@ async def apply_upscale(
     _validate_upscale_target(video, body.resolution, body.rife_multiplier)
     resolution = clamp_resolution(body.resolution)
     rife = clamp_rife(body.rife_multiplier)
+    target_fps = clamp_fps(body.fps)
 
     # Clear a stale error from an earlier attempt so the frontend poller can't
     # read it as this attempt failing before the render has even started.
@@ -2760,7 +2873,8 @@ async def apply_upscale(
         await db.commit()
 
     _progress[str(video_id)] = {"phase": "upscaling", "message": "Upscaling…", "pct": 5}
-    safe_create_task(_run_upscale(video_id, resolution, rife), name=f"upscale:{video_id}")
+    safe_create_task(_run_upscale(video_id, resolution, rife, target_fps),
+                     name=f"upscale:{video_id}")
     return _serialize(video)
 
 
@@ -2832,6 +2946,7 @@ def _is_clip_upscaling(clip: VideoClip) -> bool:
 
 async def _apply_clip_upscale(
     clip_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+    target_fps: int | None = None,
 ) -> None:
     """Render the SEEDVR2 pass for one clip and persist it. Raises on failure."""
     rife = clamp_rife(rife_multiplier)
@@ -2846,7 +2961,9 @@ async def _apply_clip_upscale(
 
     if not src.exists():
         raise RuntimeError(f"Clip file missing: {src.name}")
-    plan = await _upscale_plan_from_file(src, resolution, fallback_w, fallback_h, rife)
+    plan = await _upscale_plan_from_file(
+        src, resolution, fallback_w, fallback_h, rife, target_fps,
+    )
 
     await _seedvr2_render(
         src, dest,
@@ -2873,12 +2990,13 @@ async def _apply_clip_upscale(
 
 async def _run_clip_upscale(
     clip_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+    target_fps: int | None = None,
 ) -> None:
     """Background task behind POST /clips/{id}/upscale."""
     key = _clip_key(clip_id)
     _progress[key] = {"phase": "upscaling", "message": "Upscaling…", "pct": 10}
     try:
-        await _apply_clip_upscale(clip_id, resolution, rife_multiplier)
+        await _apply_clip_upscale(clip_id, resolution, rife_multiplier, target_fps)
         _progress.pop(key, None)
     except Exception as exc:
         logger.exception("Clip upscale failed for clip=%s", clip_id)
@@ -2939,6 +3057,7 @@ async def apply_clip_upscale(
     _validate_clip_upscale(clip, body.resolution, body.rife_multiplier)
     resolution = clamp_resolution(body.resolution)
     rife = clamp_rife(body.rife_multiplier)
+    target_fps = clamp_fps(body.fps)
 
     if _is_clip_upscaling(clip):
         raise HTTPException(status_code=409, detail="This clip is already being upscaled")
@@ -2947,7 +3066,8 @@ async def apply_clip_upscale(
         "phase": "upscaling", "message": "Queued…", "pct": 5,
     }
     safe_create_task(
-        _run_clip_upscale(clip_id, resolution, rife), name=f"clip_upscale:{clip_id}",
+        _run_clip_upscale(clip_id, resolution, rife, target_fps),
+        name=f"clip_upscale:{clip_id}",
     )
     return _serialize_clip(clip)
 
@@ -3193,6 +3313,24 @@ def _render_version(v: Video, primary_name: str | None) -> str | None:
         return None
 
 
+def _cut_summary(plan: dict | None) -> dict | None:
+    """The headline of a beat cut, for the card.
+
+    The stored plan holds every shot; a card needs four numbers. Sending the
+    whole thing down with every video in the list would be the bulk of the
+    response for no one's benefit — the planner endpoint serves the full plan
+    when something actually wants it.
+    """
+    if not plan:
+        return None
+    return {
+        "style":  plan.get("style"),
+        "seed":   plan.get("seed"),
+        "bpm":    plan.get("bpm"),
+        "cuts":   len(plan.get("cuts") or []),
+    }
+
+
 def _serialize(v: Video) -> dict:
     # Derived variants take precedence in the order they are produced (see
     # _video_primary_name); the clean original stays available via
@@ -3213,6 +3351,8 @@ def _serialize(v: Video) -> dict:
         "muxed_filename":    v.muxed_filename,
         "has_soundtrack":    bool(v.muxed_filename),
         "soundtrack_bed_volume": v.soundtrack_bed_volume,
+        "soundtrack_start_seconds": v.soundtrack_start_seconds,
+        "cut_plan":          _cut_summary(v.cut_plan),
         "upscale_resolution": v.upscale_resolution,
         "upscale_rife":      v.upscale_rife,
         "has_upscale":       bool(v.upscale_filename),

@@ -145,5 +145,17 @@ class Settings(BaseSettings):
         """Generated audio (ACE-Step 1.5 Turbo MP3s + optional waveform PNGs)."""
         return self.storage_dir / "songs"
 
+    @property
+    def control_dir(self) -> Path:
+        """Uploaded control tracks for the VACE structure-video workflow —
+        Blender depth passes, object-ID mask renders, and ordinary footage that
+        DepthAnything turns into depth in-graph.
+
+        These are assets, not job inputs: the same turntable render gets run at
+        a dozen strengths while the look is being found, so it is uploaded once
+        and referenced by id.
+        """
+        return self.storage_dir / "control"
+
 
 settings = Settings()

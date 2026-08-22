@@ -1,0 +1,1215 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e1013">
+<title>Struktur</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="/shared/shared.css">
+<style>
+  /* ── Shell ──
+     shared.css supplies .app, header, .card and .section-label only; main,
+     .field, label, textarea and the primary button are each page's own. This
+     page follows the z-image tool's conventions so the two read as one app. */
+  .app {
+    min-height: 100dvh;
+    max-width: 620px;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* ── Header (deltas from shared.css) ──
+     shared.css gives header h1 `flex: 1`; without .header-left being a flex
+     container of its own the back arrow and the title stack instead of
+     sitting side by side. */
+  header { justify-content: space-between; padding: 14px 20px; }
+  .header-left { display: flex; align-items: center; gap: 10px; }
+  .status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); }
+
+  main {
+    flex: 1; overflow-y: auto;
+    padding: 18px 20px 40px;
+    display: flex; flex-direction: column; gap: 16px;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── Form primitives ── */
+  .field { display: flex; flex-direction: column; gap: 7px; }
+  label {
+    font-size: 11px; font-weight: 700; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.7px;
+  }
+  textarea {
+    width: 100%; background: var(--surface2); border: 1.5px solid var(--border);
+    border-radius: 10px; color: var(--text); font-size: 16px;
+    padding: 13px 14px; outline: none; font-family: inherit;
+    transition: border-color 0.2s; -webkit-appearance: none;
+  }
+  textarea:focus { border-color: var(--accent); }
+  #prompt { min-height: 104px; resize: vertical; line-height: 1.55; }
+  .hint { font-size: 11px; color: var(--text-dim); line-height: 1.45; }
+
+  /* ── Cards group the four decisions: what drives it, what it is made of,
+       where the regions are, how big it renders. ── */
+  /* Two levels, and they have to look like two: the card names a decision,
+     the labels inside name its parts. Both set in small uppercase would read
+     as one flat list. */
+  .card h2 {
+    font-size: 15px; font-weight: 700; color: var(--text);
+    letter-spacing: -0.2px;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .card h2 .count {
+    font-size: 11px; font-weight: 700; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 0.6px;
+  }
+
+  /* ── Primary action ── */
+  #gen-btn {
+    width: 100%; background: var(--accent); color: var(--on-accent);
+    font-size: 17px; font-weight: 700; padding: 16px;
+    border: none; border-radius: var(--radius-pill); cursor: pointer;
+    font-family: inherit; transition: background 0.15s, transform 0.1s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #gen-btn:not(:disabled):hover { background: var(--accent-hover); }
+  #gen-btn:active:not(:disabled) { background: var(--accent-tap); transform: scale(0.985); }
+  #gen-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  /* ── Track slots ─────────────────────────────────────────────────────── */
+  .slot {
+    display: flex; gap: 12px; align-items: center;
+    background: var(--surface2); border: 1.5px solid var(--border);
+    border-radius: var(--radius); padding: 10px 12px; cursor: pointer;
+  }
+  #review-actions { display: none; gap: 8px; margin-top: 10px; }
+  #review-actions.show { display: flex; }
+  #review-actions button { flex: 1; }
+  #review-finish {
+    padding: 10px 14px; border-radius: 8px; border: none; cursor: pointer;
+    font-family: inherit; font-size: 13px; font-weight: 700;
+    background: var(--accent); color: var(--on-accent);
+  }
+  #review-actions button:disabled { opacity: .45; cursor: default; }
+  .prompt-imports { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 7px; }
+  .prompt-imports .lbl { font-size: 11px; color: var(--text-dim); }
+  .prompt-imports button {
+    padding: 4px 10px; border-radius: 999px; cursor: pointer; font-family: inherit;
+    font-size: 11px; font-weight: 700; background: var(--surface2);
+    color: var(--text); border: 1.5px solid var(--border);
+  }
+  .prompt-imports button:hover { border-color: var(--accent); color: var(--accent); }
+  .slot.empty {
+    justify-content: center; border-style: dashed; padding: 20px 12px;
+    color: var(--text-dim); font-size: 14px; font-weight: 600;
+  }
+  .slot img { width: 60px; height: 60px; object-fit: cover; border-radius: 8px; flex-shrink: 0; background: var(--surface); }
+  .slot .meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  .slot .meta .name { font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .slot .meta .sub { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .slot .clear {
+    background: none; border: none; color: var(--text-dim); font-size: 20px;
+    cursor: pointer; padding: 4px 8px; flex-shrink: 0;
+  }
+
+  /* ── Strength slider — the one dial that matters ─────────────────────── */
+  .dn-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .dn-head .readout { flex-shrink: 0; white-space: nowrap; }
+  .dn-head .val { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .dn-head .band { font-size: 12px; font-weight: 700; color: var(--text-dim); }
+  .dn-head .band.rec { color: var(--accent); }
+  .track-wrap { position: relative; padding: 7px 0 2px; }
+  /* Inset by half a thumb so the painted band lines up with where the handle
+     can actually stop. */
+  .rail { position: absolute; top: 0; left: 9px; right: 9px; height: 4px; }
+  .zone {
+    position: absolute; top: 0; height: 4px; border-radius: 2px;
+    background: var(--accent); opacity: 0.55;
+    transition: left 0.18s ease, width 0.18s ease;
+  }
+  #strength { width: 100%; margin: 0; accent-color: var(--accent); display: block; }
+  .ends { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .effect { font-size: 12px; color: var(--text-dim); line-height: 1.45; min-height: 34px; }
+  .effect b { color: var(--text); font-weight: 600; }
+
+  /* ── Regions ─────────────────────────────────────────────────────────── */
+  #regions { display: flex; flex-direction: column; gap: 10px; }
+  .region {
+    display: flex; gap: 10px; align-items: center;
+    background: var(--surface2); border: 1.5px solid var(--border);
+    border-radius: var(--radius); padding: 10px 12px;
+  }
+  .swatch {
+    width: 34px; height: 34px; border-radius: 8px; flex-shrink: 0;
+    border: 1.5px solid rgba(255,255,255,0.18); cursor: pointer;
+  }
+  .region .pick {
+    width: 46px; height: 46px; border-radius: 8px; flex-shrink: 0; object-fit: cover;
+    background: var(--surface); cursor: pointer; border: 1.5px dashed var(--border);
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-size: 20px;
+  }
+  .region .body { flex: 1; min-width: 0; font-size: 12px; color: var(--text-dim); }
+  .region .body b { display: block; color: var(--text); font-size: 13px; margin-bottom: 2px; }
+  .region .drop { background: none; border: none; color: var(--text-dim); font-size: 18px; cursor: pointer; }
+  .add-region {
+    background: var(--surface2); border: 1.5px dashed var(--border); color: var(--text-dim);
+    border-radius: var(--radius); padding: 11px; font: inherit; font-weight: 600;
+    cursor: pointer; width: 100%;
+  }
+  .add-region:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Tier ────────────────────────────────────────────────────────────── */
+  .tier-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(78px, 1fr)); gap: 0; background: var(--surface2); border-radius: 10px; padding: 3px; }
+  .axis + .axis { margin-top: 15px; }
+  .dial + .dial { margin-top: 16px; }
+  .dial input[type=range] { width: 100%; margin: 0; accent-color: var(--accent); display: block; }
+  .dial-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .dial-head .val { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .toggle-row { display: flex; align-items: center; gap: 9px; margin-top: 16px; margin-bottom: 4px; font-size: 13px; line-height: 1.35; }
+  .toggle-row input { accent-color: var(--accent); width: 16px; height: 16px; }
+  #cam-wrap { display: none; padding: 0 14px 12px; }
+  #cam-wrap.show { display: block; }
+  #cam-video { width: 100%; max-height: 46vh; border-radius: 10px; background: #000; display: block; }
+  .cam-row { display: flex; gap: 8px; align-items: center; margin-top: 9px; flex-wrap: wrap; }
+  .cam-dot { width: 9px; height: 9px; border-radius: 50%; background: #e5484d; display: inline-block; }
+  @keyframes camPulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
+  .cam-rec .cam-dot { animation: camPulse 1s infinite; }
+  .eta { margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--surface2); font-size: 12px; color: var(--text-dim); }
+  .eta b { color: var(--text); font-weight: 600; }
+  .tier-row button {
+    background: transparent; border: none; color: var(--text-dim);
+    font-size: 12px; font-weight: 600; padding: 9px 6px; border-radius: 8px;
+    cursor: pointer; font-family: inherit;
+  }
+  .tier-row button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+  .tier-hint { font-size: 11px; color: var(--text-dim); line-height: 1.45; margin-top: 6px; }
+
+  /* ── Progress + result ───────────────────────────────────────────────── */
+  #progress { display: none; flex-direction: column; gap: 7px; }
+  #progress.show { display: flex; }
+  .prog-head { display: flex; justify-content: space-between; font-size: 12px; }
+  .prog-head .pct { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .prog-track { height: 5px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .prog-fill { height: 100%; width: 0%; background: var(--accent); transition: width 400ms ease; }
+  .prog-detail { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; min-height: 15px; }
+
+  #result { display: none; flex-direction: column; gap: 10px; }
+  #result.show { display: flex; }
+  #result video { width: 100%; border-radius: var(--radius); background: #000; display: block; }
+
+  /* ── Track library modal ─────────────────────────────────────────────── */
+  #lib { display: none; position: fixed; inset: 0; z-index: 101; background: var(--bg); flex-direction: column; padding-top: env(safe-area-inset-top); }
+  #lib.show { display: flex; }
+  #lib-grid { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 14px 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; align-content: start; }
+  .lib-cell { position: relative; border-radius: 10px; overflow: hidden; background: var(--surface2); cursor: pointer; border: 2px solid transparent; }
+  .lib-cell img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+  .lib-cell .cap { padding: 7px 9px; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+  .lib-cell .cap b { display: block; color: var(--text); font-size: 12px; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lib-cell .del { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,0.6); border: none; color: #fff; border-radius: 6px; padding: 3px 7px; font-size: 12px; cursor: pointer; }
+  .lib-upload { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; }
+  .lib-upload input[type=file] { flex: 1; min-width: 0; font-size: 12px; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="header-left">
+      <a class="back-btn" href="/" title="Dashboard">‹</a>
+      <h1>Struktur</h1>
+    </div>
+    <div class="status"><span id="status-label" style="font-size:12px;color:var(--text-dim)"></span></div>
+  </header>
+
+  <main>
+
+    <!-- What drives the picture: geometry, and the material it is made of. -->
+    <section class="card">
+      <h2>Vorlage</h2>
+
+      <div class="field">
+        <label>Steuerspur — Tiefe oder Video</label>
+        <div class="slot empty" id="slot-control" onclick="openLib('control')">+ Spur wählen</div>
+        <div class="hint" id="control-hint"></div>
+      </div>
+
+      <div class="field">
+        <label>Referenzbild — woraus das Bild gemacht ist</label>
+        <div class="slot empty" id="slot-ref" onclick="openImagePicker(-1)">+ Bild aus der Galerie</div>
+      </div>
+    </section>
+
+    <!-- The prompt and the one dial that decides how far from the geometry the
+         result is allowed to travel. -->
+    <section class="card">
+      <h2>Bild</h2>
+
+      <div class="field">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" placeholder="Was soll aus der Geometrie werden…"></textarea>
+        <!-- The reference picture was generated from a prompt, and that prompt
+             describes the exact material this graph is being asked to carry
+             into the video. Retyping it from the gallery was the tax on every
+             single run. One chip per picked picture; the first one also fills
+             an empty box on its own, because that case has no downside. -->
+        <div class="prompt-imports" id="prompt-imports"></div>
+      </div>
+
+      <!-- Which graph renders this. Default is the AnimateLCM rebuild: it is
+           the one that can carry material out of the reference picture. -->
+      <div class="field axis" id="engine-field">
+        <label>Verfahren</label>
+        <div class="tier-row" id="engine-row"></div>
+        <div class="tier-hint" id="engine-hint"></div>
+      </div>
+
+      <!-- AnimateLCM dials. Three numbers decide the picture, and they are
+           independent of each other on purpose. -->
+      <div id="lcm-dials">
+        <div class="field dial">
+          <div class="dial-head">
+            <label style="margin:0">Geometrie</label>
+            <span class="val" id="lcm-depth-val">0.45</span>
+          </div>
+          <input type="range" id="lcm-depth" min="10" max="150" step="5" value="45" oninput="onLcm()">
+          <div class="hint">Wie wörtlich die Steuerspur genommen wird.</div>
+        </div>
+
+        <div class="field dial">
+          <div class="dial-head">
+            <label style="margin:0">Material aus dem Referenzbild</label>
+            <span class="val" id="lcm-ip-val">1.00</span>
+          </div>
+          <input type="range" id="lcm-ip" min="10" max="150" step="5" value="100" oninput="onLcm()">
+          <div class="hint">Wie hart Palette und Oberfläche aufgeprägt werden.</div>
+        </div>
+
+        <div class="field dial">
+          <div class="dial-head">
+            <label style="margin:0">Detail im zweiten Durchgang</label>
+            <span class="val" id="lcm-hires-val">0.40</span>
+          </div>
+          <input type="range" id="lcm-hires" min="20" max="75" step="5" value="60" oninput="onLcm()">
+          <div class="hint" id="lcm-hires-hint"></div>
+        </div>
+
+        <div class="toggle-row">
+          <input type="checkbox" id="lcm-hires-on" checked onchange="onLcm()">
+          <label for="lcm-hires-on" style="margin:0">Zweiter Durchgang — verdoppelt die Auflösung</label>
+        </div>
+
+        <!-- The second pass is two thirds of the render and only adds detail to
+             whatever the first one produced. Stopping in between costs nothing
+             and is the difference between finding out in four minutes and
+             finding out in twelve. -->
+        <div class="toggle-row">
+          <input type="checkbox" id="lcm-preview-first" checked onchange="onLcm()">
+          <label for="lcm-preview-first" style="margin:0">Vorschau zuerst — vor dem Detailpass anhalten</label>
+        </div>
+
+        <div class="field dial">
+          <label for="lcm-rife">Zwischenbilder</label>
+          <select id="lcm-rife" onchange="onLcm()">
+            <option value="1">aus · 8 fps</option>
+            <option value="2">2× · 16 fps</option>
+            <option value="3">3× · 24 fps</option>
+            <option value="4">4× · 32 fps</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="field" id="vace-strength">
+        <div class="dn-head">
+          <label style="margin:0">Abweichung von der Vorlage</label>
+          <span class="readout">
+            <span class="val" id="strength-val">0.60</span>
+            <span class="band" id="strength-band"></span>
+          </span>
+        </div>
+        <div class="track-wrap">
+          <div class="rail"><div class="zone" id="strength-zone"></div></div>
+          <input type="range" id="strength" min="10" max="100" step="1" value="60" oninput="onStrength()">
+        </div>
+        <div class="ends"><span>← Wörtlich</span><span>Frei →</span></div>
+        <div class="effect" id="strength-effect"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Regionen <span class="count" id="region-count"></span></h2>
+      <div class="field">
+        <label>Maskenvideo — Objekt-IDs als Farbflächen</label>
+        <div class="slot empty" id="slot-mask" onclick="openLib('mask')">+ Maskenvideo (optional)</div>
+      </div>
+      <div id="regions"></div>
+      <button class="add-region" id="add-region" onclick="addRegion()">+ Region</button>
+      <div class="hint" id="region-hint"></div>
+    </section>
+
+    <section class="card" id="vace-output">
+      <h2>Ausgabe</h2>
+      <div class="field axis">
+        <label>Format</label>
+        <div class="tier-row" id="aspect-row"></div>
+        <div class="tier-hint" id="aspect-hint"></div>
+      </div>
+      <div class="field axis">
+        <label>Größe</label>
+        <div class="tier-row" id="canvas-row"></div>
+        <div class="tier-hint" id="canvas-hint"></div>
+      </div>
+      <div class="field axis">
+        <label>Qualität</label>
+        <div class="tier-row" id="recipe-row"></div>
+        <div class="tier-hint" id="recipe-hint"></div>
+      </div>
+      <div class="eta" id="eta"></div>
+    </section>
+
+    <button id="gen-btn" onclick="generate()">Rendern</button>
+
+    <div id="progress">
+      <div class="prog-head"><span id="prog-msg">…</span><span class="pct" id="prog-pct">0%</span></div>
+      <div class="prog-track"><div class="prog-fill" id="prog-fill"></div></div>
+      <div class="prog-detail" id="prog-detail"></div>
+    </div>
+
+    <div id="result">
+      <video id="result-video" controls loop playsinline></video>
+      <div class="hint" id="result-meta"></div>
+      <!-- Only while a two-stage render is parked: the base pass has been
+           rendered and watched, the expensive hires pass has not been started.
+           Keeping the preview is a real answer, not a cancel — the base pass is
+           softer and dreamier, and for some material that is the picture. -->
+      <div id="review-actions">
+        <button class="chip-btn" id="review-keep" type="button" onclick="keepPreview()">
+          Vorschau behalten
+        </button>
+        <button id="review-finish" type="button" onclick="finishRender()">
+          Detailpass starten
+        </button>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Control-track library -->
+<div id="lib">
+  <div class="picker-header">
+    <button class="back-btn" onclick="closeLib()">✕</button>
+    <h2 id="lib-title">Spur wählen</h2>
+  </div>
+  <div class="lib-upload">
+    <input type="file" id="lib-file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska">
+    <button class="chip-btn" id="lib-upload-btn" onclick="uploadTrack()">Hochladen</button>
+    <button class="chip-btn" id="cam-open-btn" onclick="toggleCamera()">📹 Kamera</button>
+  </div>
+  <!-- Film a short clip and use it as the control track. The depth map is
+       derived from it in-graph, so nothing has to be rendered in Blender. -->
+  <div id="cam-wrap">
+    <video id="cam-video" playsinline muted autoplay></video>
+    <div class="cam-row">
+      <button class="chip-btn" id="cam-rec-btn" onclick="toggleRecording()">Aufnahme starten</button>
+      <select id="cam-facing" onchange="startCamera()">
+        <option value="environment">Rückkamera</option>
+        <option value="user">Frontkamera</option>
+      </select>
+      <span class="hint" id="cam-status">Etwa 6 Sekunden genügen.</span>
+    </div>
+  </div>
+  <div id="lib-grid"></div>
+</div>
+
+<!-- Gallery image picker -->
+<div id="picker-modal">
+  <div class="picker-header">
+    <button class="back-btn" onclick="closePicker()">✕</button>
+    <h2>Referenzbild wählen</h2>
+  </div>
+  <div class="picker-search">
+    <input type="search" id="picker-search" placeholder="Prompt durchsuchen…" autocomplete="off">
+  </div>
+  <div id="picker-grid"></div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/shared/shared.js"></script>
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// Struktur — Blender geometry in, a world out.
+//
+// The one control worth understanding is `strength`, and its bands were
+// measured rather than guessed (services/comfy/vace.py). They are fetched from
+// the server for exactly that reason: a client that hardcoded them would drift
+// away from the sampler they describe.
+// ═══════════════════════════════════════════════════════════════════════════
+const PICKER_LIMIT = 60;
+const REGION_COLORS = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+
+const state = {
+  apiKey: ArtRium.getApiKey(),
+  options: null,
+  control: null,          // ControlTrack for the depth/footage
+  mask: null,             // ControlTrack for the colour IDs
+  reference: null,        // gallery image for the no-region case
+  regions: [],            // [{color, image, strength}]
+  strength: 0.6,
+  engine: 'animatelcm',
+  canvas: 'sketch',
+  aspect: 'wide',
+  recipe: 'fast',
+  lcm: { depth: 0.45, ip: 1.0, hires: 0.60, hiresOn: true, rife: 1, previewFirst: true },
+  libTarget: 'control',
+  pickerTarget: -1,       // -1 = the main reference, else a region index
+  pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
+  jobId: null, poll: null,
+  reviewId: null,         // a job parked between its base pass and its hires pass
+};
+
+const $ = (id) => document.getElementById(id);
+const api = ArtRium.makeApiFetch(() => state.apiKey);
+const withAuth = (u) => ArtRium.withAuth(u, state.apiKey);
+const norm = (s) => (s || '').trim();
+
+// ── Strength readout ──────────────────────────────────────────────────────
+function onStrength() {
+  state.strength = parseInt($('strength').value, 10) / 100;
+  renderStrength();
+}
+
+function renderStrength() {
+  const o = state.options;
+  $('strength-val').textContent = state.strength.toFixed(2);
+  if (!o) return;
+
+  const span = o.strength_max - o.strength_min;
+  const zone = $('strength-zone');
+  zone.style.left = ((o.recommended_min - o.strength_min) / span * 100).toFixed(1) + '%';
+  zone.style.width = ((o.recommended_max - o.recommended_min) / span * 100).toFixed(1) + '%';
+
+  const band = o.bands.find(b => state.strength < b.to) || o.bands[o.bands.length - 1];
+  const inZone = state.strength >= o.recommended_min && state.strength <= o.recommended_max;
+  const el = $('strength-band');
+  el.textContent = band ? `· ${band.band}` : '';
+  el.classList.toggle('rec', inZone);
+
+  $('strength-effect').innerHTML =
+    ArtRium.escHtml(band ? band.effect : '') +
+    (inZone ? ' <b>Empfohlen.</b>' : '');
+}
+
+// ── Control-track library ─────────────────────────────────────────────────
+function openLib(target) {
+  state.libTarget = target;
+  $('lib-title').textContent = target === 'mask' ? 'Maskenvideo wählen' : 'Steuerspur wählen';
+  $('lib').classList.add('show');
+  loadLib();
+}
+const closeLib = () => {
+  // A live camera stream survives a hidden modal; the device light does not
+  // lie about that, so it has to be released here.
+  stopRecording(true);
+  stopCamera();
+  $('cam-wrap').classList.remove('show');
+  $('cam-open-btn').textContent = '📹 Kamera';
+  $('lib').classList.remove('show');
+};
+
+async function loadLib() {
+  const grid = $('lib-grid');
+  grid.innerHTML = '<div style="color:var(--text-dim);padding:16px">Lade…</div>';
+  try {
+    const kinds = state.libTarget === 'mask' ? ['mask'] : ['depth', 'footage'];
+    const all = [];
+    for (const k of kinds) {
+      const r = await api(`/api/vace/tracks?kind=${k}`);
+      all.push(...await r.json());
+    }
+    grid.innerHTML = '';
+    if (!all.length) {
+      grid.innerHTML = '<div style="color:var(--text-dim);padding:16px">Noch keine Spur — oben hochladen.</div>';
+      return;
+    }
+    for (const t of all) appendLibCell(grid, t);
+  } catch (e) {
+    grid.innerHTML = '<div style="color:var(--danger);padding:16px">Konnte Spuren nicht laden.</div>';
+  }
+}
+
+function appendLibCell(grid, t) {
+  const cell = document.createElement('div');
+  cell.className = 'lib-cell';
+  const img = document.createElement('img');
+  img.src = t.thumb_url ? withAuth(t.thumb_url) : '';
+  img.alt = '';
+  const cap = document.createElement('div');
+  cap.className = 'cap';
+  cap.innerHTML = `<b>${ArtRium.escHtml(t.title || t.filename)}</b>` +
+    `${t.width}×${t.height} · ${t.usable_frames || t.frame_count} Frames · ${t.kind}`;
+  const del = document.createElement('button');
+  del.className = 'del';
+  del.textContent = '🗑';
+  del.onclick = async (e) => {
+    e.stopPropagation();
+    if (!confirm('Diese Spur löschen?')) return;
+    try { await api(`/api/vace/tracks/${t.id}`, { method: 'DELETE' }); loadLib(); }
+    catch { ArtRium.toast('Löschen fehlgeschlagen', true); }
+  };
+  cell.append(img, cap, del);
+  cell.onclick = () => { pickTrack(t); closeLib(); };
+  grid.appendChild(cell);
+}
+
+function pickTrack(t) {
+  if (state.libTarget === 'mask') state.mask = t; else state.control = t;
+  renderSlots();
+}
+
+async function uploadTrack() {
+  const input = $('lib-file');
+  const file = input.files && input.files[0];
+  if (!file) { ArtRium.toast('Erst eine Datei wählen.'); return; }
+  const btn = $('lib-upload-btn');
+  btn.disabled = true; btn.textContent = 'Lädt…';
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('kind', state.libTarget === 'mask' ? 'mask' : 'depth');
+    fd.append('title', file.name.replace(/\.[^.]+$/, ''));
+    const r = await api('/api/vace/tracks', { method: 'POST', body: fd });
+    const t = await r.json();
+    input.value = '';
+    ArtRium.toast(`${t.frame_count} Frames erkannt, ${t.usable_frames} nutzbar`);
+    loadLib();
+  } catch (e) {
+    ArtRium.toast(e.message || 'Upload fehlgeschlagen', true);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Hochladen';
+  }
+}
+
+// ── Slots ─────────────────────────────────────────────────────────────────
+function renderSlots() {
+  slot('slot-control', state.control, () => openLib('control'), () => { state.control = null; renderSlots(); },
+       t => `${t.width}×${t.height} · ${t.usable_frames} Frames nutzbar · ${t.kind === 'footage' ? 'Tiefe wird abgeleitet' : 'Tiefenpass'}`);
+  slot('slot-mask', state.mask, () => openLib('mask'), () => { state.mask = null; renderSlots(); },
+       t => `${t.width}×${t.height} · ${t.frame_count} Frames`);
+  slot('slot-ref', state.reference, () => openImagePicker(-1), () => { state.reference = null; renderSlots(); },
+       i => `${i.width}×${i.height}`, i => i.thumb_url);
+
+  const c = state.control;
+  $('control-hint').textContent = c
+    ? `Länge: ${c.usable_frames} Frames bei ${state.options ? state.options.fps : 16} fps ≈ ${(c.usable_frames / ((state.options && state.options.fps) || 16)).toFixed(1)} s.`
+    : 'Eine Tiefenspur aus Blender, oder ein normales Video — daraus wird die Tiefe im Graph abgeleitet.';
+
+  renderPromptImports();
+  $('add-region').disabled = !state.mask || state.regions.length >= 3;
+  $('region-hint').textContent = state.mask
+    ? 'Ein Durchlauf je Region. Jeder nimmt den Render des vorigen als Vorlage, deshalb dauert es entsprechend länger.'
+    : 'Ohne Maskenvideo wird das ganze Bild aus dem Referenzbild gebaut.';
+  updateGenButton();
+}
+
+// Every picked picture that carries a prompt becomes a chip. Clicking one puts
+// its prompt in the box, where it can be edited — the point is a starting text
+// that already names the material, not a text that must be used as-is.
+function renderPromptImports() {
+  const row = $('prompt-imports');
+  if (!row) return;
+  const sources = [];
+  if (state.reference && norm(state.reference.prompt)) {
+    sources.push({ label: 'Referenzbild', image: state.reference });
+  }
+  state.regions.forEach((r, i) => {
+    if (r.image && norm(r.image.prompt)) {
+      sources.push({ label: `Region ${i + 1}`, image: r.image });
+    }
+  });
+
+  row.innerHTML = '';
+  if (!sources.length) return;
+  const lbl = document.createElement('span');
+  lbl.className = 'lbl';
+  lbl.textContent = 'Prompt übernehmen von:';
+  row.appendChild(lbl);
+  for (const src of sources) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    const words = norm(src.image.prompt).split(/\s+/).length;
+    b.textContent = `⤓ ${src.label}`;
+    b.title = `${words} Wörter — ersetzt den aktuellen Prompt:\n\n${norm(src.image.prompt).slice(0, 400)}`;
+    b.onclick = () => importPrompt(src.image, src.label);
+    row.appendChild(b);
+  }
+}
+
+function importPrompt(image, label) {
+  const text = norm(image && image.prompt);
+  if (!text) return;
+  $('prompt').value = text;
+  updateGenButton();
+  // Long z-Image prompts are worth flagging: this graph encodes with SD 1.5's
+  // CLIP, which reads far less of a prompt than the model that wrote it.
+  const words = text.split(/\s+/).length;
+  ArtRium.toast(words > 60
+    ? `Prompt von ${label} übernommen (${words} Wörter — für SD 1.5 eher lang, gern kürzen).`
+    : `Prompt von ${label} übernommen.`);
+}
+
+function slot(id, item, onPick, onClear, subFn, thumbFn) {
+  const el = $(id);
+  el.innerHTML = '';
+  if (!item) {
+    el.className = 'slot empty';
+    el.onclick = onPick;
+    el.textContent = el.id === 'slot-mask' ? '+ Maskenvideo (optional)'
+      : el.id === 'slot-ref' ? '+ Bild aus der Galerie' : '+ Spur wählen';
+    return;
+  }
+  el.className = 'slot';
+  el.onclick = onPick;
+  const img = document.createElement('img');
+  img.src = withAuth((thumbFn ? thumbFn(item) : item.thumb_url) || '');
+  img.alt = '';
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.innerHTML = `<div class="name">${ArtRium.escHtml(item.title || item.filename || 'Bild')}</div>` +
+                   `<div class="sub">${subFn(item)}</div>`;
+  const clear = document.createElement('button');
+  clear.className = 'clear';
+  clear.textContent = '×';
+  clear.onclick = (e) => { e.stopPropagation(); onClear(); };
+  el.append(img, meta, clear);
+}
+
+// ── Regions ───────────────────────────────────────────────────────────────
+function addRegion() {
+  if (state.regions.length >= 3) return;
+  state.regions.push({ color: REGION_COLORS[state.regions.length], image: null, strength: state.strength });
+  renderRegions();
+}
+
+function renderRegions() {
+  const box = $('regions');
+  box.innerHTML = '';
+  state.regions.forEach((r, i) => {
+    const row = document.createElement('div');
+    row.className = 'region';
+
+    const sw = document.createElement('div');
+    sw.className = 'swatch';
+    sw.style.background = `rgb(${r.color.join(',')})`;
+    sw.title = 'Farbe im Maskenvideo';
+    sw.onclick = () => {
+      const idx = REGION_COLORS.findIndex(c => c.join() === r.color.join());
+      r.color = REGION_COLORS[(idx + 1) % REGION_COLORS.length];
+      renderRegions();
+    };
+
+    const pick = document.createElement(r.image ? 'img' : 'div');
+    pick.className = 'pick';
+    if (r.image) pick.src = withAuth(r.image.thumb_url); else pick.textContent = '+';
+    pick.onclick = () => openImagePicker(i);
+
+    const body = document.createElement('div');
+    body.className = 'body';
+    body.innerHTML = `<b>Region ${i + 1}</b>` +
+      (r.image ? 'Referenz gewählt' : 'Noch kein Referenzbild');
+
+    const drop = document.createElement('button');
+    drop.className = 'drop';
+    drop.textContent = '×';
+    drop.onclick = () => { state.regions.splice(i, 1); renderRegions(); };
+
+    row.append(sw, pick, body, drop);
+    box.appendChild(row);
+  });
+  renderPromptImports();
+  $('add-region').disabled = !state.mask || state.regions.length >= 3;
+  // Regions cost a full pass each, so the count belongs in the heading where
+  // it is read before the render button rather than after it.
+  $('region-count').textContent = state.regions.length
+    ? `· ${state.regions.length} Durchläufe`
+    : '';
+  updateGenButton();
+}
+
+// ── Gallery picker ────────────────────────────────────────────────────────
+function openImagePicker(target) {
+  state.pickerTarget = target;
+  $('picker-modal').classList.add('show');
+  if (!state.pickerImages.length) loadPickerImages(true);
+}
+const closePicker = () => $('picker-modal').classList.remove('show');
+
+async function loadPickerImages(reset = false) {
+  if (state.pickerLoading) return;
+  if (!reset && state.pickerDone) return;
+  if (reset) { state.pickerImages = []; state.pickerPage = 0; state.pickerDone = false; $('picker-grid').innerHTML = ''; }
+  state.pickerLoading = true;
+  const search = state.pickerSearch ? `&search=${encodeURIComponent(state.pickerSearch)}` : '';
+  try {
+    const r = await api(`/api/images?limit=${PICKER_LIMIT}&offset=${state.pickerPage * PICKER_LIMIT}${search}`);
+    const imgs = await r.json();
+    if (imgs.length < PICKER_LIMIT) state.pickerDone = true;
+    state.pickerPage++;
+    state.pickerImages.push(...imgs);
+    const grid = $('picker-grid');
+    for (const img of imgs) {
+      const cell = document.createElement('div');
+      cell.className = 'picker-cell';
+      cell.innerHTML = `<img src="${withAuth(img.thumb_url)}" alt="">`;
+      cell.onclick = () => {
+        const label = state.pickerTarget < 0
+          ? 'Referenzbild' : `Region ${state.pickerTarget + 1}`;
+        if (state.pickerTarget < 0) state.reference = img;
+        else if (state.regions[state.pickerTarget]) state.regions[state.pickerTarget].image = img;
+        closePicker(); renderSlots(); renderRegions();
+        // Only into an empty box. Overwriting something already typed would
+        // make picking a picture a destructive act, and the chip below the
+        // field is there for exactly that case.
+        if (!norm($('prompt').value)) importPrompt(img, label);
+      };
+      grid.appendChild(cell);
+    }
+  } catch {
+    ArtRium.toast('Bilder konnten nicht geladen werden.', true);
+  } finally {
+    state.pickerLoading = false;
+  }
+}
+
+// ── Verfahren ─────────────────────────────────────────────────────────────
+// Two graphs, and the choice is not cosmetic: AnimateLCM refines an existing
+// frame and keeps the reference's material, VACE repaints from noise and loses
+// it. Everything below the switch changes with it.
+function renderEngine() {
+  const row = $('engine-row');
+  row.innerHTML = '';
+  const items = (state.options && state.options.engines) || [];
+  items.forEach(e => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = e.label;
+    b.className = state.engine === e.key ? 'active' : '';
+    b.onclick = () => { state.engine = e.key; renderEngine(); };
+    row.appendChild(b);
+  });
+  const active = items.find(e => e.key === state.engine);
+  $('engine-hint').textContent = active ? active.hint : '';
+
+  const lcm = state.engine === 'animatelcm';
+  $('lcm-dials').style.display = lcm ? '' : 'none';
+  $('vace-strength').style.display = lcm ? 'none' : '';
+  const out = $('vace-output');
+  if (out) out.style.display = lcm ? 'none' : '';
+  updateGenButton();
+}
+
+function onLcm() {
+  state.lcm.depth = parseInt($('lcm-depth').value, 10) / 100;
+  state.lcm.ip = parseInt($('lcm-ip').value, 10) / 100;
+  state.lcm.hires = parseInt($('lcm-hires').value, 10) / 100;
+  state.lcm.hiresOn = $('lcm-hires-on').checked;
+  state.lcm.previewFirst = $('lcm-preview-first').checked;
+  state.lcm.rife = parseInt($('lcm-rife').value, 10);
+  renderLcm();
+}
+
+function renderLcm() {
+  $('lcm-depth-val').textContent = state.lcm.depth.toFixed(2);
+  $('lcm-ip-val').textContent = state.lcm.ip.toFixed(2);
+  $('lcm-hires-val').textContent = state.lcm.hires.toFixed(2);
+  // Measured 2026-08-19: the original workflow sat at 0.40 and there is more
+  // detail above it, with the composition intact up to 0.60.
+  const h = state.lcm.hires;
+  $('lcm-hires-hint').textContent =
+    h <= 0.30 ? 'Wenig Erfindung — weicher, dunstiger.'
+    : h <= 0.45 ? 'Der Wert des Original-Workflows.'
+    : h <= 0.62 ? 'Gemessenes Optimum — mehr Detail und ruhiger als 0.40.'
+    : 'Über dem gemessenen Bereich. Ungeprüft.';
+  ['lcm-hires', 'lcm-hires-val'].forEach(id => {
+    $(id).style.opacity = state.lcm.hiresOn ? '1' : '0.4';
+  });
+  $('lcm-hires').disabled = !state.lcm.hiresOn;
+  // Without a hires pass there is no second stage, so there is nothing a
+  // preview could hold back.
+  $('lcm-preview-first').disabled = !state.lcm.hiresOn;
+  $('lcm-preview-first').closest('.toggle-row').style.opacity = state.lcm.hiresOn ? '1' : '0.4';
+  updateGenButton();
+}
+
+// ── Kamera ────────────────────────────────────────────────────────────────
+// A filmed clip is a control track like any other: `kind=footage` tells the
+// backend to derive depth in-graph rather than treat the pixels as a depth pass.
+let _camStream = null, _camRecorder = null, _camChunks = [];
+
+async function startCamera() {
+  stopCamera();
+  const facing = $('cam-facing').value;
+  try {
+    _camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+  } catch (e) {
+    ArtRium.toast('Kamera nicht verfügbar: ' + (e.message || e.name), true);
+    return;
+  }
+  $('cam-video').srcObject = _camStream;
+}
+
+function stopCamera() {
+  if (_camStream) _camStream.getTracks().forEach(t => t.stop());
+  _camStream = null;
+}
+
+function toggleCamera() {
+  const wrap = $('cam-wrap');
+  const on = wrap.classList.toggle('show');
+  if (on) startCamera(); else { stopRecording(true); stopCamera(); }
+  $('cam-open-btn').textContent = on ? '📹 Kamera schließen' : '📹 Kamera';
+}
+
+function toggleRecording() {
+  if (_camRecorder && _camRecorder.state === 'recording') stopRecording();
+  else startRecording();
+}
+
+function startRecording() {
+  if (!_camStream) { ArtRium.toast('Kamera ist nicht aktiv.'); return; }
+  _camChunks = [];
+  // webm is what browsers record; the backend transcodes it, because
+  // VHS_LoadVideoPath is not reliable on VP8/VP9.
+  const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+    .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+  if (!mime) { ArtRium.toast('Aufnahme wird von diesem Browser nicht unterstützt.', true); return; }
+  _camRecorder = new MediaRecorder(_camStream, { mimeType: mime });
+  _camRecorder.ondataavailable = e => { if (e.data.size) _camChunks.push(e.data); };
+  _camRecorder.onstop = () => uploadRecording(mime);
+  _camRecorder.start();
+  const started = Date.now();
+  $('cam-wrap').classList.add('cam-rec');
+  $('cam-rec-btn').textContent = 'Aufnahme stoppen';
+  clearInterval(window._camTimer);
+  window._camTimer = setInterval(() => {
+    const s = (Date.now() - started) / 1000;
+    $('cam-status').innerHTML = `<span class="cam-dot"></span> ${s.toFixed(1)} s`;
+    if (s >= 20) stopRecording();          // a control track longer than this
+  }, 100);                                  // is not something the sampler wants
+}
+
+function stopRecording(discard) {
+  clearInterval(window._camTimer);
+  $('cam-wrap').classList.remove('cam-rec');
+  $('cam-rec-btn').textContent = 'Aufnahme starten';
+  if (!_camRecorder) return;
+  if (discard) _camRecorder.onstop = null;
+  if (_camRecorder.state === 'recording') _camRecorder.stop();
+  _camRecorder = null;
+}
+
+async function uploadRecording(mime) {
+  const blob = new Blob(_camChunks, { type: mime });
+  _camChunks = [];
+  if (blob.size < 20000) { ArtRium.toast('Aufnahme zu kurz.'); return; }
+  $('cam-status').textContent = 'Wird hochgeladen…';
+  try {
+    const fd = new FormData();
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    fd.append('file', blob, `kamera-${stamp}.webm`);
+    fd.append('kind', 'footage');
+    fd.append('title', `Kamera ${stamp}`);
+    const r = await api('/api/vace/tracks', { method: 'POST', body: fd });
+    const t = await r.json();
+    $('cam-status').textContent = `${t.frame_count} Frames · ${t.width}×${t.height}`;
+    ArtRium.toast('Aufnahme übernommen — Tiefe wird daraus abgeleitet.');
+    loadLib();
+  } catch (e) {
+    $('cam-status').textContent = 'Fehlgeschlagen.';
+    ArtRium.toast(e.message || 'Upload fehlgeschlagen', true);
+  }
+}
+
+// ── Ausgabe ───────────────────────────────────────────────────────────────
+// Three axes rather than one "Tier". Size and sampler used to be the same
+// control, which made the only comparison worth running — the same scene under
+// two samplers — impossible, because changing the canvas changes the scene.
+const AXES = [
+  { key: 'aspect', list: 'aspects',  row: 'aspect-row', hint: 'aspect-hint' },
+  { key: 'canvas', list: 'canvases', row: 'canvas-row', hint: 'canvas-hint' },
+  { key: 'recipe', list: 'recipes',  row: 'recipe-row', hint: 'recipe-hint' },
+];
+
+function renderAxes() {
+  AXES.forEach(axis => {
+    const row = $(axis.row);
+    row.innerHTML = '';
+    const items = (state.options && state.options[axis.list]) || [];
+    items.forEach(item => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = item.label;
+      b.className = state[axis.key] === item.key ? 'active' : '';
+      b.onclick = () => { state[axis.key] = item.key; renderAxes(); refreshEstimate(); };
+      row.appendChild(b);
+    });
+    const active = items.find(item => item.key === state[axis.key]);
+    $(axis.hint).textContent = active ? active.hint : '';
+  });
+}
+
+// The ETA comes from the server, formatted included: the cost model is anchored
+// on renders measured off this graph, and a copy of it here would drift the
+// moment the sampler is retuned. Debounced because every click lands here.
+let _etaTimer = null;
+function refreshEstimate() {
+  clearTimeout(_etaTimer);
+  _etaTimer = setTimeout(async () => {
+    const track = state.control;
+    const length = track ? (track.usable_frames || track.frame_count || 81) : 81;
+    const params = new URLSearchParams({
+      canvas: state.canvas, aspect: state.aspect, recipe: state.recipe,
+      length, passes: Math.max(1, state.regions.length),
+    });
+    try {
+      const r = await api('/api/vace/estimate?' + params);
+      const e = await r.json();
+      $('eta').innerHTML =
+        `${e.width}×${e.height} · ${e.frames} Frames · <b>${e.label}</b>` +
+        (e.passes > 1 ? ` für ${e.passes} Durchläufe` : '') +
+        (track ? '' : ' <span style="opacity:.6">(geschätzt für 81 Frames)</span>');
+    } catch {
+      $('eta').textContent = '';
+    }
+  }, 120);
+}
+
+// ── Generate ──────────────────────────────────────────────────────────────
+function updateGenButton() {
+  refreshEstimate();
+  const btn = $('gen-btn');
+  const n = state.regions.length;
+  const ready = state.control && norm($('prompt').value) &&
+    (n ? state.regions.every(r => r.image) && state.mask : state.reference);
+  // A parked preview does not hold the tool hostage: it lives on its own row
+  // and can be finished at any time, including after the next render.
+  btn.disabled = !ready || !!state.jobId;
+  btn.textContent = !state.control ? 'Steuerspur wählen'
+    : n ? `Rendern · ${n} Durchläufe` : 'Rendern';
+}
+
+async function generate() {
+  const body = {
+    control_track_id: state.control.id,
+    prompt: norm($('prompt').value),
+    engine: state.engine,
+    canvas: state.canvas,
+    aspect: state.aspect,
+    recipe: state.recipe,
+    strength: state.strength,
+    depth_strength: state.lcm.depth,
+    ip_weight: state.lcm.ip,
+    hires: state.lcm.hiresOn,
+    hires_denoise: state.lcm.hires,
+    preview_first: state.lcm.previewFirst,
+    rife: state.lcm.rife,
+  };
+  if (state.regions.length) {
+    body.mask_track_id = state.mask.id;
+    body.regions = state.regions.map(r => ({
+      color: r.color, image_id: r.image.id, strength: state.strength,
+    }));
+  } else {
+    body.image_id = state.reference.id;
+  }
+
+  $('gen-btn').disabled = true;
+  state.reviewId = null;
+  $('review-actions').classList.remove('show');
+  $('result').classList.remove('show');
+  $('progress').classList.add('show');
+  $('prog-msg').textContent = 'Wird eingereiht…';
+  $('prog-fill').style.width = '0%';
+
+  try {
+    const r = await api('/api/vace/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    state.jobId = d.video_id;
+    $('prog-msg').textContent = d.two_stage ? 'Vorschau wird gerendert…'
+      : d.passes > 1 ? `${d.passes} Durchläufe` : 'Läuft…';
+    startPolling();
+  } catch (e) {
+    ArtRium.toast(e.message || 'Start fehlgeschlagen', true);
+    $('progress').classList.remove('show');
+    updateGenButton();
+  }
+}
+
+// /api/video/file/ resolves a *filename*, not a job id, and the job knows which
+// rendition should be shown once post-passes exist.
+async function showResult(id, note) {
+  try {
+    const job = await (await api(`/api/video/jobs/${id}`)).json();
+    const url = job.primary_url || job.original_url;
+    if (!url) return;
+    // Cache-busted per phase: the preview and the finished clip are different
+    // files, but a kept preview keeps its name, and the player would otherwise
+    // hold the copy it already has.
+    $('result-video').src = withAuth(url) + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
+    $('result').classList.add('show');
+    $('result-meta').textContent = note
+      ? `${job.width}×${job.height} — ${note}`
+      : `${job.width}×${job.height} · ${job.frame_count} Frames — im Video-Tool weiterverarbeitbar (Upscale, Korn, Ton).`;
+  } catch {
+    ArtRium.toast('Fertig, aber die Datei konnte nicht geladen werden.', true);
+  }
+}
+
+async function finishRender() {
+  const id = state.reviewId;
+  if (!id) return;
+  $('review-keep').disabled = true;
+  $('review-finish').disabled = true;
+  try {
+    const r = await api(`/api/vace/jobs/${id}/finish`, { method: 'POST' });
+    const d = await r.json();
+    state.reviewId = null;
+    $('review-actions').classList.remove('show');
+    $('result').classList.remove('show');
+    $('progress').classList.add('show');
+    $('prog-msg').textContent = 'Detailpass läuft…';
+    $('prog-fill').style.width = '0%';
+    state.jobId = id;
+    if (d.seconds) ArtRium.toast(`Detailpass gestartet — noch etwa ${Math.round(d.seconds / 60)} min.`);
+    startPolling();
+  } catch (e) {
+    ArtRium.toast(e.message || 'Detailpass konnte nicht gestartet werden', true);
+    $('review-keep').disabled = false;
+    $('review-finish').disabled = false;
+  }
+  updateGenButton();
+}
+
+async function keepPreview() {
+  const id = state.reviewId;
+  if (!id) return;
+  $('review-keep').disabled = true;
+  $('review-finish').disabled = true;
+  try {
+    await api(`/api/vace/jobs/${id}/keep`, { method: 'POST' });
+    state.reviewId = null;
+    $('review-actions').classList.remove('show');
+    await showResult(id);
+    ArtRium.toast('Vorschau als fertiger Clip übernommen.');
+  } catch (e) {
+    ArtRium.toast(e.message || 'Übernehmen fehlgeschlagen', true);
+    $('review-keep').disabled = false;
+    $('review-finish').disabled = false;
+  }
+  updateGenButton();
+}
+
+function startPolling() {
+  clearInterval(state.poll);
+  state.poll = setInterval(pollOnce, 3000);
+  pollOnce();
+}
+
+async function pollOnce() {
+  if (!state.jobId) return;
+  try {
+    const r = await api(`/api/video/jobs/${state.jobId}/progress`);
+    const d = await r.json();
+    $('prog-pct').textContent = `${d.pct || 0}%`;
+    $('prog-fill').style.width = `${d.pct || 0}%`;
+    if (d.message) $('prog-msg').textContent = d.message;
+    $('prog-detail').textContent = d.detail || '';
+
+    if (d.phase === 'review') {
+      // The base pass is on disk and watchable; the hires pass has not run.
+      clearInterval(state.poll);
+      const id = state.jobId;
+      state.jobId = null;
+      state.reviewId = id;
+      $('progress').classList.remove('show');
+      await showResult(id, 'Vorschau — Basis-Durchlauf. Detailpass noch offen.');
+      $('review-actions').classList.add('show');
+      $('review-keep').disabled = false;
+      $('review-finish').disabled = false;
+      updateGenButton();
+    } else if (d.phase === 'done') {
+      clearInterval(state.poll);
+      const id = state.jobId;
+      state.jobId = null;
+      $('progress').classList.remove('show');
+      state.reviewId = null;
+      $('review-actions').classList.remove('show');
+      await showResult(id);
+      updateGenButton();
+    } else if (d.phase === 'failed') {
+      clearInterval(state.poll);
+      state.jobId = null;
+      $('progress').classList.remove('show');
+      ArtRium.toast(d.message || 'Render fehlgeschlagen', true);
+      updateGenButton();
+    }
+  } catch { /* transient — keep polling */ }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+$('prompt').addEventListener('input', updateGenButton);
+let _searchTimer;
+$('picker-search').addEventListener('input', (e) => {
+  clearTimeout(_searchTimer);
+  state.pickerSearch = e.target.value;
+  _searchTimer = setTimeout(() => loadPickerImages(true), 350);
+});
+$('picker-grid').addEventListener('scroll', () => {
+  const el = $('picker-grid');
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 80) loadPickerImages(false);
+});
+
+window.addEventListener('load', async () => {
+  try {
+    const r = await api('/api/vace/options');
+    state.options = await r.json();
+    state.strength = state.options.strength_default;
+    $('strength').min = Math.round(state.options.strength_min * 100);
+    $('strength').max = Math.round(state.options.strength_max * 100);
+    $('strength').value = Math.round(state.strength * 100);
+    $('status-label').textContent = `Band ${state.options.recommended_min}–${state.options.recommended_max}`;
+  } catch {
+    ArtRium.toast('Optionen konnten nicht geladen werden.', true);
+  }
+  const d = (state.options && state.options.defaults) || {};
+  state.canvas = d.canvas || state.canvas;
+  state.aspect = d.aspect || state.aspect;
+  state.recipe = d.recipe || state.recipe;
+  const lcmOpts = (state.options && state.options.lcm) || null;
+  if (lcmOpts) {
+    state.lcm.depth = lcmOpts.depth.default;
+    state.lcm.ip = lcmOpts.ip.default;
+    state.lcm.hires = lcmOpts.hires.default;
+    $('lcm-depth').value = Math.round(state.lcm.depth * 100);
+    $('lcm-ip').value = Math.round(state.lcm.ip * 100);
+    $('lcm-hires').value = Math.round(state.lcm.hires * 100);
+  }
+  renderStrength();
+  renderAxes();
+  renderEngine();
+  renderLcm();
+  refreshEstimate();
+  renderSlots();
+  renderRegions();
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+});
+</script>
+</body>
+</html>

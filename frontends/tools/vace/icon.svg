@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#111"/>
+  <!-- A cube in wireframe, half of it painted: geometry in, material out. -->
+  <defs>
+    <linearGradient id="pour" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#E2732F"/>
+      <stop offset="1" stop-color="#3A6690"/>
+    </linearGradient>
+  </defs>
+  <path d="M32 14 L48 22 L48 40 L32 48 L16 40 L16 22 Z" fill="url(#pour)" opacity="0.9"/>
+  <path d="M32 14 L48 22 L32 30 L16 22 Z" fill="#fff" opacity="0.22"/>
+  <path d="M32 30 L32 48 M16 22 L32 30 L48 22" stroke="#fff" stroke-opacity="0.5" stroke-width="1.6" fill="none"/>
+</svg>

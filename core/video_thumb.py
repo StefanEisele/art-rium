@@ -23,11 +23,22 @@ def _ffprobe_path() -> str:
 
 
 async def make_video_thumbnail(src: Path, dst: Path) -> None:
-    """Write a first-frame JPEG thumbnail next to a video file."""
+    """Write a representative JPEG thumbnail next to a video file.
+
+    Not the first frame, which is what this used to take and why finished
+    videos showed up as a black card with a play button on it: a diffusion clip
+    routinely opens on a dark or half-formed frame, and a fade-in guarantees it.
+
+    `thumbnail=100` scores a hundred frames on how far each one differs from the
+    average of the batch and keeps the most representative — so it skips the
+    dark opening without needing to know the duration, and without picking a
+    frame at some arbitrary fixed offset that a short clip may not have.
+    """
     try:
         proc = await asyncio.create_subprocess_exec(
             settings.ffmpeg_path,
             "-y", "-i", str(src),
+            "-vf", "thumbnail=100",
             "-frames:v", "1", "-q:v", "3",
             str(dst),
             stdout=asyncio.subprocess.DEVNULL,
@@ -168,4 +179,48 @@ async def probe_video_dimensions(src: Path) -> tuple[int | None, int | None]:
         return (int(w) if w else None, int(h) if h else None)
     except Exception as e:
         logger.warning("ffprobe dimension probe failed for %s: %s", src, e)
+        return None, None
+
+
+async def probe_video_frames(src: Path) -> tuple[int | None, float | None]:
+    """Return (frame_count, fps) of the first video stream, or (None, None).
+
+    `nb_frames` is read first because it is exact when the container carries
+    it; when it does not, duration × rate is the honest fallback and is
+    rounded down — overstating the length would have VACE pad the tail of a
+    render with flat grey (comfy_extras/nodes_wan.py) and the clip would drift
+    unguided at the end.
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _ffprobe_path(),
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=nb_frames,r_frame_rate,duration",
+            "-of", "json",
+            str(src),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return None, None
+        stream = (json.loads(out.decode("utf-8", errors="replace")).get("streams") or [{}])[0]
+
+        fps = None
+        rate = stream.get("r_frame_rate") or ""
+        if "/" in rate:
+            num, den = rate.split("/", 1)
+            if float(den):
+                fps = float(num) / float(den)
+
+        frames = stream.get("nb_frames")
+        if frames:
+            return int(frames), fps
+        duration = stream.get("duration")
+        if duration and fps:
+            return int(float(duration) * fps), fps
+        return None, fps
+    except Exception as e:
+        logger.warning("ffprobe frame probe failed for %s: %s", src, e)
         return None, None

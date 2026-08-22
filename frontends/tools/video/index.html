@@ -641,6 +641,16 @@
       <div class="cut-hint" id="cut-style-hint"></div>
     </div>
 
+    <!-- Colour. The clips come from different models and sit next to each other
+         with different black levels and different casts; this closes the gap
+         without closing it all the way. -->
+    <div class="cut-card">
+      <h3>Angleichen</h3>
+      <div class="cut-chips" id="cut-harmony-row"></div>
+      <div class="cut-hint" id="cut-harmony-hint"></div>
+      <div class="cut-hint" id="cut-harmony-report"></div>
+    </div>
+
     <div class="cut-card">
       <h3>Feinheiten</h3>
       <label class="cut-dial">
@@ -1863,6 +1873,7 @@ const cutState = {
   options: null,        // GET /api/cut/styles
   song: null,           // the chosen song row
   style: null,
+  harmony: null,
   seed: null,
   startBar: 0,
   stretch: 2.0,
@@ -1897,6 +1908,7 @@ async function initCutModal() {
     try {
       cutState.options = await (await api('/api/cut/styles')).json();
       cutState.style = cutState.options.default_style;
+      cutState.harmony = cutState.options.default_harmony;
       $('cut-stretch').max = Math.round(cutState.options.max_stretch_ceiling * 100);
       $('cut-antic').max = Math.round(cutState.options.anticipation_max * 1000);
       cutState.stretch = cutState.options.max_stretch_default;
@@ -1907,6 +1919,7 @@ async function initCutModal() {
     }
   }
   renderCutStyles();
+  renderCutHarmonies();
   onCutDial();
   // No song yet on the first open — the picker is the natural next step, and
   // opening it saves the user a tap they were always going to make.
@@ -1927,6 +1940,45 @@ function renderCutStyles() {
   }
   const active = cutState.options.styles.find(x => x.key === cutState.style);
   $('cut-style-hint').textContent = active ? active.hint : '';
+}
+
+function renderCutHarmonies() {
+  const row = $('cut-harmony-row');
+  if (!row || !cutState.options) return;
+  row.innerHTML = '';
+  for (const h of (cutState.options.harmonies || [])) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = h.label;
+    b.className = cutState.harmony === h.key ? 'active' : '';
+    b.onclick = () => { cutState.harmony = h.key; renderCutHarmonies(); refreshCutPlan(); };
+    row.appendChild(b);
+  }
+  const active = (cutState.options.harmonies || []).find(h => h.key === cutState.harmony);
+  $('cut-harmony-hint').textContent = active ? active.hint : '';
+}
+
+// What the pass would actually do, per clip, before anything is rendered.
+// "How far is this moving my material" is the only question worth asking about
+// an automatic colour correction, so it is answered in the preview.
+function renderHarmonyReport(info) {
+  const el = $('cut-harmony-report');
+  if (!el) return;
+  if (!info) { el.textContent = ''; return; }
+  const sp = info.spread || {};
+  if (!info.strength) {
+    el.textContent = sp.measured > 1
+      ? `Unterschied im Material: Schwarz ${sp.black}, Weiß ${sp.white}, Farbe ${sp.colour} (von 255).`
+      : '';
+    return;
+  }
+  const touched = info.touched || 0;
+  const lines = (info.clips || [])
+    .map((d, i) => (d && d !== 'unverändert') ? `Clip ${i + 1}: ${d}` : null)
+    .filter(Boolean);
+  el.innerHTML = `<b>${touched}</b> von ${(info.clips || []).length} Clips angeglichen` +
+    (sp.measured > 1 ? ` · Ausgangs-Unterschied Schwarz ${sp.black} / Weiß ${sp.white} / Farbe ${sp.colour}` : '') +
+    (lines.length ? '<br>' + lines.map(ArtRium.escHtml).join('<br>') : '');
 }
 
 function onCutDial() {
@@ -1985,6 +2037,7 @@ function cutRequestBody() {
     song_id: cutState.song.id,
     items: _mergeSelectionKeys().map(_splitMergeKey),
     style: cutState.style,
+    harmonize: cutState.harmony,
     seed: cutState.seed,
     start_bar: cutState.startBar,
     max_stretch: cutState.stretch,
@@ -2011,6 +2064,7 @@ async function refreshCutPlan() {
     cutState.sources = d.sources;
     cutState.output = d.output;
     cutState.seed = d.plan.seed;           // adopt the roll, so render repeats it
+    renderHarmonyReport(d.harmonize);
     const maxBar = Math.max(0, d.beatmap.bar_count - 2);
     if (parseInt($('cut-startbar').max, 10) !== maxBar) {
       $('cut-startbar').max = maxBar;
@@ -2021,6 +2075,7 @@ async function refreshCutPlan() {
     $('cut-facts').textContent = '';
     $('cut-warn').textContent = e.message || 'Der Schnitt konnte nicht geplant werden.';
     $('cut-shots').innerHTML = '';
+    renderHarmonyReport(null);
   } finally {
     cutState.planning = false;
     if (cutState.pendingPlan) { cutState.pendingPlan = false; refreshCutPlan(); }

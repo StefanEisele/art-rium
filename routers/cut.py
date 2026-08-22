@@ -22,12 +22,23 @@ The song is not part of the render. The picture is cut silent and the existing
 soundtrack path in routers/video.py muxes the track onto it afterwards, which
 means a beat cut is an ordinary finished video from that moment on: upscale,
 grain, Instagram, YouTube and every re-render already know what to do with it.
+
+**Sources come in ungrained, and the finished cut is what gets grained.** A
+video that was grained on its own carries that grain into the edit, and graining
+the edit afterwards would give that one shot two passes and its neighbours one.
+So `_resolve_merge_sources(ungrained=True)` reads the rendition below the grain
+— see `_video_ungrained_name` — and the grain belongs to the piece.
+
+Colour harmonisation is measured here and applied in the render: every source is
+sampled, the group's median is the target, and each clip moves a fraction of the
+way there. See services/video/grade.py for why a fraction and not all the way.
 """
 from __future__ import annotations
 
 import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -50,7 +61,7 @@ from routers.video import (
     _run_soundtrack_mux,
     _set_progress,
 )
-from services.video import beats
+from services.video import beats, grade
 from services.video.audio_bed import BED_VOLUME_DEFAULT, clamp_bed_volume
 from services.video.cut import (
     DEFAULT_STYLE,
@@ -89,6 +100,10 @@ class PlanRequest(BaseModel):
     max_stretch: float = MAX_STRETCH_DEFAULT
     anticipation: float = 0.0             # seconds to cut ahead of the beat
     beats_per_bar: Literal[2, 3, 4, 6] = 4
+    # How hard to pull the clips' colour and contrast together. A key from
+    # services/video/grade.py::HARMONIES, never a raw number: the useful range
+    # is narrow and its top end is a place nobody wants to be.
+    harmonize: str = grade.DEFAULT_HARMONY
 
 
 class RenderRequest(PlanRequest):
@@ -98,6 +113,43 @@ class RenderRequest(PlanRequest):
     include_bed: bool = False
     bed_volume: float = BED_VOLUME_DEFAULT
     title: Optional[str] = None
+
+
+# ── Colour measurement ───────────────────────────────────────────────────────
+# The planner is re-run on every knob the user touches, and sampling six clips
+# costs a second or two — far too much to pay per keystroke and completely
+# unnecessary, because a rendered file never changes under its own name. Keyed
+# on (path, size, mtime) so a re-upscaled clip is re-measured and nothing else
+# is. Bounded, because the tool runs for weeks at a time.
+
+_STATS_CACHE: dict[tuple[str, int, int], grade.Stats | None] = {}
+_STATS_CACHE_MAX = 512
+
+
+async def _measure_sources(paths: list[Path]) -> list[grade.Stats | None]:
+    """Colour statistics per source file, cached across planner calls."""
+    out: list[grade.Stats | None] = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            key = (str(path), stat.st_size, int(stat.st_mtime))
+        except OSError:
+            out.append(None)
+            continue
+        if key not in _STATS_CACHE:
+            if len(_STATS_CACHE) >= _STATS_CACHE_MAX:
+                _STATS_CACHE.clear()
+            _STATS_CACHE[key] = await grade.measure(
+                path, ffmpeg_path=settings.ffmpeg_path,
+            )
+        out.append(_STATS_CACHE[key])
+    return out
+
+
+def _harmony_strength(key: str) -> float:
+    """Preset key → strength. An unknown key harmonises nothing rather than
+    guessing, so a stale client cannot silently regrade a piece."""
+    return grade.HARMONY_BY_KEY.get(key, 0.0)
 
 
 # ── Shared resolution ────────────────────────────────────────────────────────
@@ -143,7 +195,8 @@ async def _resolve_sources(items: list[MergeItem]):
         raise HTTPException(status_code=400, detail="Duplicate source in selection")
 
     try:
-        resolved = await _resolve_merge_sources(keys)
+        # Ungrained: the finished edit is what gets grained, not the shots in it.
+        resolved = await _resolve_merge_sources(keys, ungrained=True)
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -198,6 +251,8 @@ async def cut_styles():
     return {
         "styles": style_options(),
         "default_style": DEFAULT_STYLE,
+        "harmonies": grade.harmony_options(),
+        "default_harmony": grade.DEFAULT_HARMONY,
         "ladder": list(LADDER),
         "max_stretch_default": MAX_STRETCH_DEFAULT,
         "max_stretch_ceiling": MAX_STRETCH_CEILING,
@@ -221,11 +276,24 @@ async def make_plan(body: PlanRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=409, detail="Song is not ready")
 
     beatmap = await _song_beatmap(song, body.beats_per_bar)
-    sources, _, (width, height), fps = await _resolve_sources(body.items)
+    sources, renderers, (width, height), fps = await _resolve_sources(body.items)
     plan = _build_plan(body, beatmap, sources)
+
+    samples = await _measure_sources([r.path for r in renderers])
+    grades = grade.harmonise(samples, _harmony_strength(body.harmonize))
 
     return {
         "plan": plan.to_json(),
+        # What the grade would do, per clip, before a minute of ffmpeg is spent
+        # on it — "how far is this moving my material" is the only question
+        # worth asking about an automatic colour pass.
+        "harmonize": {
+            "key": body.harmonize,
+            "strength": _harmony_strength(body.harmonize),
+            "spread": grade.spread(samples),
+            "clips": [g.describe() for g in grades],
+            "touched": sum(1 for g in grades if not g.is_identity),
+        },
         "beatmap": {
             "bpm": beatmap.bpm,
             "duration": beatmap.duration,
@@ -288,7 +356,7 @@ async def render(body: RenderRequest, db: AsyncSession = Depends(get_db)):
     bed = clamp_bed_volume(body.bed_volume) if body.include_bed else None
     safe_create_task(
         _run_beat_cut(video.id, plan, body.song_id, bed, [(i.kind, i.id) for i in body.items],
-                      width, height, fps),
+                      width, height, fps, _harmony_strength(body.harmonize)),
         name=f"beatcut:{video.id}",
     )
     logger.info(
@@ -315,6 +383,7 @@ async def _run_beat_cut(
     width: int,
     height: int,
     fps: int,
+    harmony: float = 0.0,
 ) -> None:
     """Render the picture, mux the song onto it, and only then call it done.
 
@@ -333,10 +402,21 @@ async def _run_beat_cut(
     key = str(video_id)
     try:
         _set_progress(key, "assembling", f"Schnitt wird gerendert — {len(plan.cuts)} Einstellungen…", 10)
-        resolved = await _resolve_merge_sources(keys)
+        resolved = await _resolve_merge_sources(keys, ungrained=True)
+        paths = [s.inp.path for s in resolved]
+
+        # Re-measured rather than carried from the plan request: the cache makes
+        # it free when nothing moved, and a clip that was re-upscaled in between
+        # has to be graded as it is now, not as it was when the plan was drawn.
+        grades = grade.harmonise(await _measure_sources(paths), harmony)
+        if any(not g.is_identity for g in grades):
+            _set_progress(key, "assembling", "Clips werden angeglichen…", 12)
+            logger.info("Beat cut %s colour grades: %s", video_id,
+                        "; ".join(g.describe() for g in grades))
+
         renderer = [
-            RenderSource(path=s.inp.path, duration=await probe_video_duration(s.inp.path))
-            for s in resolved
+            RenderSource(path=p, duration=await probe_video_duration(p), grade=g.filter_chain())
+            for p, g in zip(paths, grades)
         ]
 
         settings.videos_dir.mkdir(parents=True, exist_ok=True)

@@ -23,6 +23,11 @@ soundtrack — chopping the clips' own audio into sub-second pieces at varying
 speeds produces clicks, not sound design. The song is muxed afterwards by the
 ordinary soundtrack path in routers/video.py, which means upscale, grain and
 every later re-render keep working unchanged.
+
+Colour harmonisation (services/video/grade.py) rides on `RenderSource.grade`
+and is applied ONCE PER SOURCE, before the split — not per segment. A clip used
+forty times in a stakkato edit is one clip, and grading it forty times would
+cost forty times as much for exactly the same picture.
 """
 from __future__ import annotations
 
@@ -42,9 +47,13 @@ _TAIL_PAD_SECONDS = 0.5
 
 @dataclass(frozen=True)
 class RenderSource:
-    """One file the edit reads from."""
+    """One file the edit reads from, and how it is corrected on the way in."""
     path: Path
     duration: float
+    # ffmpeg filters from services.video.grade.Grade.filter_chain(), or "" to
+    # take the clip exactly as it is. Lives here rather than in a parallel list
+    # so a grade cannot be paired with the wrong file.
+    grade: str = ""
 
 
 def segment_frames(start: float, end: float, fps: int) -> int:
@@ -89,8 +98,14 @@ def build_cut_command(
     for src in order:
         n = uses[src]
         labels = "".join(f"[s{src}_{k}]" for k in range(n))
-        filters.append(f"[{input_of[src]}:v]split={n}{labels}" if n > 1
-                       else f"[{input_of[src]}:v]null[s{src}_0]")
+        # The grade goes in front of the split, so it runs once however many
+        # times the clip appears.
+        head = sources[src].grade
+        if n > 1:
+            prefix = head + "," if head else ""
+            filters.append(f"[{input_of[src]}:v]{prefix}split={n}{labels}")
+        else:
+            filters.append(f"[{input_of[src]}:v]{head or 'null'}[s{src}_0]")
 
     taken: dict[int, int] = {}
     concat_feed = ""

@@ -1342,8 +1342,23 @@ def _video_primary_name(v: Video) -> str | None:
     return v.grain_filename or v.upscale_filename or v.muxed_filename or v.filename
 
 
-def _video_primary_path(v: Video) -> Path | None:
-    name = _video_primary_name(v)
+def _video_ungrained_name(v: Video) -> str | None:
+    """The most finished rendition that has NO film grain in it.
+
+    For a beat cut, grain has to come last. Feeding an already-grained video
+    into an edit that will be grained again stacks two passes on that one shot
+    and leaves its neighbours with one, which is visible immediately — and the
+    grain of the piece should belong to the piece, not to whichever clip
+    happened to be grained on its own beforehand.
+
+    Everything below the grain is kept: an upscale is a better picture and a
+    muxed file's video stream is a copy of the one under it.
+    """
+    return v.upscale_filename or v.muxed_filename or v.filename
+
+
+def _video_primary_path(v: Video, *, ungrained: bool = False) -> Path | None:
+    name = _video_ungrained_name(v) if ungrained else _video_primary_name(v)
     if not name:
         return None
     if name == v.filename and v.filepath:
@@ -1377,6 +1392,8 @@ class _MergeSource:
 
 async def _resolve_merge_sources(
     sources: list[tuple[str, uuid.UUID]],
+    *,
+    ungrained: bool = False,
 ) -> list[_MergeSource]:
     """Resolve each selected clip/video to its playable file, audio flag and
     effective canvas — the three facts the concat needs.
@@ -1388,6 +1405,10 @@ async def _resolve_merge_sources(
     an upscale, and nothing on it says whether the current rendition carries
     audio (a muxed soundtrack adds one). So the file itself is probed, the
     same rule `_upscale_plan_from_file` follows.
+
+    `ungrained` picks the rendition below any film-grain pass — see
+    `_video_ungrained_name`. A plain merge takes what the tool plays; a beat cut
+    takes the clean picture and grains the finished edit instead.
     """
     clip_ids  = [sid for kind, sid in sources if kind == "clip"]
     video_ids = [sid for kind, sid in sources if kind == "video"]
@@ -1421,7 +1442,7 @@ async def _resolve_merge_sources(
             v = videos.get(sid)
             if not v:
                 raise ValueError("One or more selected videos no longer exist")
-            f = _video_primary_path(v)
+            f = _video_primary_path(v, ungrained=ungrained)
             if not f or not f.exists():
                 raise FileNotFoundError(f"Video file missing on disk: {v.filename or sid}")
             pw, ph = await probe_video_dimensions(f)

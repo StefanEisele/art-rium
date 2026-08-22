@@ -2743,10 +2743,14 @@ function _soundtrackBlock(v) {
   }
   if (v.has_soundtrack) {
     const bed = v.soundtrack_bed_volume ? ' + Clip-Ton' : '';
+    const song = state.songs.find(s => s.id === v.soundtrack_song_id);
+    // state.songs is only populated once something has loaded it (init, or
+    // opening the picker); until then this falls back rather than lying.
+    const name = song ? _esc(song.title || 'Untitled song') : 'Attached';
     return `<div class="soundtrack-chip">
       <span class="glyph">♪</span>
       <span class="label">Soundtrack</span>
-      <span class="name">Attached${bed}</span>
+      <span class="name" title="${name}">${name}${bed}</span>
       <button class="chip-btn" onclick="openSongPicker('${v.id}')">Replace</button>
       <button class="chip-btn remove" onclick="removeSoundtrack('${v.id}')">Remove</button>
     </div>`;
@@ -3452,7 +3456,12 @@ window.addEventListener('load', async () => {
   renderRifeChips();
   loadStoryLoras();
   loadStoryStyles();
-  await loadVideos();
+  // Songs are needed to name an already-attached soundtrack on a card, not
+  // just to fill the picker — load them alongside the videos, not only when
+  // the picker is first opened, so a card never reads a song name back as
+  // "Attached" for no reason but a race.
+  await Promise.all([loadVideos(), loadSongs()]);
+  renderVideos();
 });
 
 // The upscale menu is anchored to a button in a scrolling list, so anything

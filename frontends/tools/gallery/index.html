@@ -310,6 +310,46 @@
       display: flex; align-items: center; justify-content: center;
       padding: 0 16px;
       overflow: hidden;
+      position: relative;
+      /* The gesture owns horizontal, the modal body keeps vertical. Without
+         this the browser claims the drag as a scroll and cancels the pointer
+         mid-swipe — which is exactly what it does on a phone. */
+      touch-action: pan-y;
+      user-select: none; -webkit-user-select: none;
+    }
+    .modal-image-wrap img { -webkit-user-drag: none; }
+
+    /* The verdict, drawn on the picture as it moves. */
+    .swipe-stamp {
+      position: absolute; top: 10px;
+      font-size: 17px; font-weight: 800; letter-spacing: 1.2px;
+      text-transform: uppercase; padding: 6px 11px;
+      border: 3px solid currentColor; border-radius: var(--radius-sm);
+      opacity: 0; pointer-events: none; will-change: opacity;
+    }
+    .swipe-stamp.keep { left: 22px;  color: var(--green); transform: rotate(-11deg); }
+    .swipe-stamp.doom { right: 22px; color: var(--red);   transform: rotate(11deg); }
+
+    /* ── Undo bar for a swipe-deleted picture ── */
+    .undo-bar {
+      position: fixed; z-index: 120;
+      left: 50%; transform: translateX(-50%) translateY(140%);
+      bottom: calc(env(safe-area-inset-bottom) + 18px);
+      display: flex; align-items: center; gap: 14px;
+      max-width: calc(100vw - 32px);
+      padding: 11px 12px 11px 16px;
+      background: var(--surface2); color: var(--text);
+      border: 1.5px solid var(--border-strong); border-radius: var(--radius-pill);
+      box-shadow: var(--shadow-modal);
+      font-size: 13px; font-weight: 600;
+      transition: transform .22s cubic-bezier(.2,.8,.3,1);
+    }
+    .undo-bar.show { transform: translateX(-50%) translateY(0); }
+    .undo-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .undo-bar button {
+      flex: 0 0 auto; border: none; border-radius: var(--radius-pill);
+      background: var(--accent); color: var(--on-accent);
+      font: inherit; font-weight: 700; padding: 7px 14px; cursor: pointer;
     }
 
     .modal-image-wrap img {
@@ -773,6 +813,11 @@
     .cull-card, .cull-card img {
       user-select: none; -webkit-user-select: none;
       -webkit-user-drag: none; -webkit-touch-callout: none;
+      /* `touch-action` is NOT inherited, so the declaration on `.cull` above
+         leaves the cards themselves at `auto` — and the element under the
+         finger is the one the browser asks. On a phone that is the difference
+         between a swipe and a cancelled pointer. */
+      touch-action: none;
     }
     .cull-card.front:active { cursor: grabbing; }
     /* Springing back and flying out are the only animated states — during a
@@ -970,8 +1015,10 @@
     <button class="modal-close" onclick="closeModal()">✕</button>
   </div>
 
-  <div class="modal-image-wrap">
+  <div class="modal-image-wrap" id="modal-image-wrap">
     <img id="modal-img" src="" alt="">
+    <div class="swipe-stamp keep" id="swipe-keep">Behalten</div>
+    <div class="swipe-stamp doom" id="swipe-doom">Löschen</div>
   </div>
 
   <div class="modal-body">
@@ -1161,6 +1208,13 @@
 </div>
 
 <div id="toast"></div>
+
+<!-- Swiping a picture away deletes it, and the files are gone for good once
+     the request lands — so the request waits a few seconds behind this. -->
+<div class="undo-bar" id="undo-bar">
+  <span id="undo-text">Bild gelöscht</span>
+  <button onclick="undoDelete()">Rückgängig</button>
+</div>
 
 <script src="/shared/shared.js"></script>
 <script>
@@ -1522,6 +1576,8 @@ const populateModal = (img) => {
   // publishing will use — but as its AVIF preview. At modal size that is
   // visually the same picture for a fraction of the bytes; the PNG itself is
   // what the download button is for.
+  // Any half-finished swipe belongs to the picture that was here before.
+  resetModalSwipe(false);
   $('modal-img').src = modalPreviewSrc(img.preview_url || img.primary_url || img.url);
   $('modal-img').alt = img.filename;
 
@@ -2508,6 +2564,219 @@ async function deleteActiveVideo() {
 }
 
 // ══════════════════════════════════════════════════════════
+// SWIPE ON THE OPEN IMAGE
+// ══════════════════════════════════════════════════════════
+// The same two verdicts as the deck, on the picture you already have open:
+// drag right and it goes, drag left and you move on. This is the fast path for
+// "I am looking at this one and I have decided" — the deck is for working
+// through a backlog, this is for the picture in front of you.
+//
+// Deleting on a gesture needs a way back, and once the server has unlinked the
+// files there is none. So the delete is *scheduled*, not sent: the picture
+// leaves the UI at once, and the request goes out a few seconds later unless
+// Rückgängig cancels it. If the tab dies inside that window the image simply
+// survives, which is the right direction for the failure to fall.
+//
+// Only ever one delete is outstanding. A second swipe flushes the first, so
+// the undo bar can never be ambiguous about which picture it means.
+
+const SWIPE_UNDO_MS = 6000;
+const SWIPE_ROTATION = 10;
+const SWIPE_FLICK_VELOCITY = 0.5;
+
+let modalDrag = null;
+const pendingDelete = { img: null, idx: null, timer: null };
+
+// The picture is only a *part* of the modal — the rest scrolls — so the
+// threshold is measured against the image box rather than the window.
+const modalSwipeThreshold = () =>
+  Math.min(110, Math.max(55, ($('modal-image-wrap').clientWidth || 320) * 0.28));
+
+function initModalSwipe() {
+  const wrap = $('modal-image-wrap');
+  wrap.addEventListener('pointerdown', onModalSwipeDown);
+  // Whatever happens, a scheduled delete must not be left dangling behind a
+  // closed modal or a backgrounded tab.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushPendingDelete();
+  });
+  window.addEventListener('pagehide', () => flushPendingDelete());
+}
+
+function onModalSwipeDown(e) {
+  if (!state.modal.image || modalDrag) return;
+  // Let the controls on top of the picture keep their taps.
+  if (e.target.closest('button, a, input, textarea')) return;
+  const wrap = e.currentTarget;
+  wrap.setPointerCapture(e.pointerId);
+  modalDrag = {
+    wrap, id: e.pointerId,
+    x0: e.clientX, y0: e.clientY,
+    dx: 0, dy: 0, vx: 0, tLast: performance.now(),
+    decided: false,
+  };
+  $('modal-img').style.transition = 'none';
+  wrap.addEventListener('pointermove', onModalSwipeMove);
+  wrap.addEventListener('pointerup', onModalSwipeUp);
+  wrap.addEventListener('pointercancel', onModalSwipeUp);
+}
+
+function onModalSwipeMove(e) {
+  const d = modalDrag;
+  if (!d || e.pointerId !== d.id) return;
+  const now = performance.now();
+  const dx = e.clientX - d.x0;
+  const dy = e.clientY - d.y0;
+  d.vx = (dx - d.dx) / Math.max(1, now - d.tLast);
+  d.dx = dx; d.dy = dy; d.tLast = now;
+
+  // `touch-action: pan-y` hands vertical drags back to the scroller, but the
+  // first few pixels arrive here either way. Until the direction is obvious,
+  // draw nothing — otherwise starting a scroll makes the picture twitch.
+  if (!d.decided) {
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+    d.decided = true;
+    d.horizontal = Math.abs(dx) > Math.abs(dy);
+  }
+  if (!d.horizontal) return;
+
+  const img = $('modal-img');
+  const rot = Math.max(-1, Math.min(1, dx / (modalSwipeThreshold() * 2))) * SWIPE_ROTATION;
+  img.style.transform = `translate3d(${dx}px,0,0) rotate(${rot}deg)`;
+  const s = Math.min(1, Math.abs(dx) / modalSwipeThreshold());
+  $('swipe-doom').style.opacity = dx > 0 ? s : 0;
+  $('swipe-keep').style.opacity = dx < 0 ? s : 0;
+}
+
+function onModalSwipeUp(e) {
+  const d = modalDrag;
+  if (!d || e.pointerId !== d.id) return;
+  const { wrap } = d;
+  wrap.removeEventListener('pointermove', onModalSwipeMove);
+  wrap.removeEventListener('pointerup', onModalSwipeUp);
+  wrap.removeEventListener('pointercancel', onModalSwipeUp);
+  modalDrag = null;
+
+  const far = Math.abs(d.dx) >= modalSwipeThreshold();
+  const flicked = Math.abs(d.vx) >= SWIPE_FLICK_VELOCITY && Math.abs(d.dx) > 22;
+  if (d.horizontal && e.type !== 'pointercancel' && (far || flicked)) {
+    commitModalSwipe(d.dx > 0 ? 'doom' : 'keep');
+  } else {
+    resetModalSwipe(true);
+  }
+}
+
+function resetModalSwipe(animate) {
+  const img = $('modal-img');
+  img.style.transition = animate ? 'transform .24s cubic-bezier(.2,.8,.3,1)' : 'none';
+  img.style.transform = '';
+  img.style.opacity = '';
+  $('swipe-doom').style.opacity = 0;
+  $('swipe-keep').style.opacity = 0;
+}
+
+function commitModalSwipe(verdict) {
+  const img = $('modal-img');
+  const idx = state.modal.index;
+  const record = state.modal.image;
+  const w = ($('modal-image-wrap').clientWidth || 340) + 260;
+  const dir = verdict === 'doom' ? 1 : -1;
+
+  img.style.transition = 'transform .26s ease-in, opacity .26s ease-in';
+  img.style.transform = `translate3d(${dir * w}px,0,0) rotate(${dir * SWIPE_ROTATION * 1.6}deg)`;
+  img.style.opacity = '0';
+
+  setTimeout(() => {
+    $('swipe-doom').style.opacity = 0;
+    $('swipe-keep').style.opacity = 0;
+    if (verdict === 'doom') scheduleDelete(record, idx);
+    else advanceAfterSwipe(idx);
+    resetModalSwipe(false);
+  }, 240);
+}
+
+// Left: keep it and move on. Running off the end closes rather than sticking
+// on the last picture with nothing left to decide.
+function advanceAfterSwipe(idx) {
+  if (state.modal.dirty) saveModal(true);
+  state.modal.dirty = false;
+  if (idx + 1 < state.images.length) openModal(idx + 1);
+  else closeModal();
+}
+
+// ── Scheduled delete ─────────────────────────────────────────────────────────
+
+function scheduleDelete(record, idx) {
+  flushPendingDelete();          // at most one outstanding
+
+  // Out of the UI immediately — the swipe has to feel final even though the
+  // request has not gone yet.
+  const gridItem = $('grid').querySelector(`[data-idx="${idx}"]`);
+  if (gridItem) gridItem.remove();
+  state.images.splice(idx, 1);
+  state.offset = Math.max(0, state.offset - 1);
+  reindexGrid();
+  updateCountBar();
+
+  pendingDelete.img = record;
+  pendingDelete.idx = idx;
+  pendingDelete.timer = setTimeout(flushPendingDelete, SWIPE_UNDO_MS);
+  showUndoBar(record);
+
+  state.modal.dirty = false;
+  if (!state.images.length) { closeModal(); renderEmpty(); }
+  else openModal(Math.min(idx, state.images.length - 1));
+}
+
+async function flushPendingDelete() {
+  const record = pendingDelete.img;
+  if (!record) return;
+  const idx = pendingDelete.idx;
+  clearTimeout(pendingDelete.timer);
+  pendingDelete.img = null; pendingDelete.idx = null; pendingDelete.timer = null;
+  hideUndoBar();
+  try {
+    await deleteImageApi(record.id);
+  } catch (e) {
+    // The picture is still there; the UI is the thing that is wrong.
+    restoreImage(record, idx);
+    ArtRium.toast('Löschen fehlgeschlagen: ' + e.message, true);
+  }
+}
+
+function undoDelete() {
+  const record = pendingDelete.img;
+  if (!record) return;
+  clearTimeout(pendingDelete.timer);
+  const idx = pendingDelete.idx;
+  pendingDelete.img = null; pendingDelete.idx = null; pendingDelete.timer = null;
+  hideUndoBar();
+  restoreImage(record, idx);
+  ArtRium.toast('Wiederhergestellt');
+}
+
+// Put it back where it was, not at the end — the grid is in a deliberate
+// order and a restored picture jumping to the front would be its own bug.
+function restoreImage(record, idx) {
+  const at = Math.max(0, Math.min(idx, state.images.length));
+  state.images.splice(at, 0, record);
+  state.offset += 1;
+  $('grid').innerHTML = '';
+  renderImages(state.images, true);
+  reindexGrid();
+  updateCountBar();
+}
+
+function showUndoBar(record) {
+  $('undo-text').textContent = record.title ? `„${record.title}" gelöscht` : 'Bild gelöscht';
+  $('undo-bar').classList.add('show');
+}
+
+function hideUndoBar() {
+  $('undo-bar').classList.remove('show');
+}
+
+// ══════════════════════════════════════════════════════════
 // AUSSORTIEREN — the swipe deck
 // ══════════════════════════════════════════════════════════
 // One picture at a time, full screen, decided with a flick: right marks it for
@@ -2957,6 +3226,7 @@ window.addEventListener('load', () => {
   initEnhanceControls();
   initGrainControls();
   initUpscaleControls();
+  initModalSwipe();
   fetchImages(true);
   loadLoraLabels();
   if ('serviceWorker' in navigator) {

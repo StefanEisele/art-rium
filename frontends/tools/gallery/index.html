@@ -325,7 +325,16 @@
       touch-action: pan-y;
       user-select: none; -webkit-user-select: none;
     }
-    .modal-image-wrap img { -webkit-user-drag: none; }
+    .modal-image-wrap img {
+      -webkit-user-drag: none;
+      transform-origin: 50% 50%;
+      will-change: transform;
+    }
+    /* At 1x the wrap keeps `pan-y`, so a vertical drag still scrolls the
+       details underneath. Zoomed, both axes belong to the picture — panning
+       needs them, and so does pinching. */
+    .modal-image-wrap.zoomed { touch-action: none; cursor: grab; }
+    .modal-image-wrap.zoomed:active { cursor: grabbing; }
 
     /* The verdict, drawn on the picture as it moves. */
     .swipe-stamp {
@@ -1284,16 +1293,42 @@ async function loadLoraLabels() {
 const previewSrc = (rawUrl, cssWidth) => {
   if (!rawUrl) return '';
   const [path, query] = rawUrl.split('?');
-  if (!/^\/api\/image\/[^/]+$/.test(path)) return withAuth(rawUrl);
+  // Both shapes: the plain rendition URL (`primary_url`, `enhanced_url`) and
+  // the one the server already hands over as a preview (`preview_url`). Only
+  // matching the first silently dropped `w` from every call that passed the
+  // second — which is all of them — and left the server falling back to its
+  // default width no matter what the screen asked for.
+  const m = /^\/api\/image\/([^/]+)(?:\/preview)?$/.exec(path);
+  if (!m) return withAuth(rawUrl);
   // CSS pixels are not device pixels: 390 px at dpr 3 needs 1170 real ones, or
   // the preview arrives soft on exactly the screens this is meant to help.
   const w = Math.round((cssWidth || window.innerWidth || 900)
                        * Math.min(window.devicePixelRatio || 1, 3));
-  return withAuth(`${path}/preview?${query ? query + '&' : ''}w=${w}`);
+  return withAuth(`/api/image/${m[1]}/preview?${query ? query + '&' : ''}w=${w}`);
 };
 
-const modalPreviewSrc = (rawUrl) =>
-  previewSrc(rawUrl, $('modal-img').clientWidth || window.innerWidth);
+// The size the picture will actually be drawn at, which is not the size of the
+// box it goes in: a portrait image in a wide modal is limited by the box's
+// HEIGHT, and asking for the box's width fetches a rung nobody can see. The
+// stored dimensions give the fit exactly, so the request matches the pixels.
+//
+// Measured on the wrap rather than the <img>, which has no layout size until
+// its own src has loaded.
+const modalPreviewSrc = (rawUrl) => {
+  const rec = state.modal.image;
+  // wrapBox() is the CONTENT box — clientWidth/Height would include the
+  // padding the picture never gets to use, which on desktop was enough to
+  // push the request up a whole rung.
+  const box = wrapBox();
+  const W = box.w || window.innerWidth || 900;
+  const H = box.h || Math.round((window.innerHeight || 800) * 0.6);
+  let longEdge = Math.max(W, H);
+  if (rec && rec.width && rec.height) {
+    const k = Math.min(W / rec.width, H / rec.height);
+    longEdge = Math.max(rec.width * k, rec.height * k);
+  }
+  return previewSrc(rawUrl, longEdge);
+};
 
 const formatDate = iso => {
   const d = new Date(iso);
@@ -1553,8 +1588,13 @@ const loadMore = () => {
 // ══════════════════════════════════════════════════════════
 const openModal = (idx) => {
   state.modal.index = idx;
-  populateModal(state.images[idx]);
+  // Shown before it is filled, deliberately: while the modal is `display:none`
+  // every element in it measures 0, so `populateModal` could not size the
+  // preview to the box it was about to go in and fell back to the whole
+  // window — a rung or two more than the modal can show. Both run in the same
+  // task, so nothing is painted in between.
   $('modal').classList.add('open');
+  populateModal(state.images[idx]);
   document.body.style.overflow = 'hidden';
 };
 
@@ -1584,7 +1624,9 @@ const populateModal = (img) => {
   // publishing will use — but as its AVIF preview. At modal size that is
   // visually the same picture for a fraction of the bytes; the PNG itself is
   // what the download button is for.
-  // Any half-finished swipe belongs to the picture that was here before.
+  // Any half-finished swipe — or zoom — belongs to the picture that was here
+  // before.
+  resetZoom(false);
   resetModalSwipe(false);
   $('modal-img').src = modalPreviewSrc(img.preview_url || img.primary_url || img.url);
   $('modal-img').alt = img.filename;
@@ -2592,7 +2634,6 @@ const SWIPE_UNDO_MS = 6000;
 const SWIPE_ROTATION = 10;
 const SWIPE_FLICK_VELOCITY = 0.5;
 
-let modalDrag = null;
 const pendingDelete = { img: null, idx: null, timer: null };
 
 // The picture is only a *part* of the modal — the rest scrolls — so the
@@ -2600,9 +2641,131 @@ const pendingDelete = { img: null, idx: null, timer: null };
 const modalSwipeThreshold = () =>
   Math.min(110, Math.max(55, ($('modal-image-wrap').clientWidth || 320) * 0.28));
 
+// ── Zoom, and what it does to the swipe ─────────────────────────────────────
+// Double-tap zooms in on the point you tapped; double-tap again goes back.
+// While zoomed, a drag pans the picture and the verdict swipe stands down —
+// there is no sane way to both look closely at something and be flicking it
+// off the screen. Coming back to 1x hands the gesture straight back.
+//
+// The zoom reads a *bigger* preview rung rather than the PNG: the top rung is
+// never upscaled, so it is the original's own resolution and there is nothing
+// left to gain from the 3 MB file.
+
+const ZOOM_TAP_SCALE = 2.5;      // where a double-tap lands
+const ZOOM_MAX = 4;
+const DOUBLE_TAP_MS = 300;
+const DOUBLE_TAP_SLOP = 30;      // px between the two taps
+
+const zoom = { scale: 1, tx: 0, ty: 0 };
+let zoomDetailFor = null;        // image id whose hi-res rung has been fetched
+
+const isZoomed = () => zoom.scale > 1.01;
+
+// The wrap's content box — the image is centred inside it, and panning is
+// bounded by how far the scaled picture overhangs it.
+function wrapBox() {
+  const el = $('modal-image-wrap');
+  const cs = getComputedStyle(el);
+  return {
+    w: el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+    h: el.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
+  };
+}
+
+// Centre of the image's layout box in viewport coordinates, before transform.
+function imgCentre() {
+  const el = $('modal-img');
+  const prev = el.style.transform;
+  el.style.transform = 'none';
+  const r = el.getBoundingClientRect();
+  el.style.transform = prev;
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height };
+}
+
+function clampPan() {
+  const el = $('modal-img');
+  const box = wrapBox();
+  const maxX = Math.max(0, (el.clientWidth * zoom.scale - box.w) / 2);
+  const maxY = Math.max(0, (el.clientHeight * zoom.scale - box.h) / 2);
+  zoom.tx = Math.max(-maxX, Math.min(maxX, zoom.tx));
+  zoom.ty = Math.max(-maxY, Math.min(maxY, zoom.ty));
+}
+
+function applyZoom(animate) {
+  const el = $('modal-img');
+  el.style.transition = animate ? 'transform .22s cubic-bezier(.2,.8,.3,1)' : 'none';
+  el.style.transform = `translate3d(${zoom.tx}px, ${zoom.ty}px, 0) scale(${zoom.scale})`;
+  $('modal-image-wrap').classList.toggle('zoomed', isZoomed());
+}
+
+function resetZoom(animate) {
+  zoom.scale = 1; zoom.tx = 0; zoom.ty = 0;
+  zoomDetailFor = null;
+  applyZoom(animate);
+  if (!animate) $('modal-img').style.transform = '';
+  $('modal-image-wrap').classList.remove('zoomed');
+}
+
+// Scale about a fixed viewport point, so the thing under the finger stays
+// under the finger. `u` is the point's offset from the image centre in
+// untransformed local units; it must not move.
+function zoomAbout(px, py, next, animate) {
+  const c = imgCentre();
+  const u = { x: (px - c.x - zoom.tx) / zoom.scale, y: (py - c.y - zoom.ty) / zoom.scale };
+  zoom.scale = Math.max(1, Math.min(ZOOM_MAX, next));
+  zoom.tx = px - c.x - u.x * zoom.scale;
+  zoom.ty = py - c.y - u.y * zoom.scale;
+  if (!isZoomed()) { zoom.scale = 1; zoom.tx = 0; zoom.ty = 0; }
+  clampPan();
+  applyZoom(animate);
+  if (isZoomed()) ensureZoomDetail();
+}
+
+// A zoomed picture deserves the pixels it is being asked for. The top rung is
+// capped at the source's own size, so this is as sharp as the original gets.
+function ensureZoomDetail() {
+  const rec = state.modal.image;
+  if (!rec || zoomDetailFor === rec.id) return;
+  zoomDetailFor = rec.id;
+  const hi = previewSrc(rec.preview_url || rec.primary_url || rec.url, 4000);
+  const pre = new window.Image();
+  pre.decoding = 'async';
+  pre.onload = () => {
+    // The modal may have moved on while this was in flight.
+    if (state.modal.image && state.modal.image.id === rec.id) $('modal-img').src = hi;
+  };
+  pre.src = hi;
+}
+
+// ── One gesture handler, three jobs ─────────────────────────────────────────
+// Which one a drag is depends on how many fingers are down and whether the
+// picture is zoomed:
+//
+//   1 finger, 1x    verdict swipe  — right deletes, left moves on
+//   1 finger, >1x   pan
+//   2 fingers       pinch
+//
+// A tap that is not a drag, twice in quick succession, toggles the zoom.
+
+let modalDrag = null;
+const gesture = { pointers: new Map(), mode: null, lastTap: null, lastPointerType: 'mouse' };
+
 function initModalSwipe() {
   const wrap = $('modal-image-wrap');
-  wrap.addEventListener('pointerdown', onModalSwipeDown);
+  wrap.addEventListener('pointerdown', onModalPointerDown);
+  wrap.addEventListener('pointermove', onModalPointerMove);
+  wrap.addEventListener('pointerup', onModalPointerUp);
+  wrap.addEventListener('pointercancel', onModalPointerUp);
+  // Trackpads and mice get a zoom too, on the same state — but ONLY those.
+  // A touch double-tap is already handled below, and the browser synthesises
+  // a `dblclick` from it afterwards; without this guard that second event
+  // toggles the zoom straight back off and a double-tap appears to do
+  // nothing at all.
+  wrap.addEventListener('dblclick', e => {
+    if (gesture.lastPointerType !== 'mouse') return;
+    e.preventDefault();
+    zoomAbout(e.clientX, e.clientY, isZoomed() ? 1 : ZOOM_TAP_SCALE, true);
+  });
   // Whatever happens, a scheduled delete must not be left dangling behind a
   // closed modal or a backgrounded tab.
   document.addEventListener('visibilitychange', () => {
@@ -2611,25 +2774,55 @@ function initModalSwipe() {
   window.addEventListener('pagehide', () => flushPendingDelete());
 }
 
-function onModalSwipeDown(e) {
-  if (!state.modal.image || modalDrag) return;
-  // Let the controls on top of the picture keep their taps.
+const pinchDistance = () => {
+  const [a, b] = [...gesture.pointers.values()];
+  return Math.hypot(a.x - b.x, a.y - b.y);
+};
+const pinchMid = () => {
+  const [a, b] = [...gesture.pointers.values()];
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+};
+
+function onModalPointerDown(e) {
+  if (!state.modal.image) return;
   if (e.target.closest('button, a, input, textarea')) return;
   const wrap = e.currentTarget;
   wrap.setPointerCapture(e.pointerId);
+  gesture.lastPointerType = e.pointerType;
+  gesture.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (gesture.pointers.size === 2) {
+    // A second finger converts whatever was happening into a pinch.
+    modalDrag = null;
+    gesture.mode = 'pinch';
+    gesture.pinch = { dist0: pinchDistance(), scale0: zoom.scale };
+    return;
+  }
+  if (gesture.pointers.size > 2) return;
+
+  gesture.mode = isZoomed() ? 'pan' : 'swipe';
   modalDrag = {
-    wrap, id: e.pointerId,
+    id: e.pointerId, wrap,
     x0: e.clientX, y0: e.clientY,
-    dx: 0, dy: 0, vx: 0, tLast: performance.now(),
-    decided: false,
+    dx: 0, dy: 0, vx: 0, tLast: performance.now(), t0: performance.now(),
+    tx0: zoom.tx, ty0: zoom.ty,
+    decided: false, horizontal: false, moved: 0,
   };
   $('modal-img').style.transition = 'none';
-  wrap.addEventListener('pointermove', onModalSwipeMove);
-  wrap.addEventListener('pointerup', onModalSwipeUp);
-  wrap.addEventListener('pointercancel', onModalSwipeUp);
 }
 
-function onModalSwipeMove(e) {
+function onModalPointerMove(e) {
+  const p = gesture.pointers.get(e.pointerId);
+  if (!p) return;
+  p.x = e.clientX; p.y = e.clientY;
+
+  if (gesture.mode === 'pinch' && gesture.pointers.size >= 2) {
+    const mid = pinchMid();
+    const next = gesture.pinch.scale0 * (pinchDistance() / (gesture.pinch.dist0 || 1));
+    zoomAbout(mid.x, mid.y, next, false);
+    return;
+  }
+
   const d = modalDrag;
   if (!d || e.pointerId !== d.id) return;
   const now = performance.now();
@@ -2637,6 +2830,15 @@ function onModalSwipeMove(e) {
   const dy = e.clientY - d.y0;
   d.vx = (dx - d.dx) / Math.max(1, now - d.tLast);
   d.dx = dx; d.dy = dy; d.tLast = now;
+  d.moved = Math.max(d.moved, Math.hypot(dx, dy));
+
+  if (gesture.mode === 'pan') {
+    zoom.tx = d.tx0 + dx;
+    zoom.ty = d.ty0 + dy;
+    clampPan();
+    applyZoom(false);
+    return;
+  }
 
   // `touch-action: pan-y` hands vertical drags back to the scroller, but the
   // first few pixels arrive here either way. Until the direction is obvious,
@@ -2656,14 +2858,39 @@ function onModalSwipeMove(e) {
   $('swipe-keep').style.opacity = dx < 0 ? s : 0;
 }
 
-function onModalSwipeUp(e) {
+function onModalPointerUp(e) {
+  const had = gesture.pointers.delete(e.pointerId);
+  if (!had) return;
+
+  if (gesture.mode === 'pinch') {
+    // Pinching back below 1x is how you leave zoom mode, so snap there
+    // cleanly rather than leaving it at 1.02 with the swipe still disabled.
+    if (!isZoomed()) resetZoom(true); else { clampPan(); applyZoom(true); }
+    if (gesture.pointers.size === 0) { gesture.mode = null; modalDrag = null; }
+    return;
+  }
+
   const d = modalDrag;
   if (!d || e.pointerId !== d.id) return;
-  const { wrap } = d;
-  wrap.removeEventListener('pointermove', onModalSwipeMove);
-  wrap.removeEventListener('pointerup', onModalSwipeUp);
-  wrap.removeEventListener('pointercancel', onModalSwipeUp);
   modalDrag = null;
+  const mode = gesture.mode;
+  gesture.mode = null;
+
+  // A tap, not a drag: two of them in quick succession toggle the zoom.
+  if (d.moved < 10 && performance.now() - d.t0 < 400) {
+    const prev = gesture.lastTap;
+    const now = performance.now();
+    if (prev && now - prev.t < DOUBLE_TAP_MS
+        && Math.hypot(e.clientX - prev.x, e.clientY - prev.y) < DOUBLE_TAP_SLOP) {
+      gesture.lastTap = null;
+      zoomAbout(e.clientX, e.clientY, isZoomed() ? 1 : ZOOM_TAP_SCALE, true);
+      return;
+    }
+    gesture.lastTap = { t: now, x: e.clientX, y: e.clientY };
+    return;
+  }
+
+  if (mode === 'pan') { clampPan(); applyZoom(true); return; }
 
   const far = Math.abs(d.dx) >= modalSwipeThreshold();
   const flicked = Math.abs(d.vx) >= SWIPE_FLICK_VELOCITY && Math.abs(d.dx) > 22;
@@ -2676,14 +2903,18 @@ function onModalSwipeUp(e) {
 
 function resetModalSwipe(animate) {
   const img = $('modal-img');
+  $('swipe-doom').style.opacity = 0;
+  $('swipe-keep').style.opacity = 0;
+  if (isZoomed()) { applyZoom(animate); return; }
   img.style.transition = animate ? 'transform .24s cubic-bezier(.2,.8,.3,1)' : 'none';
   img.style.transform = '';
   img.style.opacity = '';
-  $('swipe-doom').style.opacity = 0;
-  $('swipe-keep').style.opacity = 0;
 }
 
 function commitModalSwipe(verdict) {
+  // Belt and braces: the router already sends drags to `pan` while zoomed,
+  // but nothing else may quietly delete a picture the user is inspecting.
+  if (isZoomed()) { resetModalSwipe(true); return; }
   const img = $('modal-img');
   const idx = state.modal.index;
   const record = state.modal.image;

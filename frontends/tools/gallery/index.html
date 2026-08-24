@@ -89,6 +89,13 @@
     }
     .filter-bar::-webkit-scrollbar { display: none; }
 
+    .filter-chip.action {
+      color: var(--accent);
+      border-color: var(--accent-border);
+      background: var(--accent-soft);
+      font-weight: 600;
+    }
+
     .filter-chip {
       flex-shrink: 0;
       background: var(--surface2);
@@ -697,6 +704,169 @@
        Mobile stays untouched below this breakpoint; above it we widen the
        shell and let the grid use the extra horizontal space. Placed last so
        it wins the cascade over the equal-specificity mobile rules above. */
+    /* The download is an <a> so the browser saves the file instead of
+       navigating to it; shared.css styles .btn for <button>, so it needs the
+       few properties an anchor does not inherit. */
+    a#download-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      text-decoration: none; text-align: center;
+    }
+
+    /* ══ Aussortieren — the swipe deck ══════════════════════════════════
+       A full-screen card stack for going through the library quickly: drag
+       right to mark for deletion, left to keep. Everything that moves during
+       a drag is a `transform` on a single promoted element, so a swipe never
+       touches layout — on a phone that is the difference between 60 fps and
+       a slideshow. */
+    .cull {
+      position: fixed; inset: 0; z-index: 60;
+      background: var(--bg);
+      display: none; flex-direction: column;
+      /* The deck is driven by pointer events; the browser must not also
+         interpret the same gesture as a scroll or a back-navigation. */
+      touch-action: none;
+      overscroll-behavior: contain;
+    }
+    .cull.open { display: flex; }
+
+    .cull-top {
+      display: flex; align-items: center; gap: 12px;
+      padding: calc(env(safe-area-inset-top) + 12px) 16px 12px;
+      border-bottom: 1px solid var(--border);
+      flex: 0 0 auto;
+    }
+    .cull-top h2 { font-size: 16px; font-weight: 700; margin: 0; flex: 0 0 auto; }
+    .cull-progress { color: var(--text-dim); font-size: 13px; font-variant-numeric: tabular-nums; }
+    .cull-pending {
+      margin-left: auto; font-size: 12px; font-weight: 700;
+      color: var(--red); font-variant-numeric: tabular-nums;
+      opacity: 0; transition: opacity .18s;
+    }
+    .cull-pending.show { opacity: 1; }
+    .cull-close {
+      background: none; border: none; color: var(--text-dim);
+      font-size: 26px; line-height: 1; cursor: pointer; padding: 0 4px;
+      font-family: inherit;
+    }
+
+    /* ── The stack ── */
+    .cull-deck {
+      position: relative; flex: 1 1 auto; min-height: 0;
+      margin: 14px 16px 0;
+    }
+    .cull-card {
+      position: absolute; inset: 0;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); overflow: hidden;
+      display: flex; flex-direction: column;
+      box-shadow: var(--shadow-card);
+      /* Only the front card is interactive; the ones behind are scenery. */
+      pointer-events: none;
+      will-change: transform;
+      backface-visibility: hidden;
+    }
+    .cull-card.front { pointer-events: auto; cursor: grab; }
+    /* Dragging a picture is a native browser gesture: mouse-down on an <img>
+       starts HTML5 drag-and-drop, which fires `pointercancel` and takes the
+       swipe with it. Text selection does the same on the details panel. Both
+       have to be switched off for the card to own the gesture. */
+    .cull-card, .cull-card img {
+      user-select: none; -webkit-user-select: none;
+      -webkit-user-drag: none; -webkit-touch-callout: none;
+    }
+    .cull-card.front:active { cursor: grabbing; }
+    /* Springing back and flying out are the only animated states — during a
+       drag the transform is set directly, with no transition in the way. */
+    .cull-card.settling { transition: transform .28s cubic-bezier(.2,.8,.3,1); }
+    .cull-card.flying { transition: transform .32s cubic-bezier(.4,0,.7,.4), opacity .32s; }
+
+    .cull-figure {
+      position: relative; flex: 1 1 auto; min-height: 0;
+      background: #000;
+      display: flex; align-items: center; justify-content: center;
+    }
+    /* The blurred thumbnail sits underneath as an instant placeholder — it is
+       already in cache from the grid, so a card is never empty while the
+       sharp AVIF decodes on top of it. */
+    .cull-figure .blur {
+      position: absolute; inset: 0;
+      background-size: cover; background-position: center;
+      filter: blur(18px) saturate(1.2); transform: scale(1.15);
+      opacity: .5;
+    }
+    .cull-figure img {
+      position: relative;
+      max-width: 100%; max-height: 100%;
+      width: auto; height: auto;
+      object-fit: contain;
+      opacity: 0; transition: opacity .18s;
+    }
+    .cull-figure img.ready { opacity: 1; }
+
+    /* ── The two verdicts ── */
+    .cull-stamp {
+      position: absolute; top: 18px;
+      font-size: 22px; font-weight: 800; letter-spacing: 1.5px;
+      padding: 8px 14px; border-radius: var(--radius-sm);
+      border: 3px solid currentColor; text-transform: uppercase;
+      opacity: 0; pointer-events: none;
+      /* Opacity is written on every pointermove; keeping it off the main
+         thread's layout path matters as much here as on the card itself. */
+      will-change: opacity;
+    }
+    .cull-stamp.keep   { left: 18px;  color: var(--green); transform: rotate(-12deg); }
+    .cull-stamp.doom   { right: 18px; color: var(--red);   transform: rotate(12deg); }
+
+    /* ── Details under the picture ── */
+    .cull-info { flex: 0 0 auto; padding: 10px 14px 12px; border-top: 1px solid var(--border); }
+    .cull-info .t {
+      font-size: 15px; font-weight: 700; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .cull-info .t.none { color: var(--text-faint); font-weight: 600; font-style: italic; }
+    .cull-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+    .cull-chips .c {
+      font-size: 11px; color: var(--text-dim); background: var(--surface2);
+      border: 1px solid var(--border); border-radius: var(--radius-pill);
+      padding: 3px 8px; white-space: nowrap;
+    }
+    .cull-chips .c.star { color: var(--yellow); }
+    .cull-prompt {
+      margin-top: 8px; font-size: 12px; line-height: 1.45; color: var(--text-dim);
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .cull-prompt.open { -webkit-line-clamp: unset; }
+
+    /* ── Footer controls (and the only way through on a desktop) ── */
+    .cull-actions {
+      flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+      padding: 12px 16px calc(env(safe-area-inset-bottom) + 14px);
+    }
+    .cull-btn {
+      flex: 1 1 0; min-width: 0;
+      padding: 13px 10px; border-radius: var(--radius-pill);
+      border: 1.5px solid var(--border); background: var(--surface2);
+      color: var(--text); font-size: 14px; font-weight: 700;
+      font-family: inherit; cursor: pointer;
+    }
+    .cull-btn.keep { border-color: rgba(78,168,112,0.45); color: var(--green); }
+    .cull-btn.doom { border-color: rgba(197,74,59,0.45);  color: var(--red); }
+    .cull-btn.flat { flex: 0 0 auto; padding: 13px 16px; color: var(--text-dim); }
+    .cull-btn:disabled { opacity: .35; cursor: default; }
+
+    /* ── End-of-deck summary ── */
+    .cull-done {
+      position: absolute; inset: 0; display: none;
+      flex-direction: column; align-items: center; justify-content: center;
+      gap: 8px; text-align: center; padding: 24px;
+    }
+    .cull-done.show { display: flex; }
+    .cull-done .big { font-size: 40px; }
+    .cull-done h3 { margin: 4px 0 0; font-size: 18px; }
+    .cull-done p { margin: 0; color: var(--text-dim); font-size: 14px; }
+    .cull-done .row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; justify-content: center; }
+
     @media (min-width: 860px) {
       .app { max-width: 1600px; }
       header { padding: 18px 28px; }
@@ -710,6 +880,10 @@
       }
       .video-detail-sheet { max-width: 760px; }
       video.vd-player { max-height: min(70vh, 640px); }
+      /* A card the width of a desktop window would be all letterboxing —
+         these pictures are mostly portrait. Hold it to a phone-ish column. */
+      .cull-deck { width: min(520px, 100%); margin-left: auto; margin-right: auto; }
+      .cull-actions { width: min(520px, 100%); margin: 0 auto; }
     }
   </style>
 </head>
@@ -729,6 +903,10 @@
   </header>
 
   <div class="filter-bar" id="filter-bar">
+    <!-- First, and deliberately: the bar scrolls horizontally and is already
+         wider than a phone, so anything added at the end is invisible until
+         you think to swipe a row you have no reason to think is scrollable. -->
+    <button class="filter-chip action" id="cull-chip" onclick="openCull()">⇄ Aussortieren</button>
     <button class="filter-chip active" data-rating="" onclick="setRatingFilter(this)">All</button>
     <button class="filter-chip" data-rating="5" onclick="setRatingFilter(this)">★ 5</button>
     <button class="filter-chip" data-rating="4" onclick="setRatingFilter(this)">★ 4+</button>
@@ -752,6 +930,34 @@
     <button class="btn danger" id="bulk-delete-btn" onclick="bulkDelete()" disabled>Delete</button>
   </div>
 
+</div>
+
+<!-- ── Aussortieren: swipe deck ──
+     Right = mark for deletion, left = keep. Nothing is deleted while you
+     swipe: verdicts are collected and committed in one confirmed batch at the
+     end, so a misfired gesture costs an undo rather than a picture. -->
+<div class="cull" id="cull">
+  <div class="cull-top">
+    <h2>Aussortieren</h2>
+    <span class="cull-progress" id="cull-progress"></span>
+    <span class="cull-pending" id="cull-pending"></span>
+    <button class="cull-close" onclick="closeCull()" title="Schließen">✕</button>
+  </div>
+
+  <div class="cull-deck" id="cull-deck">
+    <div class="cull-done" id="cull-done">
+      <div class="big">🎉</div>
+      <h3 id="cull-done-title">Durch!</h3>
+      <p id="cull-done-text"></p>
+      <div class="row" id="cull-done-actions"></div>
+    </div>
+  </div>
+
+  <div class="cull-actions" id="cull-controls">
+    <button class="cull-btn keep" id="cull-keep" onclick="cullVerdict('keep')">← Behalten</button>
+    <button class="cull-btn flat" id="cull-undo" onclick="cullUndo()" title="Rückgängig">↺</button>
+    <button class="cull-btn doom" id="cull-doom" onclick="cullVerdict('doom')">Löschen →</button>
+  </div>
 </div>
 
 <!-- ── Detail Modal ── -->
@@ -912,6 +1118,7 @@
     <!-- Actions -->
     <div class="action-row">
       <button class="btn danger" id="delete-btn" onclick="confirmDelete()">Delete</button>
+      <a class="btn" id="download-btn" href="#" download>PNG laden</a>
       <button class="btn primary" id="save-btn" onclick="saveModal()">Save</button>
     </div>
 
@@ -1003,6 +1210,28 @@ async function loadLoraLabels() {
     loraLabelByFilename = Object.fromEntries((d.loras || []).map(l => [l.filename, l.label]));
   } catch (_) { /* chips fall back to the raw filename */ }
 }
+
+// An `/api/image/<name>` URL rewritten to its AVIF preview, sized for the box
+// it will be shown in. Everything that puts a picture on screen goes through
+// here; the raw PNG is reserved for the download button, which is the only
+// place the full file is actually wanted.
+//
+// The existing query is preserved, not dropped: it carries the `?v=` rendition
+// marker, and these responses are cached `immutable`, so without it a
+// re-enhanced picture would keep showing the browser's copy of the old one.
+const previewSrc = (rawUrl, cssWidth) => {
+  if (!rawUrl) return '';
+  const [path, query] = rawUrl.split('?');
+  if (!/^\/api\/image\/[^/]+$/.test(path)) return withAuth(rawUrl);
+  // CSS pixels are not device pixels: 390 px at dpr 3 needs 1170 real ones, or
+  // the preview arrives soft on exactly the screens this is meant to help.
+  const w = Math.round((cssWidth || window.innerWidth || 900)
+                       * Math.min(window.devicePixelRatio || 1, 3));
+  return withAuth(`${path}/preview?${query ? query + '&' : ''}w=${w}`);
+};
+
+const modalPreviewSrc = (rawUrl) =>
+  previewSrc(rawUrl, $('modal-img').clientWidth || window.innerWidth);
 
 const formatDate = iso => {
   const d = new Date(iso);
@@ -1289,10 +1518,16 @@ const populateModal = (img) => {
   state.modal.rating = img.rating || null;
   state.modal.tags   = img.tags ? [...img.tags] : [];
 
-  // Full-quality image in modal — the enhanced rendition when there is one,
-  // so the modal shows what publishing will use.
-  $('modal-img').src = withAuth(img.primary_url || img.url);
+  // The enhanced rendition when there is one, so the modal shows what
+  // publishing will use — but as its AVIF preview. At modal size that is
+  // visually the same picture for a fraction of the bytes; the PNG itself is
+  // what the download button is for.
+  $('modal-img').src = modalPreviewSrc(img.preview_url || img.primary_url || img.url);
   $('modal-img').alt = img.filename;
+
+  const dl = $('download-btn');
+  dl.href = withAuth(img.primary_url || img.url);
+  dl.download = img.filename;
 
   renderEnhanceUI(img);
   renderGrainUI(img);
@@ -1466,7 +1701,10 @@ const showRendition = (which) => {
             : which === 'unenhanced' ? (img.upscaled_url || img.url)
             : which === 'ungrained'  ? (img.enhanced_url || img.upscaled_url || img.url)
             : (img.primary_url || img.url);
-  $('modal-img').src = withAuth(src);
+  // Through the preview endpoint like everything else on screen: a compare
+  // that had to fetch two multi-megabyte PNGs would stall exactly where it
+  // needs to feel like a toggle.
+  $('modal-img').src = modalPreviewSrc(src);
 };
 
 const initEnhanceControls = () => {
@@ -2270,6 +2508,421 @@ async function deleteActiveVideo() {
 }
 
 // ══════════════════════════════════════════════════════════
+// AUSSORTIEREN — the swipe deck
+// ══════════════════════════════════════════════════════════
+// One picture at a time, full screen, decided with a flick: right marks it for
+// deletion, left keeps it. The point is speed, so three things are true by
+// design:
+//
+// - **Nothing is deleted while you swipe.** Verdicts pile up in `doomed` and
+//   are committed in a single confirmed request at the end. A gesture is a
+//   cheap thing to get wrong and a deleted picture is not recoverable, so the
+//   two are kept apart; ↺ walks back through the decisions in order.
+// - **Three cards exist at a time.** The deck is `state.images`, which can be
+//   hundreds long — mounting it would cost hundreds of decodes up front.
+// - **Previews, not originals.** Each card loads the AVIF rendition sized to
+//   the card, ~30-70x smaller than the PNG behind it, and the next few are
+//   fetched while the current one is being looked at, so the picture is
+//   already decoded by the time it reaches the front.
+
+const CULL_WINDOW = 3;          // cards mounted at once (front + 2 behind)
+const CULL_PREFETCH = 4;        // previews requested ahead of the front card
+const CULL_ROTATION = 14;       // degrees at full swipe travel
+const CULL_FLICK_VELOCITY = 0.6;   // px/ms past which a short drag still counts
+
+const cull = {
+  open: false,
+  queue: [],        // the images being reviewed, in grid order
+  pos: 0,           // index of the card at the front
+  doomed: [],       // images marked for deletion (ids committed on finish)
+  history: [],      // {verdict} per decision, newest last — the undo stack
+  cards: new Map(), // queue index → mounted element
+  drag: null,
+  busy: false,
+};
+
+// Sized to the deck rather than the window: on a desktop the card is held to
+// a 520 px column, so asking for the full window width would fetch four times
+// the pixels the card can show.
+const cullPreviewUrl = (img) => previewSrc(
+  img.preview_url || img.primary_url || img.url,
+  $('cull-deck').clientWidth || window.innerWidth,
+);
+
+// ── Opening and closing ──────────────────────────────────────────────────────
+
+function openCull() {
+  if (videoMode) { ArtRium.toast('Aussortieren gilt für Bilder, nicht für Videos'); return; }
+  if (!state.images.length) { ArtRium.toast('Keine Bilder zum Aussortieren'); return; }
+
+  cull.queue = [...state.images];
+  cull.pos = 0;
+  cull.doomed = [];
+  cull.history = [];
+  cull.cards.forEach(el => el.remove());
+  cull.cards.clear();
+  cull.busy = false;
+  cull.open = true;
+
+  $('cull').classList.add('open');
+  $('cull-done').classList.remove('show');
+  $('cull-controls').style.display = '';
+  document.body.style.overflow = 'hidden';
+  syncCullDeck();
+  renderCullStatus();
+}
+
+async function closeCull(force = false) {
+  if (!force && cull.doomed.length) {
+    const n = cull.doomed.length;
+    const go = confirm(`${n} Bild${n === 1 ? '' : 'er'} sind zum Löschen markiert.\n\n`
+      + 'OK = jetzt löschen\nAbbrechen = Markierungen verwerfen');
+    if (go) { await commitCull(); return; }
+  }
+  cull.open = false;
+  cull.cards.forEach(el => el.remove());
+  cull.cards.clear();
+  cull.doomed = [];
+  cull.history = [];
+  $('cull').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+// ── Mounting ─────────────────────────────────────────────────────────────────
+// Only the indices in [pos, pos+CULL_WINDOW) are in the DOM. Cards are kept in
+// a Map keyed by queue index so that advancing reuses the ones already
+// decoded instead of rebuilding — the next card must never flash.
+
+function syncCullDeck() {
+  const deck = $('cull-deck');
+  const last = Math.min(cull.pos + CULL_WINDOW, cull.queue.length);
+
+  for (const [idx, el] of cull.cards) {
+    if (idx < cull.pos || idx >= last) { el.remove(); cull.cards.delete(idx); }
+  }
+  for (let idx = last - 1; idx >= cull.pos; idx--) {
+    if (!cull.cards.has(idx)) {
+      const el = makeCullCard(cull.queue[idx], idx);
+      cull.cards.set(idx, el);
+      // Prepend: later indices must sit *behind* earlier ones.
+      deck.insertBefore(el, deck.firstChild);
+    }
+  }
+  for (const [idx, el] of cull.cards) {
+    const depth = idx - cull.pos;
+    el.classList.toggle('front', depth === 0);
+    // The stack reads as depth without a shadow per card: each one behind is
+    // slightly smaller and pushed down.
+    el.style.transform = depth === 0
+      ? 'translate3d(0,0,0)'
+      : `translate3d(0,${depth * 8}px,0) scale(${1 - depth * 0.03})`;
+    el.style.zIndex = String(CULL_WINDOW - depth);
+    el.style.opacity = depth >= CULL_WINDOW ? '0' : '1';
+  }
+
+  prefetchCullPreviews();
+  if (cull.pos >= cull.queue.length) showCullDone();
+}
+
+function makeCullCard(img, idx) {
+  const card = document.createElement('div');
+  card.className = 'cull-card';
+  card.dataset.idx = String(idx);
+
+  const fig = document.createElement('div');
+  fig.className = 'cull-figure';
+
+  // The grid thumbnail is already in the browser cache, so it paints instantly
+  // and gives the AVIF something to fade in over.
+  const blur = document.createElement('div');
+  blur.className = 'blur';
+  blur.style.backgroundImage = `url("${withAuth(img.thumb_url)}")`;
+
+  const el = document.createElement('img');
+  el.alt = img.title || img.filename;
+  el.decoding = 'async';
+  el.draggable = false;        // belt and braces with the CSS above
+  el.src = cullPreviewUrl(img);
+  // `decode()` resolves once the bitmap is ready, so the fade-in never lands
+  // on a half-drawn frame. Falling back to `onload` covers browsers that
+  // reject it for a cached image.
+  const reveal = () => el.classList.add('ready');
+  if (el.decode) el.decode().then(reveal).catch(reveal);
+  else el.onload = reveal;
+
+  const keep = document.createElement('div');
+  keep.className = 'cull-stamp keep';
+  keep.textContent = 'Behalten';
+  const doom = document.createElement('div');
+  doom.className = 'cull-stamp doom';
+  doom.textContent = 'Löschen';
+
+  fig.append(blur, el, keep, doom);
+  card.appendChild(fig);
+  card.appendChild(makeCullInfo(img));
+
+  card.addEventListener('pointerdown', onCullPointerDown);
+  return card;
+}
+
+function makeCullInfo(img) {
+  const info = document.createElement('div');
+  info.className = 'cull-info';
+
+  const title = document.createElement('div');
+  title.className = 't' + (img.title ? '' : ' none');
+  title.textContent = img.title || 'Ohne Titel';
+  info.appendChild(title);
+
+  const chips = document.createElement('div');
+  chips.className = 'cull-chips';
+  const loraChips = (img.loras || []).map(l =>
+    `${loraLabelByFilename[l.name] || l.name} ${Number(l.strength).toFixed(2)}`);
+  const bits = [
+    img.rating ? { t: '★'.repeat(img.rating), cls: 'star' } : null,
+    img.upscaled && img.upscale_width
+      ? { t: `${img.upscale_width}×${img.upscale_height} ⤢` }
+      : (img.width && img.height ? { t: `${img.width}×${img.height}` } : null),
+    img.enhanced ? { t: '🪄' } : null,
+    img.grained ? { t: '🎞' } : null,
+    img.workflow_name ? { t: img.workflow_name } : null,
+    ...loraChips.map(t => ({ t })),
+    img.seed !== null && img.seed !== undefined ? { t: `seed ${img.seed}` } : null,
+    { t: formatDate(img.created_at) },
+  ].filter(Boolean);
+  bits.forEach(b => {
+    const c = document.createElement('div');
+    c.className = 'c' + (b.cls ? ' ' + b.cls : '');
+    c.textContent = b.t;
+    chips.appendChild(c);
+  });
+  info.appendChild(chips);
+
+  if (img.prompt) {
+    const pr = document.createElement('div');
+    pr.className = 'cull-prompt';
+    pr.textContent = img.prompt;
+    // Reading the prompt is a reason to stop and look, so let it expand — but
+    // never let that tap start a swipe.
+    pr.addEventListener('pointerdown', e => e.stopPropagation());
+    pr.addEventListener('click', () => pr.classList.toggle('open'));
+    info.appendChild(pr);
+  }
+  return info;
+}
+
+// Ask the server for the previews just behind the front card while it is being
+// looked at. A cold AVIF costs ~150 ms to encode; by the time the card is
+// swiped away the next few are already rendered and cached.
+function prefetchCullPreviews() {
+  for (let i = cull.pos; i < Math.min(cull.pos + CULL_PREFETCH, cull.queue.length); i++) {
+    const img = cull.queue[i];
+    if (!img || img._prefetched) continue;
+    img._prefetched = true;
+    const pre = new window.Image();
+    pre.decoding = 'async';
+    pre.src = cullPreviewUrl(img);
+  }
+}
+
+// ── Dragging ─────────────────────────────────────────────────────────────────
+
+function onCullPointerDown(e) {
+  if (cull.busy) return;
+  const card = e.currentTarget;
+  if (!card.classList.contains('front')) return;
+  card.setPointerCapture(e.pointerId);
+  card.classList.remove('settling');
+  cull.drag = {
+    card, id: e.pointerId,
+    x0: e.clientX, y0: e.clientY,
+    dx: 0, dy: 0,
+    t0: performance.now(), tLast: performance.now(), vx: 0,
+  };
+  card.addEventListener('pointermove', onCullPointerMove);
+  card.addEventListener('pointerup', onCullPointerUp);
+  card.addEventListener('pointercancel', onCullPointerUp);
+}
+
+function onCullPointerMove(e) {
+  const d = cull.drag;
+  if (!d || e.pointerId !== d.id) return;
+  const now = performance.now();
+  const dx = e.clientX - d.x0;
+  const dt = Math.max(1, now - d.tLast);
+  d.vx = (dx - d.dx) / dt;
+  d.dx = dx;
+  d.dy = e.clientY - d.y0;
+  d.tLast = now;
+  paintCullDrag(d.card, d.dx, d.dy);
+}
+
+// Transform and opacity only — no property here can invalidate layout.
+function paintCullDrag(card, dx, dy) {
+  const reach = cullThreshold() * 2;
+  const rot = Math.max(-1, Math.min(1, dx / reach)) * CULL_ROTATION;
+  card.style.transform = `translate3d(${dx}px, ${dy * 0.35}px, 0) rotate(${rot}deg)`;
+  const strength = Math.min(1, Math.abs(dx) / cullThreshold());
+  card.querySelector('.cull-stamp.doom').style.opacity = dx > 0 ? strength : 0;
+  card.querySelector('.cull-stamp.keep').style.opacity = dx < 0 ? strength : 0;
+}
+
+// Far enough to be deliberate, near enough to be quick: about a quarter of the
+// card, and never more than 120 px on a big screen.
+const cullThreshold = () => {
+  const w = $('cull-deck').clientWidth || window.innerWidth;
+  return Math.min(120, Math.max(60, w * 0.25));
+};
+
+function onCullPointerUp(e) {
+  const d = cull.drag;
+  if (!d || e.pointerId !== d.id) return;
+  const { card } = d;
+  card.removeEventListener('pointermove', onCullPointerMove);
+  card.removeEventListener('pointerup', onCullPointerUp);
+  card.removeEventListener('pointercancel', onCullPointerUp);
+  cull.drag = null;
+
+  const past = Math.abs(d.dx) >= cullThreshold();
+  // A short, fast flick counts too — otherwise the gesture only works if you
+  // drag the whole way, which is the slow thing this mode exists to avoid.
+  const flicked = Math.abs(d.vx) >= CULL_FLICK_VELOCITY && Math.abs(d.dx) > 24;
+  if (e.type !== 'pointercancel' && (past || flicked)) {
+    cullVerdict(d.dx > 0 ? 'doom' : 'keep');
+  } else {
+    card.classList.add('settling');
+    card.style.transform = 'translate3d(0,0,0)';
+    card.querySelector('.cull-stamp.doom').style.opacity = 0;
+    card.querySelector('.cull-stamp.keep').style.opacity = 0;
+  }
+}
+
+// ── Deciding ─────────────────────────────────────────────────────────────────
+
+function cullVerdict(verdict) {
+  if (cull.busy || !cull.open) return;
+  const card = cull.cards.get(cull.pos);
+  const img = cull.queue[cull.pos];
+  if (!card || !img) return;
+  cull.busy = true;
+
+  if (verdict === 'doom') cull.doomed.push(img);
+  cull.history.push({ verdict });
+
+  const w = $('cull-deck').clientWidth || window.innerWidth;
+  const dir = verdict === 'doom' ? 1 : -1;
+  card.classList.remove('settling');
+  card.classList.add('flying');
+  card.querySelector(`.cull-stamp.${verdict}`).style.opacity = 1;
+  // Force the browser to accept the current transform as the transition's
+  // start; without this the class and the transform land in the same frame
+  // and the card teleports.
+  void card.offsetWidth;
+  card.style.transform = `translate3d(${dir * (w + 220)}px, 40px, 0) rotate(${dir * CULL_ROTATION * 1.4}deg)`;
+  card.style.opacity = '0';
+
+  const advance = () => {
+    card.remove();
+    cull.cards.delete(cull.pos);
+    cull.pos++;
+    cull.busy = false;
+    syncCullDeck();
+    renderCullStatus();
+  };
+  card.addEventListener('transitionend', advance, { once: true });
+  // A card that never gets a transitionend (backgrounded tab, reduced motion)
+  // must not wedge the deck.
+  setTimeout(() => { if (cull.busy) advance(); }, 420);
+}
+
+function cullUndo() {
+  if (cull.busy || !cull.history.length) return;
+  const last = cull.history.pop();
+  if (last.verdict === 'doom') cull.doomed.pop();
+  cull.pos--;
+  // The card was destroyed on the way out; it is rebuilt from the queue, and
+  // its preview is still in the browser cache so it reappears instantly.
+  $('cull-done').classList.remove('show');
+  $('cull-controls').style.display = '';
+  syncCullDeck();
+  renderCullStatus();
+}
+
+function renderCullStatus() {
+  const total = cull.queue.length;
+  const seen = Math.min(cull.pos, total);
+  $('cull-progress').textContent = `${Math.min(seen + 1, total)} / ${total}`;
+  const pending = $('cull-pending');
+  pending.textContent = cull.doomed.length ? `${cull.doomed.length} zum Löschen` : '';
+  pending.classList.toggle('show', cull.doomed.length > 0);
+  $('cull-undo').disabled = !cull.history.length;
+  const atEnd = cull.pos >= total;
+  $('cull-keep').disabled = atEnd;
+  $('cull-doom').disabled = atEnd;
+}
+
+// ── The end of the deck ──────────────────────────────────────────────────────
+
+function showCullDone() {
+  const done = $('cull-done');
+  const n = cull.doomed.length;
+  const kept = cull.queue.length - n;
+  $('cull-done-title').textContent = n ? 'Fertig durchgesehen' : 'Alles behalten';
+  $('cull-done-text').textContent = n
+    ? `${n} zum Löschen markiert, ${kept} behalten.`
+    : `${kept} Bilder behalten, keins markiert.`;
+
+  const row = $('cull-done-actions');
+  row.innerHTML = '';
+  if (n) {
+    const del = document.createElement('button');
+    del.className = 'cull-btn doom';
+    del.textContent = `${n} Bild${n === 1 ? '' : 'er'} löschen`;
+    del.onclick = commitCull;
+    row.appendChild(del);
+  }
+  const back = document.createElement('button');
+  back.className = 'cull-btn flat';
+  back.textContent = n ? 'Verwerfen' : 'Schließen';
+  back.onclick = () => closeCull(true);
+  row.appendChild(back);
+
+  if (cull.history.length) {
+    const undo = document.createElement('button');
+    undo.className = 'cull-btn flat';
+    undo.textContent = '↺ Zurück';
+    undo.onclick = cullUndo;
+    row.appendChild(undo);
+  }
+
+  done.classList.add('show');
+  $('cull-controls').style.display = 'none';
+}
+
+async function commitCull() {
+  const ids = cull.doomed.map(i => i.id);
+  if (!ids.length) { closeCull(true); return; }
+  try {
+    await bulkDeleteApi(ids);
+    const gone = new Set(ids);
+    // The grid is rebuilt rather than patched: indices are the modal's
+    // navigation key, so leaving holes in `state.images` would send it to the
+    // wrong picture.
+    state.images = state.images.filter(i => !gone.has(i.id));
+    state.selection.clear();
+    $('grid').innerHTML = '';
+    renderImages(state.images, true);
+    reindexGrid();
+    updateCountBar();
+    ArtRium.toast(`${ids.length} Bild${ids.length === 1 ? '' : 'er'} gelöscht`);
+  } catch (e) {
+    ArtRium.toast('Löschen fehlgeschlagen: ' + e.message, true);
+  }
+  cull.doomed = [];
+  closeCull(true);
+}
+
+// ══════════════════════════════════════════════════════════
 // KEYBOARD
 // ══════════════════════════════════════════════════════════
 document.addEventListener('keydown', e => {
@@ -2277,6 +2930,16 @@ document.addEventListener('keydown', e => {
   // while it is open — Escape must close it, not the image behind it.
   if ($('titler-modal').classList.contains('show')) {
     if (e.key === 'Escape') closeTitler();
+    return;
+  }
+  // Same rule one level up: the swipe deck is full-screen, so while it is
+  // open the arrow keys are verdicts rather than gallery navigation. Keeping
+  // both hands on the keyboard is the fastest way through a long deck.
+  if (cull.open) {
+    if (e.key === 'Escape')     closeCull();
+    if (e.key === 'ArrowLeft')  cullVerdict('keep');
+    if (e.key === 'ArrowRight') cullVerdict('doom');
+    if (e.key === 'ArrowDown' || e.key === 'z') cullUndo();
     return;
   }
   if (!$('modal').classList.contains('open')) return;

@@ -124,6 +124,16 @@ class Settings(BaseSettings):
         return self.storage_dir / "images"
 
     @property
+    def previews_dir(self) -> Path:
+        """Cached AVIF previews (services/image/preview.py).
+
+        Derived and disposable: every file here can be re-rendered from the
+        image it belongs to, so this directory needs no backup and can be
+        deleted wholesale to reclaim space.
+        """
+        return self.storage_dir / "previews"
+
+    @property
     def shop_prep_dir(self) -> Path:
         return self.storage_dir / "shop_prep"
 

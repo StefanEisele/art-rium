@@ -14,6 +14,7 @@ import asyncio
 import logging
 import shutil
 import uuid
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -33,6 +34,7 @@ from services.comfy.client import poll_history, post_workflow, upload_image
 from services.comfy.progress import attach_live_stage
 from workers.comfy_listener import get_listener
 from services.image import grain as grain_service
+from services.image import preview as image_preview
 from services.image.enhance import (
     STRENGTH_DEFAULT,
     STRENGTH_MAX,
@@ -716,6 +718,15 @@ def _delete_files(img: Image) -> None:
             except Exception as e:
                 logger.warning(f"Could not delete file {path}: {e}")
 
+    # Cached AVIF previews are keyed by source stem, one directory per
+    # rendition. Stale entries left behind by a *re-render* are harmless —
+    # nothing points at them — but the ones belonging to a picture that no
+    # longer exists should go with it.
+    for rel in filter(None, [
+        img.filepath, img.enhanced_filepath, img.upscaled_filepath, img.grained_filepath,
+    ]):
+        image_preview.purge(settings.previews_dir, Path(rel).stem)
+
 
 def _serialize(img: Image) -> dict:
     # The thumbnail is re-cut in place whenever a rendition changes, so its URL
@@ -738,6 +749,17 @@ def _serialize(img: Image) -> dict:
         "url": f"/api/image/{img.filename}",
         "thumb_url": f"/api/image/{img.filename}/thumb{version}",
         "primary_url": f"/api/image/{primary_filename(img)}{version}",
+        # What a viewer should actually be shown: the same rendition as
+        # `primary_url`, as a small AVIF instead of a multi-megabyte PNG. The
+        # caller appends `&w=` for the size it needs.
+        #
+        # It carries the same `?v=` marker as the thumbnail, and for the same
+        # reason. The server side cannot go stale — the cache path behind this
+        # is fingerprinted on the file's contents — but the *browser* can:
+        # these responses are sent `immutable`, and re-running the wand
+        # rewrites `..._enhanced.png` under an unchanged URL. The marker is
+        # what makes that a different URL.
+        "preview_url": f"/api/image/{primary_filename(img)}/preview{version}",
         "enhanced": is_enhanced(img),
         "enhance_strength": img.enhance_strength,
         "enhance_params": img.enhance_params,

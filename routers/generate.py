@@ -29,6 +29,7 @@ from core.loras import (
 )
 from core.models import Image
 from core.thumbnail import make_thumbnail, thumb_rel_path
+from services.image import preview as image_preview
 from services.comfy import zimage as zimage_service
 from services.comfy.artivision import build_artivision_workflow
 from services.comfy.client import upload_image
@@ -765,6 +766,45 @@ async def get_image_thumb(filename: str, db: AsyncSession = Depends(get_db)):
     if candidate is None:
         raise HTTPException(status_code=404, detail="Image not found")
     return FileResponse(candidate, media_type="image/png")
+
+
+@router.get("/api/image/{filename}/preview", dependencies=[Depends(require_auth)])
+async def get_image_preview(filename: str, w: int | None = None):
+    """Serve a cached AVIF preview — what viewers should be shown.
+
+    The stored PNG stays the master and is what `/api/image/{filename}` hands
+    over, but it is measured in megabytes and nothing on screen needs that.
+    This is ~30x smaller at the size it is actually displayed at.
+
+    `w` is advisory: it is snapped to `PREVIEW_WIDTHS` so the on-disk cache
+    cannot grow one entry per viewport anyone ever used, and it never
+    upscales, so a small source comes back at its own size.
+    """
+    safe_name = _validate_share_filename(filename)
+    candidate = _find_image_on_disk(safe_name)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    try:
+        preview = await image_preview.render(
+            settings.previews_dir, candidate, image_preview.clamp_width(w)
+        )
+    except Exception as exc:
+        # A preview is an optimisation, never the only way to see a picture.
+        # An encoder that cannot read this particular file should degrade to
+        # the original rather than turn the gallery into a wall of broken
+        # images.
+        logger.warning(f"Preview render failed for {safe_name}, serving original: {exc}")
+        return FileResponse(candidate, media_type="image/png")
+
+    return FileResponse(
+        preview,
+        media_type=image_preview.MEDIA_TYPE,
+        # The cache path carries a fingerprint of the source's contents, so
+        # this exact URL can never mean different pixels later — any rendition
+        # pass moves the image to a different one.
+        headers={"Cache-Control": "private, max-age=31536000, immutable"},
+    )
 
 
 @router.post("/api/images/backfill-thumbnails", dependencies=[Depends(require_auth)])

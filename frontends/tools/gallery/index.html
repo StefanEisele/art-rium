@@ -306,7 +306,15 @@
 
     .modal-image-wrap {
       flex-shrink: 0;
-      max-height: 42vh;
+      /* Portrait is what this library mostly is, and a 9:16 picture is always
+         height-limited here — so this cap alone decides how big it gets, and
+         42vh was leaving two thirds of the width empty. At 60dvh a 1080x1920
+         render comes out 285x506 on a 390px phone instead of 199x354, with
+         276px of body still under it. Landscape is unaffected: those run out
+         of width long before they reach this.
+         dvh, not vh, so the collapsing browser chrome is accounted for —
+         `.app` already measures itself the same way. */
+      max-height: 60dvh;
       display: flex; align-items: center; justify-content: center;
       padding: 0 16px;
       overflow: hidden;

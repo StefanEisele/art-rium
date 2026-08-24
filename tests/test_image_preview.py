@@ -58,8 +58,24 @@ def test_clamp_width_snaps_to_a_rung(asked, expect):
 
 
 def test_clamp_width_only_ever_returns_a_rung():
-    for asked in range(1, 3000, 37):
+    for asked in range(1, 6000, 37):
         assert clamp_width(asked) in PREVIEW_WIDTHS
+
+
+def test_the_ladder_reaches_an_upscale_native_size():
+    """The reason the top rungs exist: a 2x upscale of a 1080x1920 render is
+    3840 on the long edge, and a preview capped below that shows less than the
+    GPU minutes bought — exactly the detail you zoom in to check."""
+    assert clamp_width(3840) >= 3840
+    assert PREVIEW_WIDTHS[-1] >= 4600
+
+
+def test_asking_for_a_native_size_never_interpolates_it_up(tmp_path):
+    """Reaching for a big rung must not turn a small picture into a soft one."""
+    src = write_png(tmp_path / "a.png", size=(1080, 1920))
+    out = asyncio.run(render(tmp_path / "cache", src, clamp_width(1920)))
+    with PILImage.open(out) as im:
+        assert im.size == (1080, 1920)
 
 
 # ── Cache identity ───────────────────────────────────────────────────────────

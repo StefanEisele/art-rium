@@ -61,7 +61,14 @@ logger = logging.getLogger(__name__)
 # The sizes a preview may be rendered at, ascending. 640 covers a grid cell on
 # a dense screen, 1024 a tablet, 1600 a phone at 3x, 2200 a desktop viewing
 # full-bleed. A request between two rungs gets the one above it.
-PREVIEW_WIDTHS = (640, 1024, 1600, 2200)
+#
+# The top two are for zooming, not for fitting on a screen. An upscale is
+# 2160x3840 and the point of it is detail; capping previews at 2200 meant a
+# zoomed upscale showed 57 % of the linear resolution its GPU minutes bought,
+# which is precisely the thing you zoom in to check. Nothing requests these
+# unless it is asking for a picture's native size, and nothing is ever
+# upscaled to reach them.
+PREVIEW_WIDTHS = (640, 1024, 1600, 2200, 3200, 4600)
 DEFAULT_WIDTH = 1600
 
 QUALITY = 58

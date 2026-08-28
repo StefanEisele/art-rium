@@ -1,5 +1,5 @@
 """
-Key-frame video generation — three workflow types, all producing per-segment
+Key-frame video generation — four workflow types, all producing per-segment
 CLIPS that land in a shared clip library (one "stack" per job):
 
   i2v_multi    Each image is animated independently (WanImageToVideo, silent).
@@ -20,6 +20,23 @@ CLIPS that land in a shared clip library (one "stack" per job):
                frame count. Prompts can be auto-suggested in one VLM call via
                POST /api/video/suggest-transitions.
 
+               Wan 2.2 has no first-last-frame checkpoint of its own, so this
+               wants the Wan2.2-Fun-InP expert pair; on the plain i2v pair the
+               end frame is an out-of-distribution constraint and the clip
+               cross-fades instead of moving. See _UNET_FUN_HIGH.
+
+  minimax_flf  The same per-PAIR shape on MiniMax H3, whose checkpoint IS a
+               first-last model (fl2va) and which therefore needs no extra
+               weights. Native audio, 2–7 images, same suggest-transitions
+               endpoint.
+
+Both Wan workflows share one sampler, and it has two dials the request carries:
+`steps` (4-16) buys resolved detail, and `lora_high` (0.0-1.0) is the distill
+strength on the high-noise expert — the expert that plans motion, which at full
+strength plans almost none. The high/low handover is derived from the sigma
+schedule rather than fixed at half the steps; services/comfy/wan_moe.py has the
+arithmetic. MiniMax H3 ignores both and runs its own recipe.
+
 A job is "done" when all of its clips are rendered — there is no per-job
 final file anymore. Final videos are created by merging clips (from any
 number of jobs, in any order, mixed workflows allowed) via POST
@@ -37,7 +54,7 @@ which shows up as morphing at the edits. Upscale the clips, merge, then
 grain the result.
 
 POST /api/video/generate            → enqueue job, return {video_id}
-POST /api/video/suggest-transitions → VLM-suggested per-transition prompts (flf2v)
+POST /api/video/suggest-transitions → VLM-suggested per-transition prompts (flf2v/minimax_flf)
 POST /api/video/suggest-i2v         → VLM-suggested surreal per-image prompts (i2v/minimax)
 GET  /api/video/jobs/{id}           → poll status
 GET  /api/video/jobs/{id}/progress  → lightweight progress (ComfyUI queue + phase)
@@ -85,6 +102,7 @@ from core.video_thumb import (
     probe_video_frames,
 )
 from services.comfy.client import (
+    loader_choices,
     free_memory,
     poll_history,
     post_workflow,
@@ -93,12 +111,17 @@ from services.comfy.client import (
 )
 from services.comfy.ingest import ingest_comfy_image
 from services.comfy.progress import attach_live_stage as _attach_live_stage
+from services.comfy.wan_moe import I2V_BOUNDARY, moe_split_step
+from services.comfy.wan_moe import SCHEDULER as WAN_SCHEDULER
+from services.comfy.wan_transition_loras import offered as offered_transition_loras
+from services.comfy.wan_transition_loras import with_lora_trigger
 from services.comfy.zimage import ZIMAGE_SAVE_NODE, build_zimage_workflow
 from workers.comfy_listener import get_listener
 from services.ollama.analysis import (
     cancel_titler_warmup,
     generate_i2v_motion_prompts,
     generate_minimax_motion_prompts,
+    generate_minimax_transition_prompts,
     generate_transition_prompts,
 )
 from services.ollama.chat import unload_model, wait_until_unloaded
@@ -144,30 +167,170 @@ _POST_PASS_PHASES = frozenset({"upscaling", "graining"})
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
+# Wan's own stock negative, plus 慢动作 ("slow motion"). Worth stating plainly:
+# on the distilled path this string is never scored. cfg is 1, and at cfg 1
+# ComfyUI skips the unconditional pass entirely — that is exactly what makes a
+# 4-to-16-step render affordable. The slow-motion cure therefore lives in
+# `lora_high` below, not here; this line only starts working if someone raises
+# cfg above 1, and it is written so that it would be right when they do.
 _NEG_PROMPT = (
     "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，"
     "最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，"
     "画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，"
-    "杂乱的背景，三条腿，背景人很多，倒着走"
+    "杂乱的背景，三条腿，背景人很多，倒着走，慢动作"
 )
 _CLIP_NAME  = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 _UNET_HIGH  = "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors"
 _UNET_LOW   = "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
 _LORA_HIGH  = "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors"
 _LORA_LOW   = "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+
+# ── The right weights for a transition ───────────────────────────────────────
+# Wan 2.2 shipped three checkpoints: T2V-A14B, I2V-A14B and TI2V-5B. None of
+# them is a first-last-frame model — unlike Wan 2.1, which had a dedicated
+# FLF2V-14B-720P. What `WanFirstLastFrameToVideo` does is pin the last pixel
+# frame in the concat latent and unmask everything between, and I2V-A14B was
+# trained with that mask covering only the *first* frame. The end constraint is
+# therefore out of distribution: the model has no learned prior for how to
+# arrive there, so it satisfies the boundary the cheapest way available to it
+# and blends. That is the fade, and no number of steps fixes a missing prior.
+#
+# Alibaba-PAI's Wan2.2-Fun-A14B-InP is the model that *was* trained on start
+# and end frames, repackaged by Comfy-Org as these two files. Same MoE pair,
+# same architecture, same UMT5 encoder, same VAE, and the same lightx2v 4-step
+# distill LoRAs apply — so it is a weight swap and nothing else, which is why
+# the graph below only chooses a file name.
+#
+#   https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged
+#     split_files/diffusion_models/wan2.2_fun_inpaint_high_noise_14B_fp8_scaled.safetensors
+#     split_files/diffusion_models/wan2.2_fun_inpaint_low_noise_14B_fp8_scaled.safetensors
+#
+# 14.3 GB each. If they are not in ComfyUI's models directory the transition
+# builder falls back to the i2v pair and says so in the log — a slower, fading
+# render is still better than refusing to render.
+_UNET_FUN_HIGH = "wan2.2_fun_inpaint_high_noise_14B_fp8_scaled.safetensors"
+_UNET_FUN_LOW  = "wan2.2_fun_inpaint_low_noise_14B_fp8_scaled.safetensors"
 _VAE_NAME   = "wan_2.1_vae.safetensors"
 _RIFE_CKPT  = "rife49.pth"
 
-# FLF2V sampler tuning — full-strength 4-step lightx2v distill on both
-# experts, cfg=1 (the plain Lightning fast path). An 8-step asymmetric
-# variant (weakened distill + cfg 3 on the high-noise expert, per
+# ── Wan 2.2 sampler tuning (shared by i2v_multi and flf2v) ───────────────────
+# Both Wan builders run the distilled Lightning path: cfg=1, so every step is a
+# single model evaluation and the negative prompt is never scored. That part is
+# unchanged — it is what makes 14B affordable on a 16 GB 4060 Ti at all.
+#
+# Two things around it were wrong, and both cost visible quality:
+#
+# 1. FOUR STEPS IS NOT ENOUGH. It is the floor the distill LoRA makes *possible*,
+#    not the point where it looks good. Detail — grass, fabric, the ridges in a
+#    paint pour — resolves between 6 and 10 steps and keeps improving to ~16.
+#    Steps are not cheap, and it is worth being exact about the price rather
+#    than hoping the cold model loads dominate. Measured 2026-08-26 on the
+#    16 GB 4060 Ti — 960x960 x 49 frames, RIFE 3, one clip per submission with
+#    a `free_memory` and a cold reload before each:
+#
+#         4 steps   356 s   1.00x
+#         6 steps   496 s   1.39x
+#         8 steps   647 s   1.82x
+#        10 steps   797 s   2.24x
+#
+#    Dead straight: ~74 s per sampler step against ~58 s for everything else
+#    put together — the two cold 14 GB UNET loads, both VAE passes, RIFE and
+#    the h265 encode. Sampling is ~84% of a 6-step render, so the step count
+#    really does multiply the wait, and the 4 → 6 default move costs ~39%.
+#    See `_WAN_STEPS_DEFAULT` for why it is worth paying, and
+#    `estimate_wan_seconds` for what the numbers are used for.
+#
+# 2. THE HIGH/LOW SPLIT WAS HARD-CODED AT HALF. Wan 2.2 hands over between its
+#    two experts at a fixed diffusion *timestep*, not at a fixed step index —
+#    services/comfy/wan_moe.py has the arithmetic and the reference. Splitting
+#    at steps//2 gives the high-noise expert more of the schedule than the model
+#    was trained to, and the high-noise expert is the one that decides motion.
+#
+# cfg stays at 1 on purpose, and that decision is already tested: an 8-step
+# asymmetric variant (weakened distill + cfg 3 on the high-noise expert, per
 # https://huggingface.co/lightx2v/Wan2.2-Lightning/discussions/5) improved
-# end-frame adherence but doubled render time per transition — too slow in
-# practice, reverted 2026-07-09.
-_FLF2V_STEPS             = 4     # total steps across both experts
-_FLF2V_SPLIT_STEP        = 2     # high-noise expert covers steps 0..split
-_FLF2V_LORA_HIGH_STRENGTH = 1.0  # distill LoRA at full strength on high-noise
-_FLF2V_CFG_HIGH          = 1     # distilled guidance-free path on high-noise
+# flf2v's end-frame adherence but doubled the render time per transition, and
+# was reverted 2026-07-09. Raising `steps` costs one model evaluation per extra
+# step; raising cfg costs two per step across the whole schedule. When more
+# quality is wanted, buy steps.
+_WAN_SHIFT = 5.0     # ModelSamplingSD3; the recommended i2v range is 5-8
+_WAN_CFG   = 1       # distilled path: guidance-free, and it has to be
+
+# ── Guidance for an expert that no longer carries the distill ────────────────
+# cfg=1 is not a preference, it is what a distill LoRA requires: the LoRA bakes
+# the guidance in, and scoring a negative on top of it double-counts. But the
+# motion dial can take the distill *off* the high-noise expert entirely
+# (lora_high = 0), and at that point cfg=1 stops being right and starts being a
+# bug — a plain Wan expert running guidance-free. The block above _WAN_LORA_HIGH
+# _DEFAULT said so from the day it was written: "those first steps run an
+# undistilled expert guidance-free, which is not what the base model expects".
+#
+# What it costs the picture is precisely what was missing here. With no
+# guidance the prompt steers only through the conditional path, so an
+# instruction to *transform* barely registers and the model takes the cheapest
+# route between two pinned frames — it cross-fades. And the negative prompt is
+# never scored at all, which matters more than it sounds: _NEG_PROMPT ends in
+# 慢动作 (slow motion) and 静止不动的画面 (static image), the two things a
+# transition must not be. At cfg=1 those words are decoration.
+#
+# Applied to the HIGH-noise pass only. The low-noise expert keeps its distill at
+# full strength (see _WAN_LORA_LOW), so it keeps cfg=1 for the same reason the
+# distilled path always did.
+#
+# Cost is bounded and small, because it lands only on the steps the high-noise
+# expert actually runs: 2 model evaluations per step instead of 1, over
+# `split` of `steps`. At 10 steps and shift 5 the split is 3, so 13 evaluations
+# instead of 10 — about +30%, not the +100% that raising cfg across the whole
+# schedule would cost. That is why the 2026-07-09 experiment (weakened distill
+# + cfg on high) was recorded as doubling the time and reverted: it raised cfg
+# while the distill was still partly on, so it paid for both.
+#
+# 3.0 is the value that experiment used and the one it found improved end-frame
+# adherence. estimate_wan_seconds and wan_poll_timeout both know about the
+# extra evaluations, so the ETA next to the chips stays honest.
+_WAN_CFG_HIGH_UNDISTILLED = 3.0
+
+
+def wan_cfg_high(lora_high: float) -> float:
+    """Guidance for the high-noise pass, given its distill strength.
+
+    Two regimes, not a slider: with any distill on the expert the model wants
+    cfg 1, and with none it wants real guidance. There is no useful middle,
+    which is why this reads the motion dial instead of adding a second one.
+    """
+    return _WAN_CFG if lora_high > 0 else _WAN_CFG_HIGH_UNDISTILLED
+
+# Total sampler steps across both experts. 6 is the smallest count that is
+# honestly watchable; the UI offers 4-16 and this is only the fallback for a
+# caller that does not say.
+_WAN_STEPS_DEFAULT = 6
+_WAN_STEPS_MIN, _WAN_STEPS_MAX = 4, 16
+
+# ── The motion dial ──────────────────────────────────────────────────────────
+# Strength of the 4-step lightx2v distill LoRA on the HIGH-noise expert, and the
+# single setting that decides whether a clip moves. At 1.0 the distill dominates
+# the expert that plans motion, and Wan 2.2 comes back in slow motion — smoke
+# that hangs, paint that barely creeps, a camera drifting through treacle. It is
+# the most-reported complaint about this model and it is not a prompt problem.
+#
+# Lowering it restores travel. Zero removes the distill from the high-noise pass
+# entirely — the graph then drops the LoRA node rather than loading a file to
+# multiply it by nothing — and gives the most motion. It is not free: cfg stays
+# at 1, so those first steps run an *undistilled* expert guidance-free, which is
+# not what the base model expects, and composition wants more steps to settle.
+# The LOW-noise expert keeps the distill at full strength in every case — that
+# is where the detail comes from, and weakening it costs quality without buying
+# any movement.
+#
+# 0.5 is the default because it is the configuration the reference comparison
+# was shot at (high 0.5 / low 1.0), not because it was tuned here.
+#
+#   0.0   most motion, needs 8+ steps to stay clean
+#   0.4   lively; the video's own preferred setting for cars and smoke
+#   0.5   default here — clearly moving, still stable at 6 steps
+#   1.0   the old behaviour: stable, detailed, and barely moving
+_WAN_LORA_HIGH_DEFAULT = 0.5
+_WAN_LORA_LOW          = 1.0   # never lowered; see above
 
 # ── MiniMax H3 i2v (separate model family, native stereo audio) ───────────────
 # Omni-modal model: video and audio are denoised jointly in one AV latent, so a
@@ -213,21 +376,113 @@ MINIMAX_FRAMES_MIN = 5
 MINIMAX_FRAMES_MAX = 600
 
 POLL_INTERVAL = 15    # seconds between ComfyUI history polls
-POLL_TIMEOUT  = 1800  # 30 minutes max
+POLL_TIMEOUT  = 1800  # 30 minutes — the floor, and what a non-Wan job still gets
+
+# ── What a Wan clip costs ────────────────────────────────────────────────────
+# A flat 30-minute budget was safe while every Wan render was four steps. Steps
+# are a setting now, up to 16, and they multiply against a canvas that already
+# reaches 1920x1088 and 81 frames — three factors that used to be one. A 16-step
+# 1920x1088 clip would sail past 1800 s and be killed mid-render with the file
+# already written, which is the worst way to lose a job.
+#
+# Least-squares fit over the four measurements in the sampler-tuning block
+# above (960x960, 49 frames, RIFE 3): 73.7 s per step, 58.0 s fixed, and every
+# point within 1% of the line.
+#
+# SageAttention changes the per-step term and nothing else — it touches only
+# the attention inside a sampler step, not the model loads, the VAE, RIFE or
+# the encode. So there is one sampling coefficient per attention backend and
+# one shared coefficient for the rest, and the Sage slope was fitted holding
+# that shared 58 s fixed rather than given its own intercept, which two points
+# cannot honestly separate:
+#
+#     Sage   6 steps  measured 326 s   model 331 s  (+1.6%)
+#     Sage  10 steps  measured 517 s   model 513 s  (-0.6%)
+#
+# 45.5 s per step against SDPA's 73.7 — 1.62x on the sampling itself, from a
+# 3.0x attention kernel, which puts attention at roughly half of a Wan step.
+#
+# All three coefficients are per pixel-frame (width x height x frames), and
+# THAT scaling is an assumption rather than a measurement — only the step count
+# was varied, at one canvas and one RIFE factor. It is good enough for what it
+# is used for: a deadline with 3x headroom, and a rough "about N minutes" next
+# to the chips so an hour-long job announces itself before it is queued. It is
+# deliberately not sold as more than that.
+_WAN_SEC_PER_STEP_PF      = 1.632e-6   # sampling per step — PyTorch SDPA
+_WAN_SEC_PER_STEP_PF_SAGE = 1.008e-6   # sampling per step — SageAttention 2.2
+_WAN_SEC_POST_PF          = 1.284e-6   # model loads, VAE, RIFE 3, h265 encode
+
+
+def wan_model_evals(steps: int, lora_high: float | None = None) -> int:
+    """Model evaluations one clip costs — the thing the clock actually tracks.
+
+    Usually one per step. But an undistilled high-noise expert runs with real
+    guidance (see wan_cfg_high), and a guided step is two evaluations: the
+    conditional and the unconditional. Only the high-noise portion is guided,
+    so the surcharge is the split, not the step count.
+    """
+    steps = max(1, int(steps))
+    lh = _WAN_LORA_HIGH_DEFAULT if lora_high is None else lora_high
+    if wan_cfg_high(lh) <= 1:
+        return steps
+    return steps + moe_split_step(steps, _WAN_SHIFT, I2V_BOUNDARY)
+
+
+def estimate_wan_seconds(
+    width: int, height: int, frames: int, steps: int, *,
+    sage: bool | None = None, lora_high: float | None = None,
+) -> int:
+    """Roughly how long one Wan clip takes on this machine.
+
+    `sage` defaults to whatever the graph builder will actually do, so callers
+    that just want a number do not have to know the setting exists. Pass it
+    explicitly only to price the other backend. `lora_high` matters for the
+    same reason it matters to the picture: at 0 the high-noise pass is guided
+    and each of its steps costs two model evaluations.
+    """
+    if sage is None:
+        sage = settings.wan_sage_attention
+    per_step = _WAN_SEC_PER_STEP_PF_SAGE if sage else _WAN_SEC_PER_STEP_PF
+    pixel_frames = max(1, width) * max(1, height) * max(1, frames)
+    evals = wan_model_evals(steps, lora_high)
+    return max(1, round(pixel_frames * (per_step * evals + _WAN_SEC_POST_PF)))
+
+
+def wan_poll_timeout(
+    width: int, height: int, frames: int, steps: int, lora_high: float | None = None,
+) -> int:
+    """Deadline for one Wan submission — three times the estimate, never under
+    the old flat budget. Mirrors what the upscale path already does for the same
+    reason: a pass whose length is a user setting cannot share one constant."""
+    return max(POLL_TIMEOUT,
+               estimate_wan_seconds(width, height, frames, steps, lora_high=lora_high) * 3)
 
 # ── Pydantic ──────────────────────────────────────────────────────────────────
 
 class GenerateVideoRequest(BaseModel):
     image_ids: list[uuid.UUID]
-    workflow: str = "i2v_multi"    # "i2v_multi" | "minimax_i2v" | "flf2v"
+    workflow: str = "i2v_multi"    # see GENERATE_WORKFLOWS
     width:  int = 1088
     height: int = 1088
     frame_count: int = 49          # fallback frame count when prompts/frame_counts arrays are absent
-    fps:    int = 24               # ignored by minimax_i2v (model is fixed at MINIMAX_FPS)
+    fps:    int = 24               # legacy: no builder reads it any more. MiniMax is
+                                   # fixed at MINIMAX_FPS and the Wan builders derive
+                                   # their rate from WAN_NATIVE_FPS x rife_multiplier.
     prompt: str = ""               # fallback prompt when `prompts` is absent/mismatched length
-    prompts: list[str] = []        # i2v_multi/minimax_i2v: one per image; flf2v: one per transition (n-1)
-    frame_counts: list[int] = []   # i2v_multi/minimax_i2v: one per image; flf2v: one per transition (n-1)
-    rife_multiplier: int = 3       # RIFE VFI frame interpolation factor (2/3/4; minimax_i2v also allows 1 = off)
+    prompts: list[str] = []        # per-image mode: one per image; transition mode: one per pair (n-1)
+    frame_counts: list[int] = []   # per-image mode: one per image; transition mode: one per pair (n-1)
+    rife_multiplier: int = 3       # RIFE VFI frame interpolation factor (2/3/4; MiniMax also allows 1 = off)
+    # An optional transition/metamorphosis LoRA for the high-noise expert —
+    # the slot the community's morph LoRAs are trained for. Name as ComfyUI
+    # lists it; None means the graph has no such node at all.
+    style_lora: str | None = None
+    style_lora_strength: float = 1.0
+    # Wan-only sampler controls (WAN_WORKFLOWS; MiniMax runs its own
+    # fixed recipe). Both are clamped by clamp_wan_steps / clamp_lora_high
+    # rather than validated here, so an older cached frontend that omits them
+    # simply gets the new defaults instead of a 422.
+    steps: int = _WAN_STEPS_DEFAULT          # total sampler steps across both experts (4–16)
+    lora_high: float = _WAN_LORA_HIGH_DEFAULT  # high-noise distill strength; LOWER = more motion
     pingpong: bool = False         # i2v_multi: VHS_VideoCombine pingpong (boomerang) flag; unused by flf2v
     end_on_keyframe: bool = False  # flf2v: append the raw end key frame after the diffused clip (pixel-exact landing, but reads as a cut when diffusion undershoots)
 
@@ -251,6 +506,249 @@ class MergeRequest(BaseModel):
         return self.items or [MergeItem(kind="clip", id=cid) for cid in self.clip_ids]
 
 
+# ── Wan 2.2 expert pair (shared by both Wan builders) ────────────────────────
+
+def clamp_wan_steps(steps: int | None) -> int:
+    """Sampler steps, held inside the range this card can actually finish."""
+    if steps is None:
+        return _WAN_STEPS_DEFAULT
+    return max(_WAN_STEPS_MIN, min(_WAN_STEPS_MAX, int(steps)))
+
+
+def clamp_lora_high(strength: float | None) -> float:
+    """High-noise distill strength — the motion dial, 0.0 (most) to 1.0 (least)."""
+    if strength is None:
+        return _WAN_LORA_HIGH_DEFAULT
+    return max(0.0, min(1.0, float(strength)))
+
+
+def clamp_style_strength(value: float | None) -> float:
+    """Strength for a transition/metamorphosis LoRA on the high-noise expert.
+
+    Allowed above 1.0 because these LoRAs are routinely pushed there — the
+    published guidance for the ones this slot exists for says 1.0 is the
+    *strongest documented* setting, not a ceiling the format imposes — but
+    stopped at 2.0, past which Wan reliably falls apart rather than trying
+    harder.
+    """
+    if value is None:
+        return 1.0
+    return max(0.0, min(2.0, float(value)))
+
+
+# ── The rate Wan actually animates at ────────────────────────────────────────
+# Wan 2.2's A14B experts are trained at 16 fps. That is not a preference, it is
+# what one generated frame *means*: 49 frames is 3.06 seconds of motion, and no
+# sampler setting changes it. ComfyUI's own bundled template says the same in
+# one number — video_wan2_2_14B_i2v.json writes `CreateVideo [16]`, against the
+# 5B TI2V template's 24.
+#
+# This is where the transitions were being lost. RIFE multiplies the frame
+# count; if the container rate does not rise by the same factor, the extra
+# frames stretch the clip instead of smoothing it. Writing 3x the frames at a
+# fixed 24 fps played 16 fps content at 8 — **every Wan clip this tool has
+# rendered ran at half speed**, and a first-to-last-frame transition at half
+# speed is indistinguishable from a cross-fade. It is also why more steps never
+# helped: steps buy detail, and this was never a detail problem.
+#
+# services/video/upscale.py::plan_frame_rate already states the rule for the
+# upscale path — "the clip keeps its duration; RIFE multiplies the frames, so
+# the rate has to rise by the same factor or the picture turns into slow
+# motion". The generation path simply never applied it. It does now, and the
+# fps selector is no longer offered for the Wan builders: 16 x RIFE is the only
+# rate at which the model's own motion plays at the speed it was sampled for.
+WAN_NATIVE_FPS = 16
+
+async def _fun_inp_available() -> bool:
+    """Whether ComfyUI is offering both Fun-InP expert files.
+
+    Asked through ComfyUI's own loader enum rather than by looking on disk:
+    this process does not know where ComfyUI keeps its models (extra_model_paths
+    can put them anywhere), and the enum is exactly what the submit-time
+    validator will check the workflow against.
+    """
+    names = await loader_choices("UNETLoader", "unet_name")
+    return _UNET_FUN_HIGH in names and _UNET_FUN_LOW in names
+
+
+# ── Workflow families ────────────────────────────────────────────────────────
+# Four generation modes over two model families and two shapes. The shape
+# decides what a "clip" is: a per-image mode animates each picture on its own,
+# a transition mode animates the gap between adjacent pictures and so yields
+# one clip fewer. The family decides the sampler, the frame grid and the rate.
+#
+#   i2v_multi     Wan 2.2      per image        silent
+#   flf2v         Wan 2.2      per transition   silent
+#   minimax_i2v   MiniMax H3   per image        native audio
+#   minimax_flf   MiniMax H3   per transition   native audio
+#
+# minimax_flf costs nothing to have: the checkpoint on disk is already the
+# fl2va ("first-last to video+audio") one, and MiniMaxH3ImageToVideo takes an
+# optional `last_frame` this builder simply never filled in.
+WAN_WORKFLOWS       = frozenset({"i2v_multi", "flf2v"})
+MINIMAX_WORKFLOWS   = frozenset({"minimax_i2v", "minimax_flf"})
+TRANSITION_WORKFLOWS = frozenset({"flf2v", "minimax_flf"})
+GENERATE_WORKFLOWS  = WAN_WORKFLOWS | MINIMAX_WORKFLOWS
+
+
+def align_wan_length(frame_count: int) -> int:
+    """Snap a frame count up onto Wan's 4n+1 temporal grid.
+
+    The Wan VAE compresses time by 4 with the first frame standing alone, so a
+    clip is 1 + 4n frames and every Wan node in ComfyUI declares
+    `Int.Input("length", default=81, step=4)` — its own UI cannot express an
+    off-grid length. This tool's number field used step 1 and could, which is
+    how a job went out at 48: legal enough to render, but not the shape the
+    model was trained on, and on a transition it is the *end* frame that sits
+    on the ragged edge.
+
+    Snapped up rather than down, matching align_minimax_length: a caller asking
+    for a length gets at least that much clip.
+    """
+    n = max(5, int(frame_count or 0))
+    return n + (-(n - 1) % 4)
+
+
+def wan_output_fps(rife_multiplier: int | None) -> int:
+    """Container rate for a Wan clip that has been RIFE-interpolated by N.
+
+    16 -> 32 -> 48 -> 64 for N = 1..4. All of them are legal mp4 rates, and
+    everything downstream that cares (the merge, the beat cut, the Instagram
+    reel concat) already conforms mixed rates to one.
+    """
+    return WAN_NATIVE_FPS * max(1, min(4, int(rife_multiplier or 1)))
+
+
+# ── Attention backend ────────────────────────────────────────────────────────
+# Wan's DiT spends most of a step in self-attention over a very long sequence —
+# 960x960 x 49 frames is ~46k tokens — which is exactly where an approximate
+# attention kernel pays. SageAttention 2.2 quantises Q/K to INT8 and the PV
+# accumulation to FP8, on kernels compiled for this card's sm_89.
+#
+# Measured 2026-08-26 in ComfyUI's own venv, one Wan-shaped attention call
+# (1 x 40 heads x 4096 x 128, fp16): PyTorch SDPA 12.21 ms, Sage 4.07 ms —
+# 3.0x — at a relative L2 error of 0.038 against SDPA's output. End to end on
+# the real graph: 6 steps 496 s -> 326 s (1.52x), 10 steps 797 s -> 517 s.
+#
+# WHAT THAT ERROR DOES IS WORTH BEING PRECISE ABOUT, because "3.8%" invites the
+# wrong conclusion. It does not make the clip 3.8% worse. It makes it a
+# DIFFERENT CLIP. Same image, same seed, same prompt, 6 steps, compared frame
+# by frame: SSIM 0.99 at frame 1, decaying smoothly to 0.68 by frame 145. The
+# first frame is the source photo either way; from there the tiny per-step
+# perturbation compounds and the two samples walk apart. Looking at frame 120
+# of each, neither is degraded — same detail, same palette, no artefacts — the
+# paint has simply gone somewhere else. services/comfy/vace.py records the same
+# lesson from the other direction: a seed only means something relative to the
+# exact sampler that consumed it.
+#
+# That is also the whole reason this is scoped to the two Wan builders rather
+# than switched on globally with ComfyUI's --use-sage-attention flag. Every
+# other model in this project (MiniMax, Z-Image, SEEDVR2, ACE-Step, VACE) was
+# calibrated against exact attention, and a global flag would silently re-roll
+# all of them. `settings.wan_sage_attention` turns it off without touching code
+# — but note that turning it off does not restore an earlier clip either; it
+# just picks the other trajectory.
+def _attention_backend(nodes: dict, p: str, tag: str, model_node: str) -> str:
+    """Route one expert through SageAttention. Returns the node to sample from.
+
+    A no-op that returns `model_node` unchanged when the setting is off, so the
+    graph is exactly the pre-SageAttention one and nothing needs installing.
+    """
+    if not settings.wan_sage_attention:
+        return model_node
+    node_id = f"{p}sage_{tag}"
+    nodes[node_id] = {"class_type": "PathchSageAttentionKJ", "inputs": {
+        "model": [model_node, 0],
+        # "auto" lets sageattention pick the best kernel for the card rather
+        # than pinning one this file would have to keep correct.
+        "sage_attention": "auto",
+        "allow_compile": False,
+    }}
+    return node_id
+
+
+def _wan_expert_nodes(
+    p: str, cond_node: str, seed: int, steps: int, lora_high: float,
+    unet_high: str = _UNET_HIGH, unet_low: str = _UNET_LOW,
+    style_lora: str | None = None, style_strength: float = 1.0,
+) -> dict:
+    """Both Wan 2.2 experts and the two sampler passes that share one latent.
+
+    `cond_node` is whatever produced the conditioning and the empty latent for
+    this clip — a WanImageToVideo for an i2v segment, a WanFirstLastFrameToVideo
+    for a transition. Everything downstream of it is identical between the two
+    workflows, which is why they now share this instead of keeping two copies
+    that drifted apart on shift and LoRA strength.
+
+    The high-noise pass runs steps 0..split and hands the *unfinished* latent to
+    the low-noise pass (`return_with_leftover_noise`), which finishes it. `split`
+    comes from the sigma schedule, not from steps//2 — see
+    services/comfy/wan_moe.py for why that distinction is the whole point.
+
+    At lora_high == 0 the LoRA node is left out rather than loaded at zero
+    strength: ComfyUI would otherwise read a distill LoRA off disk to multiply
+    it by nothing, on a cold load, once per clip.
+
+    `style_lora` chains a second LoRA onto the high-noise expert, after the
+    distill. That is the slot the community's transition and metamorphosis
+    LoRAs are trained for — they are all "Wan 2.2 I2V, high noise" — and it is
+    the high-noise expert because that is the one that decides what the clip
+    *becomes*, not merely how sharp it ends up. It is deliberately additive
+    rather than a replacement for the distill: the two dials are independent,
+    the distill governs how far things travel and this governs what happens on
+    the way. Nothing is added to the low-noise expert, which is doing texture.
+    """
+    split = moe_split_step(steps, _WAN_SHIFT, I2V_BOUNDARY)
+    nodes: dict = {
+        p+"unet_h": {"class_type": "UNETLoader",          "inputs": {"unet_name": unet_high, "weight_dtype": "default"}},
+        p+"unet_l": {"class_type": "UNETLoader",          "inputs": {"unet_name": unet_low,  "weight_dtype": "default"}},
+        p+"lora_l": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_l", 0], "lora_name": _LORA_LOW, "strength_model": _WAN_LORA_LOW}},
+    }
+    nodes[p+"samp_l"] = {"class_type": "ModelSamplingSD3", "inputs": {
+        "model": [_attention_backend(nodes, p, "l", p + "lora_l"), 0], "shift": _WAN_SHIFT,
+    }}
+    high_model = p + "unet_h"
+    if lora_high > 0:
+        nodes[p+"lora_h"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": [high_model, 0], "lora_name": _LORA_HIGH, "strength_model": lora_high,
+        }}
+        high_model = p + "lora_h"
+    if style_lora:
+        nodes[p+"lora_s"] = {"class_type": "LoraLoaderModelOnly", "inputs": {
+            "model": [high_model, 0], "lora_name": style_lora,
+            "strength_model": clamp_style_strength(style_strength),
+        }}
+        high_model = p + "lora_s"
+    nodes[p+"samp_h"] = {"class_type": "ModelSamplingSD3", "inputs": {
+        "model": [_attention_backend(nodes, p, "h", high_model), 0], "shift": _WAN_SHIFT,
+    }}
+    nodes[p+"ks_h"] = {"class_type": "KSamplerAdvanced", "inputs": {
+        "model":                     [p+"samp_h", 0],
+        "add_noise":                 "enable",
+        "noise_seed":                seed,
+        "steps": steps, "cfg": wan_cfg_high(lora_high),
+        "sampler_name": "euler", "scheduler": WAN_SCHEDULER,
+        "start_at_step": 0, "end_at_step": split,
+        "return_with_leftover_noise": "enable",
+        "positive":     [cond_node, 0],
+        "negative":     [cond_node, 1],
+        "latent_image": [cond_node, 2],
+    }}
+    nodes[p+"ks_l"] = {"class_type": "KSamplerAdvanced", "inputs": {
+        "model":                     [p+"samp_l", 0],
+        "add_noise":                 "disable",
+        "noise_seed":                0,
+        "steps": steps, "cfg": _WAN_CFG,
+        "sampler_name": "euler", "scheduler": WAN_SCHEDULER,
+        "start_at_step": split, "end_at_step": 10000,
+        "return_with_leftover_noise": "disable",
+        "positive":     [cond_node, 0],
+        "negative":     [cond_node, 1],
+        "latent_image": [p+"ks_h",  0],
+    }}
+    return nodes
+
+
 # ── FLF2V workflow builder (key-frame transitions) ────────────────────────────
 
 def _transition_nodes(
@@ -259,20 +757,22 @@ def _transition_nodes(
     end_img_node: str,
     width: int, height: int, length: int,
     prompt: str, seed: int,
+    steps: int, lora_high: float,
+    fun_inp: bool = False,
+    style_lora: str | None = None, style_strength: float = 1.0,
 ) -> tuple[dict, str]:
-    """Build one Wan 2.2 FLF2V transition subgraph. Returns (nodes, decode_node_id)."""
+    """Build one Wan 2.2 FLF2V transition subgraph. Returns (nodes, decode_node_id).
+
+    `fun_inp` picks the Fun-InP expert pair over the i2v pair — the only
+    difference between a transition that moves and one that dissolves. See the
+    _UNET_FUN_HIGH block for why.
+    """
     p = f"t{t}_"
     nodes = {
-        p+"clip":   {"class_type": "CLIPLoader",          "inputs": {"clip_name": _CLIP_NAME, "type": "wan", "device": "default"}},
-        p+"pos":    {"class_type": "CLIPTextEncode",      "inputs": {"clip": [p+"clip", 0], "text": prompt}},
-        p+"neg":    {"class_type": "CLIPTextEncode",      "inputs": {"clip": [p+"clip", 0], "text": _NEG_PROMPT}},
-        p+"vae":    {"class_type": "VAELoader",           "inputs": {"vae_name": _VAE_NAME}},
-        p+"unet_h": {"class_type": "UNETLoader",          "inputs": {"unet_name": _UNET_HIGH, "weight_dtype": "default"}},
-        p+"lora_h": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_h", 0], "lora_name": _LORA_HIGH, "strength_model": _FLF2V_LORA_HIGH_STRENGTH}},
-        p+"samp_h": {"class_type": "ModelSamplingSD3",    "inputs": {"model": [p+"lora_h", 0], "shift": 5}},
-        p+"unet_l": {"class_type": "UNETLoader",          "inputs": {"unet_name": _UNET_LOW, "weight_dtype": "default"}},
-        p+"lora_l": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_l", 0], "lora_name": _LORA_LOW, "strength_model": 1}},
-        p+"samp_l": {"class_type": "ModelSamplingSD3",    "inputs": {"model": [p+"lora_l", 0], "shift": 5}},
+        p+"clip":   {"class_type": "CLIPLoader",     "inputs": {"clip_name": _CLIP_NAME, "type": "wan", "device": "default"}},
+        p+"pos":    {"class_type": "CLIPTextEncode", "inputs": {"clip": [p+"clip", 0], "text": with_lora_trigger(prompt, style_lora)}},
+        p+"neg":    {"class_type": "CLIPTextEncode", "inputs": {"clip": [p+"clip", 0], "text": _NEG_PROMPT}},
+        p+"vae":    {"class_type": "VAELoader",      "inputs": {"vae_name": _VAE_NAME}},
         p+"flf2v":  {"class_type": "WanFirstLastFrameToVideo", "inputs": {
             "positive":    [p+"pos",  0],
             "negative":    [p+"neg",  0],
@@ -281,35 +781,16 @@ def _transition_nodes(
             "end_image":   [end_img_node,   0],
             "width": width, "height": height, "length": length, "batch_size": 1,
         }},
-        p+"ks_h":   {"class_type": "KSamplerAdvanced", "inputs": {
-            "model":                     [p+"samp_h", 0],
-            "add_noise":                 "enable",
-            "noise_seed":                seed,
-            "steps": _FLF2V_STEPS, "cfg": _FLF2V_CFG_HIGH,
-            "sampler_name": "euler", "scheduler": "simple",
-            "start_at_step": 0, "end_at_step": _FLF2V_SPLIT_STEP,
-            "return_with_leftover_noise": "enable",
-            "positive":     [p+"flf2v", 0],
-            "negative":     [p+"flf2v", 1],
-            "latent_image": [p+"flf2v", 2],
-        }},
-        p+"ks_l":   {"class_type": "KSamplerAdvanced", "inputs": {
-            "model":                     [p+"samp_l", 0],
-            "add_noise":                 "disable",
-            "noise_seed":                0,
-            "steps": _FLF2V_STEPS, "cfg": 1,
-            "sampler_name": "euler", "scheduler": "simple",
-            "start_at_step": _FLF2V_SPLIT_STEP, "end_at_step": 10000,
-            "return_with_leftover_noise": "disable",
-            "positive":     [p+"flf2v", 0],
-            "negative":     [p+"flf2v", 1],
-            "latent_image": [p+"ks_h",  0],
-        }},
-        p+"decode": {"class_type": "VAEDecode", "inputs": {
-            "samples": [p+"ks_l", 0],
-            "vae":     [p+"vae",  0],
-        }},
     }
+    nodes.update(_wan_expert_nodes(
+        p, p + "flf2v", seed, steps, lora_high,
+        *( (_UNET_FUN_HIGH, _UNET_FUN_LOW) if fun_inp else (_UNET_HIGH, _UNET_LOW) ),
+        style_lora=style_lora, style_strength=style_strength,
+    ))
+    nodes[p+"decode"] = {"class_type": "VAEDecode", "inputs": {
+        "samples": [p+"ks_l", 0],
+        "vae":     [p+"vae",  0],
+    }}
     return nodes, p + "decode"
 
 
@@ -318,15 +799,25 @@ def _build_flf2v_single_workflow(
     end_fname: str,
     prompt: str,
     frame_count: int,
-    width: int, height: int, fps: int,
+    width: int, height: int,
     vid_prefix: str,
     rife_multiplier: int,
     append_end_frame: bool = False,
+    steps: int | None = None,
+    lora_high: float | None = None,
+    fun_inp: bool = False,
+    style_lora: str | None = None,
+    style_lora_strength: float = 1.0,
 ) -> tuple[dict, str]:
     """Single key-frame transition with its own VHS save.
 
     One ComfyUI submission per transition keeps the VRAM peak independent of
     how many key frames the user picked — mirrors _build_i2v_single_workflow.
+
+    There is no `fps` argument: a Wan clip's rate is not a caller decision.
+    The model animates at 16 fps and RIFE multiplies the frames, so the only
+    rate that plays the motion at the speed it was sampled for is
+    16 x rife_multiplier — see WAN_NATIVE_FPS.
 
     append_end_frame=True additionally appends the raw end key frame before
     RIFE so the clip lands pixel-exact on the chosen photo. Off by default:
@@ -339,8 +830,10 @@ def _build_flf2v_single_workflow(
         "img_end":   {"class_type": "LoadImage", "inputs": {"image": end_fname,   "upload": "image"}},
     }
     nodes, decode_id = _transition_nodes(
-        0, "img_start", "img_end", width, height, frame_count, prompt,
+        0, "img_start", "img_end", width, height, align_wan_length(frame_count), prompt,
         random.randint(0, 2**32 - 1),
+        clamp_wan_steps(steps), clamp_lora_high(lora_high),
+        fun_inp=fun_inp, style_lora=style_lora, style_strength=style_lora_strength,
     )
     wf.update(nodes)
 
@@ -367,7 +860,7 @@ def _build_flf2v_single_workflow(
 
     save_id = "flf2v_save"
     wf[save_id] = {"class_type": "VHS_VideoCombine", "inputs": {
-        "frame_rate":      fps,
+        "frame_rate":      wan_output_fps(rife_multiplier),
         "loop_count":      0,
         "filename_prefix": vid_prefix,
         "format":          "video/h265-mp4",
@@ -389,76 +882,79 @@ def _i2v_segment(
     prompt: str, frame_count: int,
     width: int, height: int, seed: int,
     rife_multiplier: int,
+    steps: int, lora_high: float,
+    style_lora: str | None = None, style_strength: float = 1.0,
 ) -> dict:
-    """One WanImageToVideo segment — turbo path: 4-step LoRA, two-pass KSampler, RIFE ×N.
+    """One WanImageToVideo segment — Lightning path, two-pass KSampler, RIFE ×N.
 
-    Mirrors the `enable_turbo=true` branch of video_wan2_2_14B_i2v_reworked_API.json:
-    LoRA-loaded UNETs, steps=4, cfg=1, split_step=2, shift=5. The ComfySwitchNode
-    multiplexers from that file are dropped because turbo is hard-coded here.
+    Descended from the `enable_turbo=true` branch of
+    video_wan2_2_14B_i2v_reworked_API.json, minus that file's ComfySwitchNode
+    multiplexers (turbo is the only path here) and minus its two fixed numbers:
+    the step count and the 50/50 expert split are now the caller's, because
+    those two are what decide whether the clip moves and how much of it
+    resolves. See _wan_expert_nodes and services/comfy/wan_moe.py.
     """
     p = f"s{seg}_"
-    return {
-        p+"clip":   {"class_type": "CLIPLoader",          "inputs": {"clip_name": _CLIP_NAME, "type": "wan", "device": "default"}},
-        p+"vae":    {"class_type": "VAELoader",           "inputs": {"vae_name": _VAE_NAME}},
-        p+"unet_h": {"class_type": "UNETLoader",          "inputs": {"unet_name": _UNET_HIGH, "weight_dtype": "default"}},
-        p+"unet_l": {"class_type": "UNETLoader",          "inputs": {"unet_name": _UNET_LOW,  "weight_dtype": "default"}},
-        p+"lora_h": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_h", 0], "lora_name": _LORA_HIGH, "strength_model": 1.0}},
-        p+"lora_l": {"class_type": "LoraLoaderModelOnly", "inputs": {"model": [p+"unet_l", 0], "lora_name": _LORA_LOW,  "strength_model": 1.0}},
-        p+"samp_h": {"class_type": "ModelSamplingSD3",    "inputs": {"model": [p+"lora_h", 0], "shift": 5.0}},
-        p+"samp_l": {"class_type": "ModelSamplingSD3",    "inputs": {"model": [p+"lora_l", 0], "shift": 5.0}},
-        p+"pos":    {"class_type": "CLIPTextEncode",      "inputs": {"clip": [p+"clip", 0], "text": prompt}},
-        p+"neg":    {"class_type": "CLIPTextEncode",      "inputs": {"clip": [p+"clip", 0], "text": _NEG_PROMPT}},
-        p+"i2v":    {"class_type": "WanImageToVideo",     "inputs": {
+    nodes = {
+        p+"clip":   {"class_type": "CLIPLoader",      "inputs": {"clip_name": _CLIP_NAME, "type": "wan", "device": "default"}},
+        p+"vae":    {"class_type": "VAELoader",       "inputs": {"vae_name": _VAE_NAME}},
+        p+"pos":    {"class_type": "CLIPTextEncode",  "inputs": {"clip": [p+"clip", 0], "text": with_lora_trigger(prompt, style_lora)}},
+        p+"neg":    {"class_type": "CLIPTextEncode",  "inputs": {"clip": [p+"clip", 0], "text": _NEG_PROMPT}},
+        p+"i2v":    {"class_type": "WanImageToVideo", "inputs": {
             "width": width, "height": height, "length": frame_count, "batch_size": 1,
             "positive": [p+"pos", 0], "negative": [p+"neg", 0],
             "vae": [p+"vae", 0], "start_image": [img_node_id, 0],
         }},
-        p+"ks_h":   {"class_type": "KSamplerAdvanced", "inputs": {
-            "model": [p+"samp_h", 0], "add_noise": "enable", "noise_seed": seed,
-            "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple",
-            "start_at_step": 0, "end_at_step": 2, "return_with_leftover_noise": "enable",
-            "positive": [p+"i2v", 0], "negative": [p+"i2v", 1], "latent_image": [p+"i2v", 2],
-        }},
-        p+"ks_l":   {"class_type": "KSamplerAdvanced", "inputs": {
-            "model": [p+"samp_l", 0], "add_noise": "disable", "noise_seed": 0,
-            "steps": 4, "cfg": 1, "sampler_name": "euler", "scheduler": "simple",
-            "start_at_step": 2, "end_at_step": 10000, "return_with_leftover_noise": "disable",
-            "positive": [p+"i2v", 0], "negative": [p+"i2v", 1], "latent_image": [p+"ks_h", 0],
-        }},
-        p+"decode": {"class_type": "VAEDecode", "inputs": {"samples": [p+"ks_l", 0], "vae": [p+"vae", 0]}},
-        p+"rife":   {"class_type": "RIFE VFI", "inputs": {
-            "ckpt_name": _RIFE_CKPT, "clear_cache_after_n_frames": 10, "multiplier": rife_multiplier,
-            "fast_mode": True, "ensemble": True, "scale_factor": 1,
-            "dtype": "float32", "torch_compile": False, "batch_size": 1,
-            "frames": [p+"decode", 0],
-        }},
     }
+    nodes.update(_wan_expert_nodes(
+        p, p + "i2v", seed, steps, lora_high,
+        style_lora=style_lora, style_strength=style_strength,
+    ))
+    nodes[p+"decode"] = {"class_type": "VAEDecode", "inputs": {"samples": [p+"ks_l", 0], "vae": [p+"vae", 0]}}
+    nodes[p+"rife"] = {"class_type": "RIFE VFI", "inputs": {
+        "ckpt_name": _RIFE_CKPT, "clear_cache_after_n_frames": 10, "multiplier": rife_multiplier,
+        "fast_mode": True, "ensemble": True, "scale_factor": 1,
+        "dtype": "float32", "torch_compile": False, "batch_size": 1,
+        "frames": [p+"decode", 0],
+    }}
+    return nodes
 
 
 def _build_i2v_single_workflow(
     comfy_filename: str,
     prompt: str,
     frame_count: int,
-    width: int, height: int, fps: int,
+    width: int, height: int,
     vid_prefix: str,
     rife_multiplier: int,
     pingpong: bool,
+    steps: int | None = None,
+    lora_high: float | None = None,
+    style_lora: str | None = None,
+    style_lora_strength: float = 1.0,
 ) -> tuple[dict, str]:
     """Single-image i2v segment with its own VHS save.
 
     One ComfyUI submission per segment keeps the VRAM peak independent of how
     many images the user picked: each prompt starts with a clean GPU state.
     Segments are stitched together server-side via ffmpeg concat.
+
+    Takes no `fps` for the same reason the transition builder does not: Wan
+    animates at 16 fps, and writing RIFE'd frames at anything other than
+    16 x rife_multiplier changes the speed of the motion rather than its
+    smoothness. See WAN_NATIVE_FPS.
     """
     wf: dict = {"img0": {"class_type": "LoadImage", "inputs": {"image": comfy_filename, "upload": "image"}}}
     wf.update(_i2v_segment(
-        0, "img0", prompt, frame_count, width, height,
+        0, "img0", prompt, align_wan_length(frame_count), width, height,
         random.randint(0, 2**32 - 1), rife_multiplier,
+        clamp_wan_steps(steps), clamp_lora_high(lora_high),
+        style_lora=style_lora, style_strength=style_lora_strength,
     ))
 
     save_id = "i2v_save"
     wf[save_id] = {"class_type": "VHS_VideoCombine", "inputs": {
-        "frame_rate":      fps,
+        "frame_rate":      wan_output_fps(rife_multiplier),
         "loop_count":      0,
         "filename_prefix": vid_prefix,
         "format":          "video/h265-mp4",
@@ -558,8 +1054,17 @@ def _build_minimax_single_workflow(
     width: int, height: int,
     vid_prefix: str,
     rife_multiplier: int = 1,
+    end_comfy_filename: str | None = None,
 ) -> tuple[dict, str, int]:
-    """Single-image MiniMax H3 i2v segment producing an mp4 *with* generated audio.
+    """Single MiniMax H3 segment producing an mp4 *with* generated audio.
+
+    With `end_comfy_filename` the same graph becomes a transition instead of an
+    animation: the second picture is pinned at the last frame and H3 invents
+    the way there. This is the model's fl2va task, not a bolt-on — the
+    checkpoint is named for it, and `MiniMaxH3ImageToVideo` carries the
+    `last_frame` input for exactly this. Unlike the Wan transition path there
+    is no out-of-distribution end constraint to work around, which is why it
+    morphs where Wan-on-i2v-weights fades.
 
     API-format translation of the `Image to Video (MiniMax H3)` subgraph from
     workflows/video_minimax_h3_i2v.json: load models → conditioning + empty AV
@@ -628,6 +1133,21 @@ def _build_minimax_single_workflow(
         p+"vdec":  {"class_type": "VAEDecode",      "inputs": {"samples": [p+"ks", 0], "vae": [p+"vae", 0]}},
         p+"adec":  {"class_type": "VAEDecodeAudio", "inputs": {"samples": [p+"ks", 0], "vae": [p+"avae", 0]}},
     }
+
+    # ── Optional end key frame (fl2va) ──
+    # The node center-crops `last_frame` itself but plain-stretches
+    # `first_frame`, so the end picture gets the same explicit pre-scale the
+    # start one does: two images that arrive on the canvas by different rules
+    # would not line up, and a transition is entirely about them lining up.
+    if end_comfy_filename:
+        wf[p+"load_end"]  = {"class_type": "LoadImage", "inputs": {
+            "image": end_comfy_filename, "upload": "image",
+        }}
+        wf[p+"scale_end"] = {"class_type": "ImageScale", "inputs": {
+            "image": [p+"load_end", 0], "upscale_method": "lanczos",
+            "width": width, "height": height, "crop": "center",
+        }}
+        wf[p+"i2v"]["inputs"]["last_frame"] = [p+"scale_end", 0]
 
     # Optional RIFE VFI on the decoded frames (off at rife_multiplier=1 — no node
     # added at all, matching the Wan builders' param shape exactly).
@@ -706,8 +1226,13 @@ async def _persist_clip(
             workflow=req.workflow,
             width=req.width,
             height=req.height,
-            fps=MINIMAX_FPS if req.workflow == "minimax_i2v" else req.fps,
+            fps=(MINIMAX_FPS if req.workflow in MINIMAX_WORKFLOWS
+                 else wan_output_fps(req.rife_multiplier)),
             has_audio=(req.workflow in AUDIO_WORKFLOWS),
+            # The clamped values, not the requested ones — what the graph was
+            # actually built with is the only version worth comparing against.
+            wan_steps=(None if req.workflow in MINIMAX_WORKFLOWS else clamp_wan_steps(req.steps)),
+            wan_lora_high=(None if req.workflow in MINIMAX_WORKFLOWS else clamp_lora_high(req.lora_high)),
         ))
         await db.commit()
 
@@ -858,14 +1383,34 @@ async def _run_flf2v_multi(
     """Generate each key-frame transition as an independent ComfyUI submission,
     persisting every transition as a VideoClip library row (the job's stack).
     Mirrors _run_i2v_multi exactly, but over adjacent image PAIRS (n_imgs-1
-    transitions) instead of single images."""
+    transitions) instead of single images.
+
+    Serves both transition workflows: `flf2v` on the Wan expert pair, and
+    `minimax_flf` on MiniMax H3's fl2va task. They differ only in the builder
+    and in what has to happen to the audio afterwards."""
     n_imgs = len(comfy_names)
     if n_imgs < 2:
-        raise ValueError("FLF2V requires at least 2 images")
+        raise ValueError("A transition workflow requires at least 2 images")
     n_trans = n_imgs - 1
+    minimax = req.workflow in MINIMAX_WORKFLOWS
+
+    # Ask ComfyUI once, not once per transition: whether the Fun-InP pair is
+    # installed decides between a transition that moves and one that fades, and
+    # it is worth saying out loud in the log which one this job got.
+    fun_inp = False
+    if not minimax:
+        fun_inp = await _fun_inp_available()
+        logger.info(
+            "Video job %s: flf2v experts = %s",
+            video_id, "Wan2.2-Fun-InP" if fun_inp else "Wan2.2-i2v (Fun-InP not installed)",
+        )
 
     prompts_list = req.prompts if len(req.prompts) == n_trans else [req.prompt] * n_trans
     fc_list = req.frame_counts if len(req.frame_counts) == n_trans else [req.frame_count] * n_trans
+    if not minimax:
+        # What the graph will really render, so the clip row and the poll
+        # deadline are about the same clip the builder builds.
+        fc_list = [align_wan_length(fc) for fc in fc_list]
     seg_dir = _segments_dir(video_id)
     seg_dir.mkdir(parents=True, exist_ok=True)
     seg_band_lo, seg_band_hi = 20, 86
@@ -880,10 +1425,19 @@ async def _run_flf2v_multi(
         pct_seg_hi  = seg_band_lo + int(seg_span * (i + 1)   / n_trans)
 
         _set_progress(vid_key, "submitting", f"Transition {i + 1}/{n_trans} — submitting to ComfyUI…", pct_seg_lo)
-        wf, save_node = _build_flf2v_single_workflow(
-            start_fname, end_fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
-            req.rife_multiplier, append_end_frame=req.end_on_keyframe,
-        )
+        native_length = None
+        if minimax:
+            wf, save_node, native_length = _build_minimax_single_workflow(
+                start_fname, p_i, fc_i, req.width, req.height, seg_prefix,
+                req.rife_multiplier, end_comfy_filename=end_fname,
+            )
+        else:
+            wf, save_node = _build_flf2v_single_workflow(
+                start_fname, end_fname, p_i, fc_i, req.width, req.height, seg_prefix,
+                req.rife_multiplier, append_end_frame=req.end_on_keyframe,
+                steps=req.steps, lora_high=req.lora_high, fun_inp=fun_inp,
+                style_lora=req.style_lora, style_lora_strength=req.style_lora_strength,
+            )
         prompt_id = await _post_workflow_with_retry(client, wf)
         _register_labels(prompt_id, wf)
         logger.info("Video job %s transition %d → ComfyUI prompt %s", video_id, i + 1, prompt_id)
@@ -894,14 +1448,31 @@ async def _run_flf2v_multi(
             vid_key, "running", f"Transition {i + 1}/{n_trans} — generating frames…", pct_seg_mid,
             prompt_id=prompt_id, band=(pct_seg_mid, pct_seg_hi),
         )
-        seg_outputs = await poll_history(client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL)
+        # MiniMax keeps the flat budget: its cost model is a different one and
+        # was never measured against the Wan coefficients.
+        seg_outputs = await poll_history(
+            client, prompt_id, interval=POLL_INTERVAL,
+            timeout=POLL_TIMEOUT if minimax else wan_poll_timeout(
+                req.width, req.height, fc_i, clamp_wan_steps(req.steps),
+                clamp_lora_high(req.lora_high),
+            ),
+        )
         seg_src = _comfy_save_path(seg_outputs.get(save_node, {}), f"Transition {i + 1}")
 
         # Persist the clip under a stable name and register it in the library
         # immediately — a crash on a later transition loses nothing.
         seg_dest  = seg_dir / f"seg_{i}.mp4"
         seg_thumb = seg_dir / f"seg_{i}_thumb.jpg"
-        await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
+        if native_length is not None and req.rife_multiplier > 1:
+            # RIFE stretched the picture but not the jointly-sampled audio —
+            # same re-sync _run_i2v_multi does for minimax_i2v.
+            await stretch_native_audio(
+                seg_src, seg_dest,
+                native_length=native_length, fps=MINIMAX_FPS,
+                ffmpeg_path=settings.ffmpeg_path,
+            )
+        else:
+            await asyncio.to_thread(shutil.copy2, seg_src, seg_dest)
         await make_video_thumbnail(seg_dest, seg_thumb)
         await _persist_clip(video_id, i, seg_dest.name, seg_thumb.name, p_i, fc_i, req)
         _set_progress(vid_key, "running", f"Transition {i + 1}/{n_trans} — saved ✓", pct_seg_hi)
@@ -930,6 +1501,8 @@ async def _run_i2v_multi(
     n_imgs = len(comfy_names)
     prompts_list = req.prompts if len(req.prompts) == n_imgs else [req.prompt] * n_imgs
     fc_list = req.frame_counts if len(req.frame_counts) == n_imgs else [req.frame_count] * n_imgs
+    if req.workflow not in MINIMAX_WORKFLOWS:
+        fc_list = [align_wan_length(fc) for fc in fc_list]
     seg_dir = _segments_dir(video_id)
     seg_dir.mkdir(parents=True, exist_ok=True)
     seg_band_lo, seg_band_hi = 20, 86
@@ -945,15 +1518,17 @@ async def _run_i2v_multi(
 
         _set_progress(vid_key, "submitting", f"Clip {i + 1}/{n_imgs} — submitting to ComfyUI…", pct_seg_lo)
         native_length = None
-        if req.workflow == "minimax_i2v":
+        if req.workflow in MINIMAX_WORKFLOWS:
             wf, save_node, native_length = _build_minimax_single_workflow(
                 fname, p_i, fc_i, req.width, req.height, seg_prefix,
                 req.rife_multiplier,
             )
         else:
             wf, save_node = _build_i2v_single_workflow(
-                fname, p_i, fc_i, req.width, req.height, req.fps, seg_prefix,
+                fname, p_i, fc_i, req.width, req.height, seg_prefix,
                 req.rife_multiplier, req.pingpong,
+                steps=req.steps, lora_high=req.lora_high,
+                style_lora=req.style_lora, style_lora_strength=req.style_lora_strength,
             )
         prompt_id = await _post_workflow_with_retry(client, wf)
         _register_labels(prompt_id, wf)
@@ -965,7 +1540,15 @@ async def _run_i2v_multi(
             vid_key, "running", f"Clip {i + 1}/{n_imgs} — generating frames…", pct_seg_mid,
             prompt_id=prompt_id, band=(pct_seg_mid, pct_seg_hi),
         )
-        seg_outputs = await poll_history(client, prompt_id, timeout=POLL_TIMEOUT, interval=POLL_INTERVAL)
+        # MiniMax keeps the flat budget: its cost model is a different one and
+        # was never measured against these coefficients.
+        seg_timeout = POLL_TIMEOUT if req.workflow in MINIMAX_WORKFLOWS else wan_poll_timeout(
+            req.width, req.height, fc_i, clamp_wan_steps(req.steps),
+            clamp_lora_high(req.lora_high),
+        )
+        seg_outputs = await poll_history(
+            client, prompt_id, timeout=seg_timeout, interval=POLL_INTERVAL,
+        )
         seg_src = _comfy_save_path(seg_outputs.get(save_node, {}), f"Segment {i + 1}")
 
         # Persist the clip under a stable name and register it in the library
@@ -1080,6 +1663,7 @@ async def _free_ollama_vram(workflow: str | None = None) -> None:
 # loader dies with a CUDA OOM that takes its prompt worker thread with it.
 _MIN_FREE_VRAM = {
     "minimax_i2v": 13.5 * 1024**3,
+    "minimax_flf": 13.5 * 1024**3,   # same model, one extra VAE-encoded frame
 }
 _MIN_FREE_VRAM_DEFAULT = 9.0 * 1024**3
 
@@ -1231,7 +1815,7 @@ async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> Non
 
             # Both runners persist their clips as they render and mark the
             # job done themselves — the clips ARE the deliverable.
-            if req.workflow == "flf2v":
+            if req.workflow in TRANSITION_WORKFLOWS:
                 await _run_flf2v_multi(
                     client, video_id, comfy_names, ordered_images, req, prefix, vid_key,
                 )
@@ -1528,7 +2112,11 @@ _TRANSITION_TIMEOUT_PER_IMAGE = 20.0
 class SuggestTransitionsRequest(BaseModel):
     image_ids: list[uuid.UUID]   # in the user's selected playback order
     context: str = ""            # optional story/narrative context (story-frames flow)
-    workflow: str = "i2v_multi"  # suggest-i2v only: "i2v_multi" (Wan, silent) | "minimax_i2v" (MiniMax H3, native audio)
+    # Which family the prompts are for. Both suggest endpoints read it: a
+    # MiniMax prompt carries an Audio: line and names its arrival, a Wan one
+    # is a short silent motion line. Defaulted to the Wan side so an older
+    # client that does not send it keeps its old behaviour.
+    workflow: str = "i2v_multi"
 
 
 async def _load_suggest_jpgs(
@@ -1558,10 +2146,15 @@ async def _load_suggest_jpgs(
 async def suggest_transitions(
     body: SuggestTransitionsRequest, db: AsyncSession = Depends(get_db),
 ):
-    """VLM-suggested per-transition prompts for flf2v — one vision call, N-1
-    prompts back. Purely advisory: nothing is persisted here; the client
-    fills its own per-transition textareas and the user can edit before
-    calling /generate."""
+    """VLM-suggested per-transition prompts — one vision call, N-1 prompts
+    back. Purely advisory: nothing is persisted here; the client fills its own
+    per-transition textareas and the user can edit before calling /generate.
+
+    Serves both transition workflows, with a different writer for each.
+    MiniMax H3 samples its audio jointly with the picture, so its prompts carry
+    an `Audio:` line the Wan ones must not have — and it is the family that
+    rewards naming the destination, which is what its writer is built around.
+    """
     n = len(body.image_ids)
     if n < 2:
         raise HTTPException(status_code=400, detail="Need at least 2 images to suggest transitions")
@@ -1570,16 +2163,27 @@ async def suggest_transitions(
 
     jpgs = await _load_suggest_jpgs(body.image_ids, db)
     logger.info(
-        "Suggest-transitions: %d images, model=%s, payload=%dKB",
-        n, settings.ollama_titler_model, sum(len(j) for j in jpgs) // 1024,
+        "Suggest-transitions: %d images, workflow=%s, model=%s, payload=%dKB",
+        n, body.workflow, settings.ollama_titler_model,
+        sum(len(j) for j in jpgs) // 1024,
     )
 
     timeout = max(_TRANSITION_TIMEOUT_FLOOR, _TRANSITION_TIMEOUT_PER_IMAGE * n)
+    minimax = body.workflow in MINIMAX_WORKFLOWS
+    writer = generate_minimax_transition_prompts if minimax else generate_transition_prompts
     try:
-        prompts = await generate_transition_prompts(jpgs, context=body.context, timeout=timeout)
+        prompts = await writer(jpgs, context=body.context, timeout=timeout)
     except Exception as exc:
         logger.exception("Transition prompt suggestion failed for %d images", n)
         raise HTTPException(status_code=502, detail=f"Suggestion failed: {exc}")
+
+    if minimax:
+        # The writer is asked for an Audio: line and a small VLM does not
+        # always give one. The builder would add a fallback at submit time
+        # anyway, but then the user never sees it and cannot edit it — so it
+        # is completed here, where the answer is still on its way to a
+        # textarea. A line the model did write survives verbatim.
+        prompts = [ensure_sound_only_audio(p) if p.strip() else p for p in prompts]
 
     return {"prompts": prompts}
 
@@ -1941,9 +2545,16 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
                 raise HTTPException(status_code=400, detail="frame_counts values must be 5–81")
         if body.rife_multiplier not in (2, 3, 4):
             raise HTTPException(status_code=400, detail="rife_multiplier must be 2, 3 or 4")
-    elif body.workflow == "minimax_i2v":
-        if not (1 <= n <= 6):
-            raise HTTPException(status_code=400, detail="minimax_i2v requires 1–6 image IDs")
+    elif body.workflow in MINIMAX_WORKFLOWS:
+        # A transition mode renders n-1 clips, so its image bound is one wider
+        # at the bottom (two pictures make one transition) and one wider at the
+        # top for the same GPU-time budget.
+        lo, hi = (2, 7) if body.workflow == "minimax_flf" else (1, 6)
+        if not (lo <= n <= hi):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{body.workflow} requires {lo}–{hi} image IDs",
+            )
         # Wider than the Wan/flf2v 5–81 band: MiniMax H3's trained range is
         # ~124–362 frames (≈5–15 s at its fixed 24 fps). Values are snapped up
         # onto the model's 17k+5 grid by the builder.
@@ -1969,7 +2580,7 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
             raise HTTPException(status_code=400, detail="rife_multiplier must be 2, 3 or 4")
 
     # Summarise per-clip prompts for display
-    if body.workflow in ("i2v_multi", "minimax_i2v", "flf2v") and body.prompts:
+    if body.workflow in GENERATE_WORKFLOWS and body.prompts:
         prompt_display = " | ".join(p for p in body.prompts if p) or body.prompt or None
     else:
         prompt_display = body.prompt or None
@@ -1983,7 +2594,8 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
         height=body.height,
         frame_count=body.frame_count,
         n_images=n,
-        fps=MINIMAX_FPS if body.workflow == "minimax_i2v" else body.fps,
+        fps=(MINIMAX_FPS if body.workflow in MINIMAX_WORKFLOWS
+             else wan_output_fps(body.rife_multiplier)),
         status="generating",
         created_at=datetime.now(timezone.utc),
     )
@@ -2000,13 +2612,16 @@ async def generate_video(body: GenerateVideoRequest, db: AsyncSession = Depends(
 def _expected_clip_count(video: Video) -> int | None:
     """How many clips this job will produce when it finishes.
 
-    flf2v animates the gaps *between* key frames, so it yields one clip fewer
-    than it was given images; the others animate each image on its own. Only
-    meaningful for generation jobs — a merge has no stack of its own.
+    A transition workflow animates the gaps *between* key frames, so it yields
+    one clip fewer than it was given images; the others animate each image on
+    its own. Only meaningful for generation jobs — a merge has no stack of its
+    own.
     """
     if not video.n_images or video.workflow == "merge":
         return None
-    return max(1, video.n_images - 1) if video.workflow == "flf2v" else video.n_images
+    if video.workflow in TRANSITION_WORKFLOWS:
+        return max(1, video.n_images - 1)
+    return video.n_images
 
 
 @router.get("/jobs/{video_id}/progress")
@@ -2102,12 +2717,56 @@ def _serialize_clip(c: VideoClip) -> dict:
         "out_height":  out_h,
         "fps":         c.fps,
         "has_audio":   c.has_audio,
+        # Null on MiniMax clips and on anything rendered before these became
+        # settings — the card omits the chip rather than inventing a default.
+        "wan_steps":     c.wan_steps,
+        "wan_lora_high": c.wan_lora_high,
         "upscale_resolution": c.upscale_resolution,
         "upscale_rife":       c.upscale_rife,
         "has_upscale":        bool(c.upscale_filename),
         "upscale_rendering":  _is_clip_upscaling(c),
         "created_at":  c.created_at.isoformat(),
     }
+
+
+@router.get("/sampler-info")
+async def sampler_info():
+    """What the Steps/Motion row needs to describe a job the way it will run.
+
+    The tool page carries fallback copies of all three so the hint renders
+    before this lands (and if it never does), but they are only fallbacks: the
+    expert split moves with the sigma schedule and the cost moves with the
+    attention backend, and both of those live here. A page guessing either one
+    is worse than a page that waits a moment for the real answer.
+    """
+    return {
+        "sage_attention": settings.wan_sage_attention,
+        "sec_per_step_pf": (_WAN_SEC_PER_STEP_PF_SAGE if settings.wan_sage_attention
+                            else _WAN_SEC_PER_STEP_PF),
+        "sec_post_pf": _WAN_SEC_POST_PF,
+        "splits": {
+            str(s): moe_split_step(s, _WAN_SHIFT, I2V_BOUNDARY)
+            for s in range(_WAN_STEPS_MIN, _WAN_STEPS_MAX + 1)
+        },
+    }
+
+
+@router.get("/wan-loras")
+async def wan_loras():
+    """The transition-LoRA shelf, restricted to what ComfyUI actually has.
+
+    What is installed is read from ComfyUI, because the point of the slot is
+    that the user adds files to it; *which* of those files belong in a Wan
+    transition is decided by services/comfy/wan_transition_loras.py, because
+    the folder is shared with every other model family in the project and a
+    foreign LoRA fails by doing nothing at all.
+
+    The two lightx2v distills are dropped before matching: they are what the
+    Motion dial already drives, and offering them here would let someone stack
+    a second copy of the LoRA the graph is loading anyway.
+    """
+    names = await loader_choices("LoraLoaderModelOnly", "lora_name")
+    return {"loras": offered_transition_loras(names - {_LORA_HIGH, _LORA_LOW})}
 
 
 @router.get("/clips")

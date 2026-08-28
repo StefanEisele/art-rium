@@ -358,11 +358,13 @@ class InstagramPostMedia(Base):
 # alongside the picture). Everything else — the Wan-based i2v_multi/flf2v — is
 # silent. "ltx_i2v" is retired but kept here so clips generated before the
 # MiniMax H3 switch keep reporting their audio to the merge/mux paths.
-AUDIO_WORKFLOWS = frozenset({"minimax_i2v", "ltx_i2v"})
+AUDIO_WORKFLOWS = frozenset({"minimax_i2v", "minimax_flf", "ltx_i2v"})
 
 # Key-frame animation workflows, as opposed to improv mixes or merges. Used to
 # label a video for YouTube and for the article LLM.
-ANIMATE_WORKFLOWS = frozenset({"i2v_multi", "minimax_i2v", "ltx_i2v", "flf2v", "minimax_api"})
+ANIMATE_WORKFLOWS = frozenset(
+    {"i2v_multi", "minimax_i2v", "minimax_flf", "ltx_i2v", "flf2v", "minimax_api"}
+)
 
 # Videos rendered by a paid cloud provider rather than the local GPU.
 API_WORKFLOW = "minimax_api"
@@ -432,7 +434,7 @@ class Video(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="generating", index=True)
     error: Mapped[str | None] = mapped_column(Text)
     comfy_prompt_id: Mapped[str | None] = mapped_column(String(128))
-    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "minimax_i2v" | "flf2v" | "merge" | "beatcut" | "minimax_api" (legacy rows may hold "ltx_i2v")
+    workflow: Mapped[str | None] = mapped_column(String(32))          # "i2v_multi" | "minimax_i2v" | "flf2v" | "minimax_flf" | "merge" | "beatcut" | "minimax_api" (legacy rows may hold "ltx_i2v")
     # The edit that produced a workflow="beatcut" row: style, seed, tempo and
     # every shot (services/video/cut.py::EditPlan). Kept so the card can say
     # what the piece is, and so the same cut can be rebuilt or re-rolled from
@@ -534,6 +536,13 @@ class VideoClip(Base):
     height: Mapped[int | None] = mapped_column(Integer)
     fps: Mapped[int | None] = mapped_column(Integer)
     has_audio: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)  # true for AUDIO_WORKFLOWS clips
+    # What the Wan sampler was told. Both are null for a MiniMax clip (that
+    # model runs its own fixed recipe) and for anything rendered before these
+    # became settings. Kept for the same reason the prompt is: they are dials
+    # the user is expected to hunt for a value on, and a clip that cannot say
+    # which value produced it cannot be compared with the next one.
+    wan_steps: Mapped[int | None] = mapped_column(SmallInteger)      # total sampler steps, both experts
+    wan_lora_high: Mapped[float | None] = mapped_column(Float)       # distill on the high-noise expert; LOWER = more motion
     # Optional SEEDVR2 upscale of this individual clip, rendered *before* the
     # merge. Upscaling the merged video instead makes the restorer (and RIFE)
     # work across the hard cuts between segments, which it interpolates into

@@ -42,6 +42,7 @@ _CLASS_LABELS: dict[str, str] = {
     "RandomNoise":               "Seeding noise…",
     "ModelSamplingSD3":          "Configuring sampler…",
     "ModelSamplingAuraFlow":     "Configuring sampler…",
+    "PathchSageAttentionKJ":     "Switching to fast attention…",
     # ── Latents ──────────────────────────────────────────────────────────────
     "EmptyLatentImage":          "Preparing latent…",
     "EmptySD3LatentImage":       "Preparing latent…",

@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     # ── ComfyUI ──────────────────────────────────────────────────────────────
     comfyui_host: str = "127.0.0.1:8188"
     comfyui_output_dir: Path = Path("E:/00_comfy/output")
+    # Route the Wan 2.2 experts' attention through SageAttention (INT8 QK,
+    # FP8 PV) instead of PyTorch SDPA. Scoped to the two Wan builders on
+    # purpose — it is an approximation, and every other model in this project
+    # was calibrated without it. Needs `sageattention` in ComfyUI's venv and
+    # KJNodes' PathchSageAttentionKJ; set false to fall back to SDPA without a
+    # code change. See routers/video.py::_attention_backend for the numbers.
+    wan_sage_attention: bool = True
 
     # ── Storage (managed, ingested files) ────────────────────────────────────
     storage_dir: Path = Path(__file__).parent.parent / "storage"

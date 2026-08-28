@@ -29,6 +29,8 @@
 
     /* Settings rows */
     .field-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    /* A label and its box, kept together across a wrap. */
+    .field-pair { display: flex; align-items: center; gap: 10px; }
     .field-label { font-size: 12px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.6px; min-width: 80px; }
     .field-select, .field-input {
       background: var(--surface2); border: 1.5px solid var(--border);
@@ -36,8 +38,26 @@
       padding: 6px 10px; outline: none; font-family: inherit;
       transition: border-color 0.2s; -webkit-appearance: none;
     }
+    /* A <select> is as wide as its widest <option>, and min-width:auto means a
+       flex item refuses to shrink below that — so one long option name pushes
+       the row past the right edge of the phone instead of wrapping. These two
+       let it give way; the ellipsis keeps the closed state readable when it
+       does. */
+    .field-select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
     .field-select:focus, .field-input:focus { border-color: var(--accent); }
     .field-input { width: 80px; text-align: center; }
+    /* Phone: the label takes its own line so the dropdown gets the full width
+       beside its strength box, rather than the ~90px left over after an
+       uppercase "MORPH-LORA". Same treatment as #merge-bar below. */
+    @media (max-width: 480px) {
+      #wan-lora-row .field-label { flex: 1 1 100%; }
+      #wan-lora-row #style-lora-select { flex: 1 1 0; }
+      /* Story frames pairs a label with its box twice on one row ("Frames 4
+         Beat (s) 10"), which needs ~325px of a 324px row — so the last box
+         wrapped and left "Beat (s)" pointing at nothing. Tighten both. */
+      #story-section .field-label { min-width: auto; }
+      #story-section .field-input { width: 68px; }
+    }
 
     /* Resolution chips */
     .res-chips { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -473,7 +493,8 @@
           <div class="mode-chips" id="mode-chips">
             <button class="mode-chip active" data-mode="i2v_multi" onclick="setMode('i2v_multi',this)">Animate (i2v)</button>
             <button class="mode-chip" data-mode="minimax_i2v" onclick="setMode('minimax_i2v',this)">MiniMax H3 (i2v)</button>
-            <button class="mode-chip" data-mode="flf2v" onclick="setMode('flf2v',this)">Transitions (FLF2V)</button>
+            <button class="mode-chip" data-mode="flf2v" onclick="setMode('flf2v',this)">Transitions (Wan)</button>
+            <button class="mode-chip" data-mode="minimax_flf" onclick="setMode('minimax_flf',this)">Transitions (MiniMax H3)</button>
           </div>
         </div>
 
@@ -501,11 +522,19 @@
             </div>
             <textarea id="story-text" class="per-transition-prompt" rows="3"
                       placeholder="Short story to unfold across the frames…"></textarea>
+            <!-- Two label+box pairs on one row. Each pair is its own flex box
+                 so that a narrow phone wraps between them rather than through
+                 one: the row used to break after "Beat (s)" and leave the
+                 label pointing at nothing. -->
             <div class="field-row">
-              <span class="field-label">Frames</span>
-              <input class="field-input" id="story-n" type="number" value="4" min="1" max="19" step="1">
-              <span class="field-label" style="min-width:auto">Beat&nbsp;(s)</span>
-              <input class="field-input" id="story-beat" type="number" value="10" min="1" max="600" step="1">
+              <span class="field-pair">
+                <span class="field-label">Frames</span>
+                <input class="field-input" id="story-n" type="number" value="4" min="1" max="19" step="1">
+              </span>
+              <span class="field-pair">
+                <span class="field-label" style="min-width:auto">Beat&nbsp;(s)</span>
+                <input class="field-input" id="story-beat" type="number" value="10" min="1" max="600" step="1">
+              </span>
             </div>
             <div class="field-row" style="align-items:flex-start" title="Defaults to the source image's own LoRA(s) + strength for high consistency">
               <span class="field-label">LoRAs</span>
@@ -534,15 +563,60 @@
           <div class="res-chips" id="res-chips"></div>
         </div>
 
-        <!-- FPS — locked to 24 in MiniMax mode (the model's audio latent is tied to that rate) -->
+        <!-- FPS is not a choice in any current mode, and pretending it was is
+             what made every Wan clip play at half speed. MiniMax's audio latent
+             is tied to 24; Wan animates at 16 and RIFE multiplies the frames,
+             so the clip has to be written at 16 x RIFE or the extra frames
+             stretch it instead of smoothing it. The select is kept, disabled,
+             so the rate the file will actually carry is visible. -->
         <div class="field-row">
           <span class="field-label">FPS</span>
-          <select class="field-select" id="fps-select">
+          <select class="field-select" id="fps-select" disabled>
             <option value="16">16</option>
             <option value="24" selected>24</option>
             <option value="30">30</option>
+            <option value="32">32</option>
+            <option value="48">48</option>
+            <option value="64">64</option>
           </select>
-          <span id="fps-note" style="font-size:11px;color:var(--text-dim);display:none">fixed by MiniMax H3</span>
+          <span id="fps-note" style="font-size:11px;color:var(--text-dim)"></span>
+        </div>
+
+        <!-- Wan sampler controls (i2v_multi + flf2v only; MiniMax H3 runs its own
+             fixed recipe and hides both rows). These are the two settings that
+             decide whether a Wan clip is worth keeping — see the JS block by
+             renderStepsChips() for what each one costs. -->
+        <div class="field-row" id="wan-steps-row">
+          <span class="field-label">Steps</span>
+          <div class="res-chips" id="steps-chips"></div>
+          <span id="split-note" style="font-size:11px;color:var(--text-dim)"></span>
+        </div>
+
+        <div class="field-row" id="wan-motion-row"
+             title="Strength of the 4-step distill LoRA on the high-noise expert. It plans the motion, and at full strength it plans almost none.">
+          <span class="field-label">Motion</span>
+          <div class="res-chips" id="motion-chips"></div>
+          <span id="motion-note" style="font-size:11px;color:var(--text-dim)"></span>
+        </div>
+
+        <!-- Optional LoRA on the high-noise expert. FLF2V infers the path
+             between two frames and, given two unrelated pictures, infers a
+             blend — the destination is pinned, so there is nothing to invent.
+             A metamorphosis LoRA is how that is answered: it puts the
+             transformation into the expert that decides what the clip becomes,
+             instead of asking the prompt to conjure one. -->
+        <div class="field-row" id="wan-lora-row"
+             title="An extra LoRA on the high-noise expert, chained after the distill. This is the slot the community's transition/metamorphosis LoRAs are trained for.">
+          <span class="field-label">Morph-LoRA</span>
+          <select class="field-select" id="style-lora-select" onchange="onStyleLoraChange()">
+            <option value="">— keine —</option>
+          </select>
+          <input class="field-input" id="style-lora-strength" type="number"
+                 value="1.0" min="0" max="2" step="0.05" style="width:72px"
+                 oninput="state.styleLoraStrength = parseFloat(this.value) || 0">
+          <!-- Own line (flex-basis 100%): it carries the trigger phrase, which
+               is long, and a note that would otherwise decide the row's width. -->
+          <span id="style-lora-note" style="flex:1 1 100%;font-size:11px;color:var(--text-dim)"></span>
         </div>
 
         <!-- RIFE multiplier — chip set is re-rendered per-mode by renderRifeChips() since
@@ -756,6 +830,8 @@ const state = {
   transitionSettings: new Map(), // "idA__idB" → {prompt, frameCount} — flf2v pairs
   width: 960, height: 960,
   rifeMultiplier: 3,             // RIFE VFI interpolation factor (1=off | 2 | 3 | 4)
+  wanSteps: 6,                   // Wan sampler steps across both experts (4–16)
+  wanLoraHigh: 0.5,              // high-noise distill strength; LOWER = more motion
   pingpong: false,               // i2v_multi: VHS_VideoCombine pingpong flag
   endOnKeyframe: false,          // flf2v: append raw end key frame (pixel-exact landing, cut risk)
   pickerImages: [], pickerSearch: '', pickerPage: 0, pickerLoading: false, pickerDone: false,
@@ -774,20 +850,27 @@ const state = {
   storyPollTimer: null,          // interval id while a story-frames job runs
   storySource: null,             // source image object captured when the job starts
   suggestI2vPollTimer: null,     // interval id while a suggest-i2v job runs
+  styleLora: null,               // optional high-noise LoRA (filename), null = none
+  styleLoraStrength: 1.0,
 };
 
 const $ = id => document.getElementById(id);
 const api = ArtRium.makeApiFetch(() => state.apiKey);
 const withAuth = url => ArtRium.withAuth(url, state.apiKey);
 const PICKER_LIMIT = 30;
-// All three workflows share the per-clip generate→review→merge pattern.
-// isPerImageMode() only distinguishes the *per-image* prompt UI (i2v_multi/
-// minimax_i2v) from the *per-transition* prompt UI (flf2v) — see
+// All four workflows share the per-clip generate→review→merge pattern, and
+// vary along two independent axes:
+//   family — Wan 2.2 or MiniMax H3, which decides sampler, canvas and rate
+//   shape  — per image, or per adjacent PAIR (a transition, one clip fewer)
+// isPerImageMode() picks between the two prompt UIs — see
 // renderPerImageSection() / renderPerTransitionSection().
-const isMinimax = () => state.mode === 'minimax_i2v';
-const isPerImageMode = () => state.mode === 'i2v_multi' || isMinimax();
-const maxImagesForMode = () =>
-  state.mode === 'i2v_multi' ? 10 : isMinimax() ? 6 : 20;
+const isMinimax = () => state.mode === 'minimax_i2v' || state.mode === 'minimax_flf';
+const isTransitionMode = () => state.mode === 'flf2v' || state.mode === 'minimax_flf';
+const isPerImageMode = () => !isTransitionMode();
+// MiniMax transitions are capped lower than Wan's: each clip costs a full
+// 20-step H3 render, so 7 pictures (6 transitions) is already a long evening.
+const MAX_IMAGES = {i2v_multi: 10, minimax_i2v: 6, flf2v: 20, minimax_flf: 7};
+const maxImagesForMode = () => MAX_IMAGES[state.mode] ?? 10;
 
 // Frame-count bounds per mode. MiniMax H3 runs at a fixed 24fps on a 17k+5
 // frame grid; the model is trained for ~124–362 frames (≈5–15s), but this
@@ -797,7 +880,12 @@ const maxImagesForMode = () =>
 // queue, not a failed job. So the ceiling here is a VRAM budget, not the
 // model's spec, and it moves with the chosen resolution.
 const MINIMAX_PIXEL_FRAME_BUDGET = 58e6;
-const FRAME_BOUNDS_WAN = {min: 5, max: 81, step: 1, def: 49};
+// Wan's temporal grid is 4n+1 — the VAE compresses time by 4 with the first
+// frame alone, and every Wan node in ComfyUI declares step 4 for `length`.
+// Step 1 here let an off-grid count through (a job went out at 48); 5 and 81
+// are both 4n+1, so stepping by 4 lands on the grid the whole way.
+const FRAME_BOUNDS_WAN = {min: 5, max: 81, step: 4, def: 49};
+const alignWanFrames = n => { const v = Math.max(5, n || 0); return v + ((-(v - 1) % 4) + 4) % 4; };
 
 // Default clip length for MiniMax, in frames. The model only accepts lengths
 // on its 17k+5 grid (…, 56, 73, 90, 107, …) and `align_minimax_length` snaps
@@ -805,12 +893,24 @@ const FRAME_BOUNDS_WAN = {min: 5, max: 81, step: 1, def: 49};
 // request for the nearby off-grid values actually renders as.
 const MINIMAX_DEFAULT_FRAMES = 73;
 
+// The model's own trained floor, from MiniMaxH3ImageToVideo's tooltip
+// ("trained range is ~124-362") and its default of 124. Under it the model is
+// out of distribution, and the way that shows up is the worst possible one for
+// a transition: it stops interpolating and cuts.
+const MINIMAX_TRAINED_MIN = 124;
+
 function frameBounds() {
   if (!isMinimax()) return FRAME_BOUNDS_WAN;
   let max = Math.floor(MINIMAX_PIXEL_FRAME_BUDGET / (state.width * state.height));
   while (max % 17 !== 5) max--;                  // land on the model's grid
   max = Math.max(22, max);
-  return {min: 22, max, step: 17, def: Math.min(max, MINIMAX_DEFAULT_FRAMES)};
+  // Default into the trained range whenever the canvas leaves room for it.
+  // A transition mode has no use for a shorter clip that cuts in the middle,
+  // and the per-image modes are no worse for the extra length.
+  const def = max >= MINIMAX_TRAINED_MIN
+    ? MINIMAX_TRAINED_MIN
+    : Math.min(max, MINIMAX_DEFAULT_FRAMES);
+  return {min: 22, max, step: 17, def};
 }
 
 // ── Mode ──────────────────────────────────────────────────────────────────────
@@ -828,27 +928,55 @@ function setMode(mode, el) {
   // minimax_i2v that also means stretching its native audio to match
   // (server-side), so switching into it resets to "1× (off)" rather than
   // carrying over a Wan default — and switching back to a Wan mode restores 3×.
-  const enteringMmx = mode === 'minimax_i2v' && prevMode !== 'minimax_i2v';
-  const leavingMmx  = mode !== 'minimax_i2v' && prevMode === 'minimax_i2v';
+  const isMmx = m => m === 'minimax_i2v' || m === 'minimax_flf';
+  const enteringMmx = isMmx(mode) && !isMmx(prevMode);
+  const leavingMmx  = !isMmx(mode) && isMmx(prevMode);
   if (enteringMmx) state.rifeMultiplier = 1;
   else if (leavingMmx) state.rifeMultiplier = 3;
   renderStrip();
   renderResChips();
   renderRifeChips();
+  renderStepsChips();
+  renderMotionChips();
   _updateModeFields();
 }
 
 function _updateModeFields() {
+  // Steps and Motion drive the two Wan builders' shared sampler; MiniMax H3
+  // has its own recipe and neither dial reaches it.
+  const wanRows = isWanMode() ? '' : 'none';
+  $('wan-steps-row').style.display  = wanRows;
+  $('wan-motion-row').style.display = wanRows;
+  $('wan-lora-row').style.display   = wanRows;
   // Pingpong (boomerang) stays i2v_multi-only.
   $('pingpong-row').style.display = state.mode === 'i2v_multi' ? '' : 'none';
+  // "Land on the key frame" splices the raw end photo in after diffusion —
+  // only meaningful for the Wan transition path, which is the one that
+  // undershoots its end frame.
   $('endkf-row').style.display    = state.mode === 'flf2v' ? '' : 'none';
-  $('story-section').style.display = state.mode === 'flf2v' ? '' : 'none';
+  $('story-section').style.display = isTransitionMode() ? '' : 'none';
   // MiniMax H3 samples its audio jointly with the picture at a fixed 24fps;
   // any other rate would desync the two, so the selector is pinned there.
-  const fpsSel = $('fps-select');
-  if (isMinimax()) fpsSel.value = '24';
-  fpsSel.disabled = isMinimax();
-  $('fps-note').style.display = isMinimax() ? '' : 'none';
+  renderFpsRow();
+}
+
+// ── Frame rate ────────────────────────────────────────────────────────────────
+// Neither family lets the caller pick. MiniMax H3 samples picture and audio into
+// one latent at a fixed 24 fps. Wan 2.2's A14B experts animate at 16 fps — that
+// is what one generated frame *means* — and RIFE multiplies the frame count, so
+// the container has to run at 16 x RIFE for the motion to play at the speed it
+// was sampled for. Writing 3x the frames at 24 fps, which is what this tool used
+// to do, plays 16 fps content at 8: every clip at half speed, and a first-to-last
+// transition at half speed is a cross-fade.
+const WAN_NATIVE_FPS = 16;
+const wanOutputFps = () => WAN_NATIVE_FPS * Math.max(1, Math.min(4, state.rifeMultiplier || 1));
+
+function renderFpsRow() {
+  const fps = isMinimax() ? 24 : wanOutputFps();
+  $('fps-select').value = String(fps);
+  $('fps-note').textContent = isMinimax()
+    ? 'fixed by MiniMax H3'
+    : `${WAN_NATIVE_FPS} fps native x ${state.rifeMultiplier} RIFE`;
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────────
@@ -870,8 +998,16 @@ function _updateModeFields() {
 const RES_PRESETS = {
   wan: [[960, 960, '960×960'], [1280, 704, '1280×704'], [704, 1280, '704×1280'],
         [1920, 1088, '1920×1080'], [1088, 1920, '1080×1920']],
+  // The VRAM budget is a pixel-FRAME budget, so canvas and length trade against
+  // each other — and length is the one with a hard floor. MiniMax H3 is trained
+  // for ~124-362 frames; below that the model starts treating the clip as two
+  // shots and cuts between them (measured: a 107-frame run scored 0.38 at the
+  // cut, against 0.07-0.15 peak in three cloud runs of 124-157 frames that
+  // never cut). So the smaller canvases are not a downgrade here, they are what
+  // buys the length the model needs. 800x448 reaches 158.
   minimax: [[960, 544, '960×544 (16:9)'], [544, 960, '544×960 (9:16)'],
-            [864, 480, '864×480 (16:9)'], [480, 864, '480×864 (9:16)']],
+            [864, 480, '864×480 (16:9)'], [480, 864, '480×864 (9:16)'],
+            [800, 448, '800×448 (16:9)'], [448, 800, '448×800 (9:16)']],
 };
 
 function renderResChips() {
@@ -891,6 +1027,7 @@ function setRes(w, h, el) {
   // MiniMax's frame ceiling is a VRAM budget shared with the frame size, so a
   // resolution change moves it — re-render so the spinners follow.
   if (isMinimax()) renderPerImageSection();
+  updateSplitNote();   // a bigger canvas is a longer render
 }
 
 // ── RIFE ──────────────────────────────────────────────────────────────────────
@@ -902,6 +1039,7 @@ const RIFE_PRESETS = {
 function renderRifeChips() {
   const mults = RIFE_PRESETS[isMinimax() ? 'minimax' : 'wan'];
   if (!mults.includes(state.rifeMultiplier)) state.rifeMultiplier = mults[0];
+  renderFpsRow();
   $('rife-chips').innerHTML = mults.map(m => {
     const label = m === 1 ? '1× (off)' : `${m}×`;
     const active = m === state.rifeMultiplier ? ' active' : '';
@@ -913,6 +1051,200 @@ function setRife(mult, el) {
   state.rifeMultiplier = mult;
   document.querySelectorAll('#rife-chips .res-chip').forEach(c => c.classList.remove('active'));
   el.classList.add('active');
+  // The Wan container rate is 16 x this, so the FPS row moves with the chip.
+  renderFpsRow();
+}
+
+// ── Wan sampler controls ──────────────────────────────────────────────────────
+// Two dials, and between them they decide whether a Wan 2.2 clip is worth
+// keeping. Neither applies to MiniMax H3, which runs its own fixed recipe.
+//
+// STEPS buy resolved detail. Four is the floor the distill LoRA makes possible,
+// not the point where it looks good — grass, fabric and the ridges in a paint
+// pour come in between 6 and 10 and keep improving to ~16. They are not free.
+// Measured on the 16GB 4060 Ti at 960x960 x 49 frames with RIFE 3: ~74 s per
+// sampler step against ~58 s for everything else in the render put together,
+// dead straight across 4/6/8/10 steps (356/496/647/797 s). So the wait really
+// is close to proportional to this chip, and the estimate beside it says so
+// out loud rather than letting a 16-step job surprise anyone.
+const WAN_STEP_OPTIONS = [4, 6, 8, 10, 12, 16];
+
+// Where Wan 2.2's two experts hand over, per step count. The model switches at
+// a fixed diffusion timestep, not at half the steps, so the split has to be
+// derived from the sigma schedule. Mirrors moe_split_step(steps, 5.0, 0.900) in
+// services/comfy/wan_moe.py, which is the authority — the server recomputes it
+// and never reads this. A fallback only: loadSamplerInfo() replaces it with the
+// server's own table. tests/test_wan_moe_frontend.py asserts the two agree.
+const WAN_MOE_SPLIT = {4: 1, 6: 2, 8: 2, 10: 3, 12: 4, 16: 5};
+
+// MOTION is the strength of the distill LoRA on the HIGH-noise expert, which is
+// the one that plans movement — and it reads backwards, so the chips are
+// labelled by the effect rather than the number. At 1.0 (the old fixed value)
+// Wan comes back in slow motion: smoke that hangs, paint that barely creeps.
+// Lower it and the clip travels. Zero drops the LoRA from the high pass
+// altogether and wants 8+ steps to stay clean.
+const WAN_MOTION_OPTIONS = [
+  [0.0, 'Max'], [0.4, 'High'], [0.5, 'Mid'], [0.7, 'Low'], [1.0, 'Still'],
+];
+
+const isWanMode = () => state.mode === 'i2v_multi' || state.mode === 'flf2v';
+
+function renderStepsChips() {
+  $('steps-chips').innerHTML = WAN_STEP_OPTIONS.map(s => {
+    const active = s === state.wanSteps ? ' active' : '';
+    return `<button class="res-chip${active}" onclick="setWanSteps(${s},this)">${s}</button>`;
+  }).join('');
+  updateSplitNote();
+}
+
+function setWanSteps(steps, el) {
+  state.wanSteps = steps;
+  document.querySelectorAll('#steps-chips .res-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  updateSplitNote();
+}
+
+// Fallbacks for the same coefficients estimate_wan_seconds() uses in
+// routers/video.py, fitted to 960x960 x 49 frames on the 4060 Ti. Rough on
+// purpose: this exists so a 16-step 1920x1080 job announces its size BEFORE it
+// is queued, not to be accurate to the second.
+//
+// The per-step figure is the one for SageAttention, because that is what the
+// server ships with. It is only a fallback — loadSamplerInfo() replaces all of
+// these with the server's own numbers on load, which is what makes the hint
+// still correct when someone sets WAN_SAGE_ATTENTION=false.
+const WAN_SEC_PER_STEP_PF = 1.008e-6;
+const WAN_SEC_POST_PF     = 1.284e-6;
+
+// Filled in by loadSamplerInfo(); null until then, and left null if the call
+// fails, in which case the constants above stand.
+let samplerInfo = null;
+
+// The optional high-noise LoRA. Empty string means "no such node in the graph"
+// rather than "loaded at strength 0" — see _wan_expert_nodes.
+//
+// The shelf the server offers, as {file,label,trigger,strength,note}. Filenames
+// are never shown: they are long enough to have been the reason this row ran off
+// a phone screen, and the label is the only part anyone recognises.
+let wanLoras = [];
+
+function onStyleLoraChange() {
+  const file = $('style-lora-select').value || null;
+  state.styleLora = file;
+  const entry = wanLoras.find(l => l.file === file);
+  // Each LoRA carries the strength it was trained to be used at, so selecting
+  // one sets the dial instead of leaving whatever the last one wanted.
+  if (entry) {
+    state.styleLoraStrength = entry.strength;
+    $('style-lora-strength').value = String(entry.strength);
+  }
+  const note = $('style-lora-note');
+  if (!entry) { note.textContent = ''; return; }
+  // The trigger goes into the prompt server-side (with_lora_trigger); saying so
+  // is what stops someone typing it a second time.
+  note.textContent = [
+    entry.note,
+    entry.trigger ? `Trigger “${entry.trigger}” is put in front of the prompt automatically.`
+                  : 'No trigger phrase on record for this one.',
+  ].filter(Boolean).join(' ');
+}
+
+async function loadWanLoras() {
+  try {
+    const r = await api('/api/video/wan-loras');
+    const d = await r.json();
+    wanLoras = d.loras || [];
+    const sel = $('style-lora-select');
+    sel.innerHTML = '<option value="">— keine —</option>' +
+      wanLoras.map(l => `<option value="${_esc(l.file)}">${_esc(l.label)}</option>`).join('');
+    sel.value = state.styleLora || '';
+    // A remembered LoRA that is no longer on the shelf would otherwise leave the
+    // select showing "keine" while state still names the file, and ComfyUI
+    // rejects a whole prompt over an unknown lora_name.
+    if (sel.value !== (state.styleLora || '')) state.styleLora = null;
+    onStyleLoraChange();
+  } catch (e) {
+    // The row still renders with just "keine"; a missing list is not worth a toast.
+  }
+}
+
+async function loadSamplerInfo() {
+  try {
+    const r = await api('/api/video/sampler-info');
+    samplerInfo = await r.json();
+  } catch (e) {
+    samplerInfo = null;   // the baked-in fallbacks are still reasonable
+  }
+  updateSplitNote();
+}
+
+// Longest clip in the current selection, since clips render one after another
+// and the slowest one is what a timeout or a lunch break has to cover.
+function wanClipFrames() {
+  const inputs = Array.from(document.querySelectorAll('.per-img-frames, .per-transition-frames'));
+  const values = inputs.map(i => parseInt(i.value)).filter(n => n > 0);
+  return values.length ? Math.max(...values) : frameBounds().def;
+}
+
+// Model evaluations, not steps. With the distill off the high-noise expert it
+// runs with real guidance, and a guided step is two evaluations — so Motion 0
+// costs `split` extra evaluations. Mirrors wan_model_evals() in
+// routers/video.py; keeping the ETA honest is the whole point of this hint.
+function wanEvals() {
+  if (state.wanLoraHigh > 0) return state.wanSteps;
+  return state.wanSteps + (wanSplit(state.wanSteps) || 0);
+}
+
+function wanEstimateMinutes() {
+  const perStep = samplerInfo?.sec_per_step_pf ?? WAN_SEC_PER_STEP_PF;
+  const post    = samplerInfo?.sec_post_pf     ?? WAN_SEC_POST_PF;
+  const pf = state.width * state.height * wanClipFrames();
+  return pf * (perStep * wanEvals() + post) / 60;
+}
+
+function wanSplit(steps) {
+  return samplerInfo?.splits?.[String(steps)] ?? WAN_MOE_SPLIT[steps];
+}
+
+function updateSplitNote() {
+  const high = wanSplit(state.wanSteps);
+  if (!high || !isWanMode()) { $('split-note').textContent = ''; return; }
+  const min = wanEstimateMinutes();
+  const shown = min >= 10 ? Math.round(min) : min.toFixed(1);
+  $('split-note').textContent =
+    `${high} high-noise / ${state.wanSteps - high} low-noise · ~${shown} min per clip`;
+}
+
+function renderMotionChips() {
+  $('motion-chips').innerHTML = WAN_MOTION_OPTIONS.map(([v, label]) => {
+    const active = v === state.wanLoraHigh ? ' active' : '';
+    return `<button class="res-chip${active}" onclick="setWanMotion(${v},this)">${label}</button>`;
+  }).join('');
+  updateMotionNote();
+}
+
+function setWanMotion(strength, el) {
+  state.wanLoraHigh = strength;
+  document.querySelectorAll('#motion-chips .res-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  updateMotionNote();
+}
+
+function updateMotionNote() {
+  // At 0 the distill comes off the high-noise expert, and an undistilled expert
+  // needs real guidance — cfg 1 there is what made the prompt unable to steer.
+  $('motion-note').textContent = state.wanLoraHigh > 0
+    ? `distill ${state.wanLoraHigh.toFixed(1)} on high-noise · cfg 1`
+    : 'distill off on high-noise · cfg 3 (prompt steers, negative counts)';
+}
+
+// The chip label for a persisted strength, so a clip card names the setting the
+// same way the picker did. An exact hit or nothing — a clip rendered at 0.6 by
+// a hand-made request should read as 0.6, not be rounded into a neighbouring
+// chip's name.
+function motionLabel(strength) {
+  const hit = WAN_MOTION_OPTIONS.find(([v]) => v === strength);
+  return hit ? hit[1] : strength.toFixed(2);
 }
 
 // ── Strip rendering ───────────────────────────────────────────────────────────
@@ -1017,10 +1349,22 @@ function renderPerImageSection() {
 const alignMinimaxFrames = n => { let v = Math.max(5, n || 0); while (v % 17 !== 5) v++; return v; };
 
 function durationHint(frames) {
-  if (!isMinimax()) return '';
+  if (!isMinimax()) {
+    // Wan animates at 16 fps and the clip is written at 16 x RIFE, so RIFE
+    // adds smoothness and leaves the duration alone — this is the length the
+    // clip really is. It used to be RIFE times longer than this, which is
+    // where the slow motion came from. Off-grid counts are snapped up by the
+    // server, so show the length that will actually render.
+    const f = alignWanFrames(frames);
+    return `→ ${f} f ≈ ${(f / WAN_NATIVE_FPS).toFixed(1)}s`;
+  }
   const snapped = alignMinimaxFrames(frames);
   const capped = snapped > frameBounds().max ? ' — capped' : '';
-  return `→ ${snapped} f ≈ ${(snapped / 24).toFixed(1)}s${capped}`;
+  // Say it plainly: below the trained floor the model cuts instead of morphing.
+  const under = snapped < MINIMAX_TRAINED_MIN
+    ? ` ⚠ unter ${MINIMAX_TRAINED_MIN} (trainiertes Minimum) — Schnittgefahr`
+    : '';
+  return `→ ${snapped} f ≈ ${(snapped / 24).toFixed(1)}s${capped}${under}`;
 }
 
 // The `max` attribute only binds the spinner arrows — a typed value sails
@@ -1035,16 +1379,17 @@ function readFrameCount(input) {
 function updateFramesHint(input) {
   const hint = input.parentElement.querySelector('.frames-hint');
   if (hint) hint.textContent = durationHint(Math.min(frameBounds().max, parseInt(input.value) || 0));
+  updateSplitNote();   // the render estimate is priced per frame too
 }
 
 function _esc(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── Per-transition section (flf2v) ────────────────────────────────────────────
+// ── Per-transition section (flf2v / minimax_flf) ──────────────────────────────
 function renderPerTransitionSection() {
   const sec = $('per-transition-section');
-  if (state.mode !== 'flf2v' || state.selectedImages.length < 2) {
+  if (!isTransitionMode() || state.selectedImages.length < 2) {
     sec.style.display = 'none';
     return;
   }
@@ -1056,10 +1401,14 @@ function renderPerTransitionSection() {
     if (!key) return;
     state.transitionSettings.set(key, {
       prompt:     row.querySelector('.per-transition-prompt')?.value || '',
-      frameCount: parseInt(row.querySelector('.per-transition-frames')?.value) || 49,
+      frameCount: parseInt(row.querySelector('.per-transition-frames')?.value) || 0,
     });
   });
 
+  // The two transition families do not share a frame band — Wan takes 5-81,
+  // MiniMax only lands on its 17k+5 grid — so a count carried over from the
+  // other mode is clamped in rather than submitted out of range.
+  const b = frameBounds();
   const n = state.selectedImages.length;
   let rowsHtml = '';
   for (let i = 0; i < n - 1; i++) {
@@ -1077,10 +1426,13 @@ function renderPerTransitionSection() {
           <span class="per-transition-num">Transition ${i + 1} → ${i + 2}</span>
           <button type="button" class="paste-btn" onclick="pasteInto(this)">📋 Paste</button>
         </div>
-        <textarea class="per-transition-prompt" rows="2" placeholder="Describe the transition (motion, camera, light)…">${_esc(saved.prompt || '')}</textarea>
+        <textarea class="per-transition-prompt" rows="2" placeholder="What does the first picture turn into on the way to the second?">${_esc(saved.prompt || '')}</textarea>
         <div class="per-transition-frames-row">
           <span class="field-label">Frames</span>
-          <input class="field-input per-transition-frames" type="number" value="${saved.frameCount || 49}" min="5" max="81" step="1">
+          <input class="field-input per-transition-frames" type="number"
+                 value="${Math.min(b.max, Math.max(b.min, saved.frameCount || b.def))}"
+                 min="${b.min}" max="${b.max}" step="${b.step}" oninput="updateFramesHint(this)">
+          <span class="frames-hint" style="font-size:11px;color:var(--text-dim)">${durationHint(Math.min(b.max, Math.max(b.min, saved.frameCount || b.def)))}</span>
         </div>
       </div>`;
   }
@@ -1107,6 +1459,9 @@ async function suggestTransitionPrompts() {
       body: JSON.stringify({
         image_ids: state.selectedImages.map(i => i.id),
         context: storyContext,
+        // Picks the writer: MiniMax prompts carry an Audio: line and name the
+        // destination, Wan prompts are a short silent motion line.
+        workflow: state.mode,
       }),
     });
     const d = await r.json();
@@ -1290,7 +1645,7 @@ async function loadStoryStyles() {
 // generated with — same seed reuse already does this on the backend, this
 // closes the loop for LoRA/strength too. Still editable before generating.
 function syncStoryDefaultsFromSource() {
-  if (state.mode !== 'flf2v' || state.selectedImages.length !== 1) return;
+  if (!isTransitionMode() || state.selectedImages.length !== 1) return;
   const src = state.selectedImages[0];
   const srcLoras = (src.loras || []).filter(l =>
     storyLoraRegistry.some(reg => reg.filename === l.name)
@@ -1514,7 +1869,7 @@ $('picker-grid').addEventListener('scroll', () => {
 async function generate() {
   const n = state.selectedImages.length;
   if (n < 1) return;
-  if (state.mode === 'flf2v' && n < 2) return;
+  if (isTransitionMode() && n < 2) return;
   const btn = $('gen-btn');
   btn.disabled = true; btn.textContent = 'Queuing…';
   try {
@@ -1527,25 +1882,35 @@ async function generate() {
         workflow:        state.mode,   // 'i2v_multi' | 'minimax_i2v'
         width:           state.width,
         height:          state.height,
-        fps:             isMinimax() ? 24 : (parseInt($('fps-select').value) || 24),
         frame_count:     b.def,
         prompts:         rows.map(r => r.querySelector('.per-img-prompt').value.trim()),
         frame_counts:    rows.map(r => readFrameCount(r.querySelector('.per-img-frames'))),
         rife_multiplier: state.rifeMultiplier,
+        // Ignored by minimax_i2v, which runs its own recipe — sent anyway so
+        // one body shape covers both per-image modes.
+        steps:           state.wanSteps,
+        lora_high:       state.wanLoraHigh,
+        style_lora:          state.styleLora,
+        style_lora_strength: state.styleLoraStrength,
         pingpong:        state.pingpong,
       };
     } else {
       const rows = Array.from($('per-transition-section').querySelectorAll('.per-transition-row'));
       body = {
         image_ids:       state.selectedImages.map(i => i.id),
-        workflow:        'flf2v',
+        workflow:        state.mode,   // 'flf2v' | 'minimax_flf'
         width:           state.width,
         height:          state.height,
-        fps:             parseInt($('fps-select').value) || 24,
-        frame_count:     49,
+        frame_count:     frameBounds().def,
         prompts:         rows.map(r => r.querySelector('.per-transition-prompt').value.trim()),
-        frame_counts:    rows.map(r => parseInt(r.querySelector('.per-transition-frames').value) || 49),
+        frame_counts:    rows.map(r => readFrameCount(r.querySelector('.per-transition-frames'))),
         rife_multiplier: state.rifeMultiplier,
+        // Ignored by minimax_flf, which runs its own recipe — sent anyway so
+        // one body shape covers both transition modes.
+        steps:           state.wanSteps,
+        lora_high:       state.wanLoraHigh,
+        style_lora:          state.styleLora,
+        style_lora_strength: state.styleLoraStrength,
         end_on_keyframe: state.endOnKeyframe,
       };
     }
@@ -1561,7 +1926,7 @@ async function generate() {
   } catch(e) {
     ArtRium.toast(e.message || 'Failed to start generation', true);
   } finally {
-    const minN = state.mode === 'flf2v' ? 2 : 1;
+    const minN = isTransitionMode() ? 2 : 1;
     btn.disabled = state.selectedImages.length < minN;
     btn.textContent = 'Generate Video';
   }
@@ -1712,6 +2077,13 @@ function renderClipStack(videoId, opts = {}) {
     const up = c.has_upscale
       ? ` · ⤢ ${c.upscale_resolution}p${c.upscale_rife > 1 ? ` ${c.upscale_rife}×` : ''} → ${c.out_width}×${c.out_height}`
       : '';
+    // What the Wan sampler was told. Null on MiniMax clips and on anything
+    // rendered before these were settings — say nothing rather than imply a
+    // default those clips never had. Shown as motion (1 - distill) so the
+    // number reads the same direction as the chip that set it.
+    const wan = c.wan_steps
+      ? ` · ${c.wan_steps} steps · motion ${motionLabel(c.wan_lora_high ?? 1)}`
+      : '';
     return `
     <div class="seg-row ${order ? 'selected' : ''}" data-clip-id="${c.id}"
          data-merge-key="${clipKey(c.id)}"
@@ -1723,7 +2095,7 @@ function renderClipStack(videoId, opts = {}) {
       </div>
       <div class="seg-info">
         <div class="seg-title">Clip ${c.idx + 1}${c.has_audio ? ' 🔊' : ''}</div>
-        <div class="seg-meta">${c.frame_count || '?'} frames · ${c.width || '?'}×${c.height || '?'} · ${c.fps || '?'}fps${up}</div>
+        <div class="seg-meta">${c.frame_count || '?'} frames · ${c.width || '?'}×${c.height || '?'} · ${c.fps || '?'}fps${wan}${up}</div>
         ${busy ? `<div class="seg-up-status" id="clipup-${c.id}">Upscaling…</div>` : ''}
         <div class="seg-prompt-row">
           <div class="seg-prompt">${_esc(c.prompt || '— (no prompt)')}</div>
@@ -2557,9 +2929,9 @@ function _videoMeta(v) {
     // "sources", not "clips" — a merge may also join finished videos.
     return `Merged from ${n} source${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps`;
   }
-  if (v.workflow === 'minimax_i2v' || v.workflow === 'ltx_i2v') {
+  if (v.workflow === 'minimax_i2v' || v.workflow === 'minimax_flf' || v.workflow === 'ltx_i2v') {
     // ltx_i2v is retired but still on older rows in the library.
-    const label = v.workflow === 'minimax_i2v' ? 'MiniMax' : 'LTX';
+    const label = v.workflow === 'ltx_i2v' ? 'LTX' : 'MiniMax';
     return `${n} ${label} clip${n > 1 ? 's' : ''} · ${v.width}×${v.height} · ${v.fps}fps · 🔊`;
   }
   if (v.workflow === 'i2v_multi') {
@@ -2574,7 +2946,7 @@ function _videoMeta(v) {
 // six long prompts stays compact.
 function _promptCollapse(v) {
   if (!v.prompt) return '';
-  const perClip = ['i2v_multi', 'minimax_i2v', 'ltx_i2v', 'flf2v'].includes(v.workflow);
+  const perClip = ['i2v_multi', 'minimax_i2v', 'minimax_flf', 'ltx_i2v', 'flf2v'].includes(v.workflow);
   const buckets = perClip ? v.prompt.split(' | ').filter(Boolean) : [v.prompt];
   if (!buckets.length) return '';
   const label = buckets.length > 1 ? `Prompts (${buckets.length})` : 'Prompt';
@@ -3468,6 +3840,10 @@ window.addEventListener('load', async () => {
   renderStrip();
   renderResChips();
   renderRifeChips();
+  renderStepsChips();
+  renderMotionChips();
+  loadSamplerInfo();
+  loadWanLoras();
   loadStoryLoras();
   loadStoryStyles();
   // Songs name the soundtrack on each card, so they have to be in hand BEFORE

@@ -231,12 +231,22 @@ async def generate_transition_prompts(
     *,
     context: str = "",
     timeout: float = 300.0,
+    system_file: str = "video-transitions.md",
+    options: dict | None = None,
+    label: str = "generate_transition_prompts",
+    extra_instruction: str = "",
 ) -> list[str]:
     """
     Given N key-frame images in playback order, ask the titler VLM to suggest
-    one Wan2.2 FLF2V transition prompt per adjacent pair (N-1 prompts total)
-    in a single vision call — cheaper than N-1 separate calls (one model
-    load) and gives the model whole-sequence context for coherent motion.
+    one transition prompt per adjacent pair (N-1 prompts total) in a single
+    vision call — cheaper than N-1 separate calls (one model load) and gives
+    the model whole-sequence context for coherent motion.
+
+    `system_file` selects the writer, because the two transition families want
+    genuinely different prompts: Wan is silent and reads a short UMT5-encoded
+    line, MiniMax H3 samples a stereo track jointly with the picture from a
+    Qwen3-VL encoder and needs an `Audio:` line and room to name its arrival.
+    See generate_minimax_transition_prompts.
 
     *context* is optional free text describing what the sequence is about
     (the story-frames flow passes the user's story here) so the suggested
@@ -267,19 +277,20 @@ async def generate_transition_prompts(
         f"playback order. Write exactly {n_trans} transition prompt(s), one "
         f"per adjacent pair (image 1→2, image 2→3, …), following the system "
         f"instructions.\n\n"
+        f"{extra_instruction}"
         f"{context_block}"
         f'Return STRICT JSON: {{"transitions": ["prompt 1", "prompt 2", ...]}} '
         f"with exactly {n_trans} entries, in order."
     )
     parsed = await _chat_json(
         model=settings.ollama_titler_model,
-        system=_read_prompt("video-transitions.md"),
+        system=_read_prompt(system_file),
         user_text=user_text,
         jpgs=jpgs,
-        options={"temperature": 0.6},
+        options=options or {"temperature": 0.6},
         keep_alive=_TITLER_KEEP_ALIVE,
         timeout=timeout,
-        label="generate_transition_prompts",
+        label=label,
     )
     raw = parsed.get("transitions") or []
     if not isinstance(raw, list):
@@ -288,8 +299,135 @@ async def generate_transition_prompts(
     cleaned = [str(t).strip() for t in raw]
     if len(cleaned) != n_trans:
         logger.warning(
-            "generate_transition_prompts: expected %d prompts, got %d — padding/truncating",
-            n_trans, len(cleaned),
+            "%s: expected %d prompts, got %d — padding/truncating",
+            label, n_trans, len(cleaned),
+        )
+        cleaned = (cleaned + [""] * n_trans)[:n_trans]
+    return cleaned
+
+
+_KEY_FRAME_DESCRIBE_SYSTEM = """You are describing one key frame of a video so that a writer who cannot see it can write the shot that arrives there.
+
+In 2-4 sentences, concretely: what fills the frame and how it is framed (wide, medium, close-up, cropped at the edges), the subject and its materials, the setting, the actual colours by name, and the light. No interpretation, no story, no mood words, no marketing language — only what is visible.
+
+Return STRICT JSON: {"description": "..."} — no prose outside the JSON, no code fences."""
+
+
+async def describe_key_frame(jpg_bytes: bytes, *, timeout: float = 180.0) -> str:
+    """What one key frame actually shows, via the titler VLM.
+
+    Deliberately a separate system prompt from story_frames' reference sheet:
+    that one is written for an image generator and leads with subject and
+    style, while a transition writer needs FRAMING first — whether the next
+    picture is a wide shot or a crop is what decides whether the clip can
+    travel there at all.
+
+    Low temperature: this stage is reporting, not inventing. The inventing
+    happens in the writer, which is a model that can do it.
+    """
+    parsed = await _chat_json(
+        model=settings.ollama_titler_model,
+        system=_KEY_FRAME_DESCRIBE_SYSTEM,
+        user_text="Describe this key frame.",
+        jpgs=[jpg_bytes],
+        options={"temperature": 0.3},
+        keep_alive=_TITLER_KEEP_ALIVE,
+        timeout=timeout,
+        label="describe_key_frame",
+    )
+    description = str(parsed.get("description") or "").strip()
+    if not description:
+        raise RuntimeError("describe_key_frame: VLM returned no description")
+    return description
+
+
+async def generate_minimax_transition_prompts(
+    jpgs: list[bytes],
+    *,
+    context: str = "",
+    timeout: float = 300.0,
+) -> list[str]:
+    """Transition prompts for MiniMax H3's fl2va task — picture and sound.
+
+    Two stages, because one is not enough. The single-call vision path the Wan
+    writer uses asks the titler VLM to look at N images AND invent a
+    constrained, structured, audio-carrying prompt in one go, and qwen2.5vl:3b
+    cannot do the second half. Measured over four samples on a real pair:
+    one Audio: line out of four, half of them using a banned cross-fade verb,
+    once the wrong JSON shape, and — worst — an invented destination ("finds
+    himself in a black, eerie forest with glowing red eyes") for a pair whose
+    second frame is a close-up of two faces. A wrong destination is worse than
+    none, because the end frame is pinned in the latent and the words then
+    fight the picture.
+
+    Splitting the job fixes it, and the same four-sample comparison says so:
+    every prompt carried its Audio: line, and the destinations were the real
+    ones ("a trio of closely aligned faces … against a soft blue backdrop").
+
+      1. The VLM DESCRIBES each key frame. Small vision models are good at
+         this — it is the titler's day job — and describing is not inventing.
+      2. The instruct model WRITES all N-1 prompts from those descriptions in
+         one call, so it also has whole-sequence context and can vary the
+         mechanism between neighbouring pairs.
+
+    Ordered so each model loads once: every description first, then one write.
+    Interleaving them would swap two models N times over.
+
+    This is the same shape services/ollama/story_frames.py already uses for the
+    same reason — describe with the eyes, write with the words.
+    """
+    if len(jpgs) < 2:
+        raise RuntimeError("generate_minimax_transition_prompts requires at least 2 images")
+
+    n_trans = len(jpgs) - 1
+    per_call = max(60.0, timeout / (len(jpgs) + 1))
+
+    descriptions: list[str] = []
+    for i, jpg in enumerate(jpgs):
+        try:
+            descriptions.append(await describe_key_frame(jpg, timeout=per_call))
+        except Exception as exc:                                  # noqa: BLE001
+            # One unreadable frame must not lose the whole sequence: the writer
+            # can still work from its neighbour and the pair index.
+            logger.warning("Key-frame %d description failed: %s", i + 1, exc)
+            descriptions.append("(not described)")
+
+    sheet = "\n\n".join(
+        f"IMAGE {i + 1}:\n{d}" for i, d in enumerate(descriptions)
+    )
+    context_block = (
+        f"\n\nStory context for the whole sequence:\n{context.strip()}"
+        if context.strip() else ""
+    )
+    user_text = (
+        f"{sheet}{context_block}\n\n"
+        f"Write exactly {n_trans} transition prompt(s), one per adjacent pair "
+        f"(image 1→2, image 2→3, …), in order. For each pair the SECOND "
+        f"image is the destination: the last words of that prompt must describe "
+        f"what is really in it, taken from its description above.\n\n"
+        f'Return STRICT JSON: {{"transitions": ["prompt 1", "prompt 2", ...]}} '
+        f"with exactly {n_trans} entries."
+    )
+
+    parsed = await _chat_json(
+        model=settings.ollama_prompt_model,
+        system=_read_prompt("video-minimax-transitions.md"),
+        user_text=user_text,
+        jpgs=None,
+        options={"temperature": 0.85, "num_predict": 200 + 220 * n_trans},
+        timeout=per_call,
+        label="generate_minimax_transition_prompts",
+    )
+    raw = parsed.get("transitions") or []
+    if not isinstance(raw, list):
+        raise RuntimeError(
+            f"MiniMax transition writer 'transitions' is not a list: {type(raw).__name__}"
+        )
+    cleaned = [str(t).strip() for t in raw]
+    if len(cleaned) != n_trans:
+        logger.warning(
+            "generate_minimax_transition_prompts: expected %d prompts, got %d — "
+            "padding/truncating", n_trans, len(cleaned),
         )
         cleaned = (cleaned + [""] * n_trans)[:n_trans]
     return cleaned

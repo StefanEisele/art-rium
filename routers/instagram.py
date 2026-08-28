@@ -501,6 +501,15 @@ async def create_post(body: PostCreate, db: AsyncSession = Depends(get_db)):
             get_or_create_companion(post, "reel").video_id = body.reel_video_id
         await replace_media_items(post, media_tuples, db)
         _apply_crop_specs(post, crop_specs)
+    else:
+        # A reel has no carousel children, but the collection still has to be
+        # *loaded* rather than merely empty: everything below the flush reads
+        # post.media (crop baking, serialization), and reading an untouched
+        # relationship on a row that has just become persistent makes SQLAlchemy
+        # emit a SELECT from inside async code, which raises MissingGreenlet.
+        # Assigning it here settles the collection while the row is still
+        # pending, the same way the feed branch does by filling it.
+        post.media = []
     db.add(post)
     # The crop has to exist before the post can be dispatched, and dispatch can
     # start on the next line — the outpost task fires immediately.

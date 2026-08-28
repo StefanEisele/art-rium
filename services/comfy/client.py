@@ -13,6 +13,7 @@ WebSocket consumer (generate, titler), keep using core.comfy.post_prompt.
 """
 import asyncio
 import logging
+import time
 from pathlib import Path
 
 import httpx
@@ -168,3 +169,46 @@ async def queue_info(prompt_id: str) -> dict:
         return {"status": "not_in_queue"}
     except Exception:
         return {"status": "unknown"}
+
+
+# Which files a loader node is currently offering. ComfyUI builds these enums by
+# scanning its models directory at startup, so the answer changes when ComfyUI
+# restarts — and a workflow naming a file the enum does not hold is rejected at
+# submit time with a validation error, which is a worse way to find out than
+# asking first.
+#
+# The cache is short-lived on purpose. A process-lifetime cache would be the
+# obvious choice and it is the wrong one: the interesting answer is "that model
+# is not installed", and it is interesting precisely at the moment someone is
+# installing it. Caching that for as long as this server happens to run means
+# downloading a checkpoint, restarting ComfyUI, and still being told it is
+# missing until art-rium is restarted too — for no reason the user can see.
+# A minute is long enough that a job asking once per clip costs one request,
+# and short enough that a ComfyUI restart is noticed on its own.
+_LOADER_CACHE_TTL = 60.0
+_loader_choices: dict[tuple[str, str], tuple[float, set[str]]] = {}
+
+
+async def loader_choices(node: str, field: str) -> set[str]:
+    """The set of file names `node`'s `field` combo box offers.
+
+    Returns an empty set if ComfyUI cannot be reached or does not know the
+    node — callers treat that as "cannot confirm" and fall back to whatever
+    they were going to do anyway, rather than failing a render over a probe.
+    A failed probe is never cached, for the same reason.
+    """
+    key = (node, field)
+    hit = _loader_choices.get(key)
+    if hit and (time.monotonic() - hit[0]) < _LOADER_CACHE_TTL:
+        return hit[1]
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"http://{settings.comfyui_host}/object_info/{node}")
+            info = r.json()
+        raw = info[node]["input"]["required"][field][0]
+        choices = {str(x) for x in raw}
+    except Exception as e:
+        logger.warning("ComfyUI /object_info/%s failed (%s): %s", node, type(e).__name__, e)
+        return set()
+    _loader_choices[key] = (time.monotonic(), choices)
+    return choices

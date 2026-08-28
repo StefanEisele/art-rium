@@ -11,6 +11,7 @@ import pytest
 from routers import video as video_module
 from routers.video import (
     _build_flf2v_single_workflow,
+    _build_i2v_single_workflow,
     _build_minimax_single_workflow,
     _grain_source,
     _is_graining,
@@ -20,8 +21,32 @@ from routers.video import (
     _validate_upscale_target,
     adapt_minimax_canvas,
     align_minimax_length,
+    clamp_lora_high,
+    clamp_wan_steps,
+    align_wan_length,
     ensure_sound_only_audio,
+    wan_cfg_high,
+    wan_model_evals,
+    estimate_wan_seconds,
+    wan_output_fps,
+    wan_poll_timeout,
 )
+from routers.video import _LORA_HIGH as _LORA_HIGH_NAME
+from routers.video import _LORA_LOW as _LORA_LOW_NAME
+from routers.video import clamp_style_strength
+from routers.video import (
+    _UNET_FUN_HIGH,
+    _UNET_FUN_LOW,
+    _UNET_HIGH,
+    _UNET_LOW,
+    WAN_NATIVE_FPS,
+)
+from routers.video import settings as video_settings
+from services.comfy.node_labels import label_for_class
+from services.comfy.wan_transition_loras import (
+    offered as offered_transition_loras,
+)
+from services.comfy.wan_transition_loras import trigger_for, with_lora_trigger
 from services.video.upscale import (
     build_upscale_workflow,
     clamp_resolution,
@@ -33,6 +58,7 @@ from services.ollama import analysis as analysis_module
 from services.ollama.analysis import (
     generate_i2v_motion_prompts,
     generate_minimax_motion_prompts,
+    generate_minimax_transition_prompts,
     generate_transition_prompts,
 )
 
@@ -40,14 +66,14 @@ from services.ollama.analysis import (
 class TestBuildFlf2vSingleWorkflow:
     def test_returns_dict_and_matching_save_node(self):
         wf, save_id = _build_flf2v_single_workflow(
-            "start.png", "end.png", "camera pushes in", 25, 960, 960, 24, "prefix", 3,
+            "start.png", "end.png", "camera pushes in", 25, 960, 960, "prefix", 3,
         )
         assert save_id in wf
         assert wf[save_id]["class_type"] == "VHS_VideoCombine"
 
     def test_load_image_nodes_for_start_and_end(self):
         wf, _ = _build_flf2v_single_workflow(
-            "start.png", "end.png", "prompt", 25, 960, 960, 24, "prefix", 3,
+            "start.png", "end.png", "prompt", 25, 960, 960, "prefix", 3,
         )
         assert wf["img_start"] == {"class_type": "LoadImage", "inputs": {"image": "start.png", "upload": "image"}}
         assert wf["img_end"] == {"class_type": "LoadImage", "inputs": {"image": "end.png", "upload": "image"}}
@@ -56,14 +82,14 @@ class TestBuildFlf2vSingleWorkflow:
         # Default: RIFE reads the diffused frames directly — no raw end photo
         # appended (that append IS the hard cut when diffusion undershoots).
         wf, _ = _build_flf2v_single_workflow(
-            "start.png", "end.png", "prompt", 25, 960, 960, 24, "prefix", 3,
+            "start.png", "end.png", "prompt", 25, 960, 960, "prefix", 3,
         )
         assert "batch_final" not in wf
         assert wf["rife"]["inputs"]["frames"] == ["t0_decode", 0]
 
     def test_batch_final_appends_raw_end_frame_when_opted_in(self):
         wf, _ = _build_flf2v_single_workflow(
-            "start.png", "end.png", "prompt", 25, 960, 960, 24, "prefix", 3,
+            "start.png", "end.png", "prompt", 25, 960, 960, "prefix", 3,
             append_end_frame=True,
         )
         batch = wf["batch_final"]
@@ -73,37 +99,300 @@ class TestBuildFlf2vSingleWorkflow:
         assert wf["rife"]["inputs"]["frames"] == ["batch_final", 0]
 
     def test_sampler_lightning_fast_path(self):
-        # Plain Lightning fast path: 4 steps split 2/2, cfg=1 and full-strength
-        # distill LoRA on both experts (the 8-step anti-hard-cut variant was
-        # reverted — too slow in practice).
+        # Lightning path: cfg=1 on both experts, full-strength distill on the
+        # LOW-noise one. The step count and the high/low split are no longer
+        # fixed at 4 and 2 — they default to 6 steps split by the sigma
+        # schedule (2/4 at shift 5), and the high-noise distill defaults to
+        # half strength so the transition actually travels.
         wf, _ = _build_flf2v_single_workflow(
-            "start.png", "end.png", "prompt", 25, 960, 960, 24, "prefix", 3,
+            "start.png", "end.png", "prompt", 25, 960, 960, "prefix", 3,
         )
         ks_h, ks_l = wf["t0_ks_h"]["inputs"], wf["t0_ks_l"]["inputs"]
-        assert ks_h["steps"] == 4 and ks_l["steps"] == 4
+        assert ks_h["steps"] == 6 and ks_l["steps"] == 6
         assert ks_h["end_at_step"] == 2 and ks_l["start_at_step"] == 2
         assert ks_h["cfg"] == 1
         assert ks_l["cfg"] == 1
-        assert wf["t0_lora_h"]["inputs"]["strength_model"] == 1.0
-        assert wf["t0_lora_l"]["inputs"]["strength_model"] == 1
+        assert wf["t0_lora_h"]["inputs"]["strength_model"] == 0.5
+        assert wf["t0_lora_l"]["inputs"]["strength_model"] == 1.0
 
     def test_rife_multiplier_is_configurable(self):
         wf, _ = _build_flf2v_single_workflow(
-            "start.png", "end.png", "prompt", 25, 960, 960, 24, "prefix", 4,
+            "start.png", "end.png", "prompt", 25, 960, 960, "prefix", 4,
         )
         assert wf["rife"]["inputs"]["multiplier"] == 4
 
     def test_save_node_reads_from_rife(self):
         wf, save_id = _build_flf2v_single_workflow(
-            "start.png", "end.png", "prompt", 25, 960, 960, 24, "prefix", 3,
+            "start.png", "end.png", "prompt", 25, 960, 960, "prefix", 3,
         )
         assert wf[save_id]["inputs"]["images"] == ["rife", 0]
 
     def test_prompt_lands_in_positive_clip_encode(self):
         wf, _ = _build_flf2v_single_workflow(
-            "start.png", "end.png", "a specific transition prompt", 25, 960, 960, 24, "prefix", 3,
+            "start.png", "end.png", "a specific transition prompt", 25, 960, 960, "prefix", 3,
         )
         assert wf["t0_pos"]["inputs"]["text"] == "a specific transition prompt"
+
+
+def _model_chain(wf: dict, node_id: str) -> list[str]:
+    """The MODEL inputs feeding `node_id`, nearest first, skipping pure
+    pass-through patches (an attention backend, say) that neither load nor
+    modify weights. What is left is what the sampler is actually running."""
+    passthrough = {"PathchSageAttentionKJ"}
+    chain, seen = [], set()
+    cur = wf[node_id]["inputs"].get("model")
+    while isinstance(cur, list) and cur[0] not in seen:
+        seen.add(cur[0])
+        node = wf[cur[0]]
+        if node["class_type"] not in passthrough:
+            chain.append(cur[0])
+        cur = node["inputs"].get("model")
+    return chain
+
+
+class TestAttentionBackend:
+    """SageAttention is an approximation, so it is scoped to the two Wan
+    builders and switchable without a code change."""
+
+    def _i2v(self, **kw):
+        return _build_i2v_single_workflow(
+            "img.png", "prompt", 49, 960, 960, "prefix", 3, False, **kw
+        )[0]
+
+    def _flf2v(self, **kw):
+        return _build_flf2v_single_workflow(
+            "start.png", "end.png", "prompt", 49, 960, 960, "prefix", 3, **kw
+        )[0]
+
+    def test_both_experts_get_the_patch_when_enabled(self, monkeypatch):
+        monkeypatch.setattr(video_settings, "wan_sage_attention", True)
+        wf = self._i2v()
+        assert wf["s0_sage_h"]["inputs"]["sage_attention"] == "auto"
+        assert wf["s0_sage_l"]["inputs"]["sage_attention"] == "auto"
+        assert wf["s0_samp_h"]["inputs"]["model"] == ["s0_sage_h", 0]
+        assert wf["s0_samp_l"]["inputs"]["model"] == ["s0_sage_l", 0]
+
+    def test_turning_it_off_yields_the_graph_from_before_it_existed(self, monkeypatch):
+        monkeypatch.setattr(video_settings, "wan_sage_attention", False)
+        wf = self._i2v()
+        assert not any("sage" in n for n in wf)
+        assert wf["s0_samp_h"]["inputs"]["model"] == ["s0_lora_h", 0]
+        assert wf["s0_samp_l"]["inputs"]["model"] == ["s0_lora_l", 0]
+
+    def test_it_patches_after_the_lora_not_before(self, monkeypatch):
+        # Patching the raw UNET would leave the LoRA-merged model running
+        # unpatched attention; the order has to be loader → LoRA → patch.
+        monkeypatch.setattr(video_settings, "wan_sage_attention", True)
+        wf = self._i2v(lora_high=0.5)
+        assert wf["s0_sage_h"]["inputs"]["model"] == ["s0_lora_h", 0]
+        assert wf["s0_sage_l"]["inputs"]["model"] == ["s0_lora_l", 0]
+
+    def test_it_patches_the_bare_unet_when_the_high_lora_is_dropped(self, monkeypatch):
+        monkeypatch.setattr(video_settings, "wan_sage_attention", True)
+        wf = self._i2v(lora_high=0.0)
+        assert wf["s0_sage_h"]["inputs"]["model"] == ["s0_unet_h", 0]
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_the_expert_chain_is_the_same_either_way(self, monkeypatch, enabled):
+        monkeypatch.setattr(video_settings, "wan_sage_attention", enabled)
+        wf = self._i2v(lora_high=0.5)
+        assert _model_chain(wf, "s0_samp_h") == ["s0_lora_h", "s0_unet_h"]
+        assert _model_chain(wf, "s0_samp_l") == ["s0_lora_l", "s0_unet_l"]
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_flf2v_is_patched_the_same_way(self, monkeypatch, enabled):
+        monkeypatch.setattr(video_settings, "wan_sage_attention", enabled)
+        wf = self._flf2v()
+        assert ("t0_sage_h" in wf) is enabled
+        assert _model_chain(wf, "t0_samp_h") == ["t0_lora_h", "t0_unet_h"]
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_no_dangling_links_either_way(self, monkeypatch, enabled):
+        monkeypatch.setattr(video_settings, "wan_sage_attention", enabled)
+        for wf in (self._i2v(lora_high=0.0), self._i2v(lora_high=0.5),
+                   self._flf2v(lora_high=0.0), self._flf2v(lora_high=0.5)):
+            for node in wf.values():
+                for value in node["inputs"].values():
+                    if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
+                        assert value[0] in wf, f"dangling link to {value[0]}"
+
+    def test_the_patch_has_a_progress_label(self):
+        # Otherwise the progress line reads "Pathch Sage Attention KJ…".
+        assert label_for_class("PathchSageAttentionKJ") == "Switching to fast attention…"
+
+
+class TestWanSamplerControls:
+    """The two dials both Wan builders now share: total steps, and how much
+    distill LoRA the high-noise expert carries (the motion dial)."""
+
+    def _i2v(self, **kw):
+        return _build_i2v_single_workflow(
+            "img.png", "prompt", 49, 960, 960, "prefix", 3, False, **kw
+        )[0]
+
+    def _flf2v(self, **kw):
+        return _build_flf2v_single_workflow(
+            "start.png", "end.png", "prompt", 49, 960, 960, "prefix", 3, **kw
+        )[0]
+
+    @pytest.mark.parametrize("steps,split", [(4, 1), (6, 2), (8, 2), (10, 3), (16, 5)])
+    def test_split_follows_the_sigma_schedule_not_half_the_steps(self, steps, split):
+        wf = self._i2v(steps=steps)
+        assert wf["s0_ks_h"]["inputs"]["end_at_step"] == split
+        assert wf["s0_ks_l"]["inputs"]["start_at_step"] == split
+        assert wf["s0_ks_h"]["inputs"]["steps"] == steps
+        assert wf["s0_ks_l"]["inputs"]["steps"] == steps
+
+    def test_both_wan_builders_agree_on_the_split(self):
+        # They used to hold separate copies of these numbers and had already
+        # drifted on shift; _wan_expert_nodes is the one source now.
+        for steps in (4, 6, 8, 10, 16):
+            i2v = self._i2v(steps=steps)["s0_ks_h"]["inputs"]
+            flf = self._flf2v(steps=steps)["t0_ks_h"]["inputs"]
+            assert i2v["end_at_step"] == flf["end_at_step"]
+            assert i2v["scheduler"] == flf["scheduler"] == "simple"
+
+    def test_high_noise_lora_strength_is_the_motion_dial(self):
+        assert self._i2v(lora_high=0.4)["s0_lora_h"]["inputs"]["strength_model"] == 0.4
+        assert self._flf2v(lora_high=0.7)["t0_lora_h"]["inputs"]["strength_model"] == 0.7
+
+    def test_low_noise_lora_stays_at_full_strength_whatever_the_dial_says(self):
+        # Detail comes from the low-noise expert; weakening it would cost
+        # quality without buying any motion.
+        for lh in (0.0, 0.4, 1.0):
+            assert self._i2v(lora_high=lh)["s0_lora_l"]["inputs"]["strength_model"] == 1.0
+
+    def test_zero_strength_drops_the_lora_node_entirely(self):
+        wf = self._i2v(lora_high=0.0)
+        assert "s0_lora_h" not in wf
+        # Walk the chain rather than naming the immediate neighbour: an
+        # attention-backend patch may or may not sit between the loader and
+        # the sampler, and that is not what this test is about.
+        assert _model_chain(wf, "s0_samp_h") == ["s0_unet_h"]
+        # The low-noise chain is untouched by that.
+        assert _model_chain(wf, "s0_samp_l") == ["s0_lora_l", "s0_unet_l"]
+
+    def test_high_noise_expert_is_still_loaded_at_zero_strength(self):
+        # Dropping the LoRA must not drop the expert — it is the one that
+        # plans the motion in the first place.
+        wf = self._i2v(lora_high=0.0)
+        assert wf["s0_unet_h"]["inputs"]["unet_name"].startswith("wan2.2_i2v_high_noise")
+
+    def test_omitted_controls_fall_back_to_the_defaults(self):
+        # An older service-worker-cached frontend sends neither field.
+        wf = self._i2v()
+        assert wf["s0_ks_h"]["inputs"]["steps"] == 6
+        assert wf["s0_lora_h"]["inputs"]["strength_model"] == 0.5
+
+    @pytest.mark.parametrize("given,expected", [
+        (None, 6), (1, 4), (4, 4), (6, 6), (16, 16), (40, 16), (-3, 4),
+    ])
+    def test_steps_are_clamped_into_a_range_the_card_can_finish(self, given, expected):
+        assert clamp_wan_steps(given) == expected
+
+    @pytest.mark.parametrize("given,expected", [
+        (None, 0.5), (0.0, 0.0), (0.4, 0.4), (1.0, 1.0), (2.5, 1.0), (-1.0, 0.0),
+    ])
+    def test_lora_strength_is_clamped_to_zero_one(self, given, expected):
+        assert clamp_lora_high(given) == expected
+
+    def test_out_of_range_values_still_build_a_valid_graph(self):
+        wf = self._i2v(steps=999, lora_high=99.0)
+        ks_h = wf["s0_ks_h"]["inputs"]
+        assert ks_h["steps"] == 16 and 1 <= ks_h["end_at_step"] < 16
+        assert wf["s0_lora_h"]["inputs"]["strength_model"] == 1.0
+
+    def test_every_node_reference_resolves(self):
+        # Cheap structural check that dropping/adding the LoRA node never
+        # leaves a dangling link in either builder.
+        for wf in (self._i2v(lora_high=0.0), self._i2v(lora_high=0.5),
+                   self._flf2v(lora_high=0.0), self._flf2v(lora_high=0.5)):
+            for node in wf.values():
+                for value in node["inputs"].values():
+                    if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
+                        assert value[0] in wf, f"dangling link to {value[0]}"
+
+
+class TestWanRenderBudget:
+    """A flat 30-minute deadline was safe while every render was 4 steps on one
+    canvas. Steps, canvas and frame count are all settings now, and they
+    multiply — the budget has to move with them or a long job is killed with
+    its file already half-written."""
+
+    # 960x960 x 49 frames, RIFE 3, 16GB 4060 Ti, measured 2026-08-26 on
+    # PyTorch SDPA — the four points the line was fitted to.
+    @pytest.mark.parametrize("steps,measured", [
+        (4, 355.9), (6, 496.2), (8, 646.6), (10, 797.2),
+    ])
+    def test_stays_within_a_percent_of_what_was_measured(self, steps, measured):
+        assert (estimate_wan_seconds(960, 960, 49, steps, sage=False)
+                == pytest.approx(measured, rel=0.01))
+
+    # Same canvas, same seed, SageAttention on. Two points only, and the slope
+    # was fitted holding the SDPA line's fixed cost rather than given its own
+    # intercept — hence the looser tolerance than the four-point SDPA line.
+    @pytest.mark.parametrize("steps,measured", [(6, 325.9), (10, 516.5)])
+    def test_the_sage_line_matches_its_own_measurements(self, steps, measured):
+        assert (estimate_wan_seconds(960, 960, 49, steps, sage=True)
+                == pytest.approx(measured, rel=0.02))
+
+    def test_sage_is_cheaper_at_every_step_count(self):
+        for steps in (4, 6, 8, 10, 16):
+            assert (estimate_wan_seconds(960, 960, 49, steps, sage=True)
+                    < estimate_wan_seconds(960, 960, 49, steps, sage=False))
+
+    def test_sage_changes_sampling_only(self):
+        # The gap between the two backends must be pure per-step cost: the
+        # model loads, VAE, RIFE and encode are identical either way, so the
+        # difference has to scale exactly with the step count.
+        def gap(steps):
+            return (estimate_wan_seconds(960, 960, 49, steps, sage=False)
+                    - estimate_wan_seconds(960, 960, 49, steps, sage=True))
+        assert gap(10) == pytest.approx(gap(5) * 2, rel=0.01)
+
+    def test_six_sage_steps_undercut_the_old_four_sdpa_steps(self):
+        # The headline result, pinned: the new default is both a better picture
+        # and a shorter wait than what it replaced.
+        assert (estimate_wan_seconds(960, 960, 49, 6, sage=True)
+                < estimate_wan_seconds(960, 960, 49, 4, sage=False))
+
+    def test_the_default_backend_is_what_the_setting_says(self):
+        for flag in (True, False):
+            with pytest.MonkeyPatch.context() as mp:
+                mp.setattr(video_settings, "wan_sage_attention", flag)
+                assert (estimate_wan_seconds(960, 960, 49, 6)
+                        == estimate_wan_seconds(960, 960, 49, 6, sage=flag))
+
+    def test_cost_rises_with_every_factor(self):
+        base = estimate_wan_seconds(960, 960, 49, 6)
+        assert estimate_wan_seconds(960, 960, 49, 8) > base    # steps
+        assert estimate_wan_seconds(1920, 1088, 49, 6) > base  # canvas
+        assert estimate_wan_seconds(960, 960, 81, 6) > base    # frames
+
+    def test_steps_are_the_dominant_term(self):
+        # Sampling was measured at ~72 s/step against ~65 s for the whole rest
+        # of the render, so doubling the steps must nearly double the estimate.
+        ratio = estimate_wan_seconds(960, 960, 49, 8) / estimate_wan_seconds(960, 960, 49, 4)
+        assert 1.6 < ratio < 1.9
+
+    def test_short_renders_keep_the_old_flat_floor(self):
+        assert wan_poll_timeout(960, 960, 49, 4) == 1800
+        assert wan_poll_timeout(960, 960, 49, 6) == 1800
+
+    def test_the_expensive_corner_gets_a_budget_it_can_finish_in(self):
+        # 16 steps at 1920x1088 x 81 frames is the worst the UI can ask for.
+        # The old flat 1800 s would have killed it around a third of the way in.
+        worst = wan_poll_timeout(1920, 1088, 81, 16)
+        assert worst > estimate_wan_seconds(1920, 1088, 81, 16)
+        assert worst > 3 * 1800
+
+    def test_budget_is_always_at_least_three_times_the_estimate(self):
+        for w, h, f, s in [(960, 960, 49, 16), (1920, 1088, 49, 8), (704, 1280, 81, 12)]:
+            assert wan_poll_timeout(w, h, f, s) >= 3 * estimate_wan_seconds(w, h, f, s)
+
+    def test_degenerate_inputs_do_not_produce_a_zero_deadline(self):
+        assert estimate_wan_seconds(0, 0, 0, 0) >= 1
+        assert wan_poll_timeout(0, 0, 0, 0) == 1800
 
 
 class TestAlignMinimaxLength:
@@ -1135,3 +1424,521 @@ class TestSalvageTruncatedAnimation:
         repaired = analysis_module._salvage_truncated_animation(raw)
         import json as _json
         assert _json.loads(repaired)["animation"] == 'The figure says "go" as the fabric.'
+
+
+class TestWanFrameRate:
+    """Wan 2.2 animates at 16 fps. RIFE multiplies the frames, so the container
+    rate has to rise with it — otherwise the extra frames stretch the clip
+    instead of smoothing it, and every render comes out in slow motion. This is
+    the same rule services/video/upscale.py::plan_frame_rate states for the
+    upscale path; the generation path used to write a flat 24 and play 16 fps
+    content at 8."""
+
+    @pytest.mark.parametrize("rife,expected", [(1, 16), (2, 32), (3, 48), (4, 64)])
+    def test_rate_is_native_times_rife(self, rife, expected):
+        assert wan_output_fps(rife) == expected
+
+    def test_out_of_range_multipliers_are_clamped_not_multiplied_out(self):
+        assert wan_output_fps(0) == WAN_NATIVE_FPS
+        assert wan_output_fps(None) == WAN_NATIVE_FPS
+        assert wan_output_fps(9) == WAN_NATIVE_FPS * 4
+
+    @pytest.mark.parametrize("rife", [2, 3, 4])
+    def test_i2v_save_node_uses_it(self, rife):
+        wf, save_id = _build_i2v_single_workflow(
+            "img.png", "prompt", 49, 960, 960, "prefix", rife, False,
+        )
+        assert wf[save_id]["inputs"]["frame_rate"] == WAN_NATIVE_FPS * rife
+
+    @pytest.mark.parametrize("rife", [2, 3, 4])
+    def test_flf2v_save_node_uses_it(self, rife):
+        wf, save_id = _build_flf2v_single_workflow(
+            "start.png", "end.png", "prompt", 49, 960, 960, "prefix", rife,
+        )
+        assert wf[save_id]["inputs"]["frame_rate"] == WAN_NATIVE_FPS * rife
+
+    def test_the_clip_keeps_its_duration(self):
+        # 49 frames is 3.06 s of sampled motion at any RIFE setting. The bug
+        # this asserts against made it 3.06 x rife / 24 seconds instead.
+        frames = 49
+        for rife in (2, 3, 4):
+            wf, save_id = _build_flf2v_single_workflow(
+                "a.png", "b.png", "p", frames, 960, 960, "prefix", rife,
+            )
+            rate = wf[save_id]["inputs"]["frame_rate"]
+            assert abs((frames * rife) / rate - frames / WAN_NATIVE_FPS) < 1e-9
+
+
+class TestFlf2vExpertPair:
+    """Wan 2.2 shipped no first-last-frame checkpoint. The i2v pair treats a
+    pinned end frame as out-of-distribution and cross-fades to satisfy it;
+    Wan2.2-Fun-InP was trained on start+end and is the same graph with two
+    different files in the loaders."""
+
+    def _unets(self, **kw):
+        wf, _ = _build_flf2v_single_workflow(
+            "start.png", "end.png", "prompt", 49, 960, 960, "prefix", 3, **kw
+        )
+        return wf["t0_unet_h"]["inputs"]["unet_name"], wf["t0_unet_l"]["inputs"]["unet_name"]
+
+    def test_defaults_to_the_i2v_pair(self):
+        assert self._unets() == (_UNET_HIGH, _UNET_LOW)
+
+    def test_fun_inp_swaps_both_experts(self):
+        assert self._unets(fun_inp=True) == (_UNET_FUN_HIGH, _UNET_FUN_LOW)
+
+    def test_nothing_else_about_the_graph_changes(self):
+        plain, _ = _build_flf2v_single_workflow(
+            "start.png", "end.png", "prompt", 49, 960, 960, "prefix", 3,
+        )
+        fun, _ = _build_flf2v_single_workflow(
+            "start.png", "end.png", "prompt", 49, 960, 960, "prefix", 3, fun_inp=True,
+        )
+        assert set(plain) == set(fun)
+        differing = {k for k in plain if plain[k] != fun[k]}
+        # Seeds are random per build, so the sampler nodes differ; the point is
+        # that no *structural* node moved.
+        assert differing <= {"t0_unet_h", "t0_unet_l", "t0_ks_h"}
+
+    def test_i2v_workflow_is_untouched_by_the_transition_swap(self):
+        wf, _ = _build_i2v_single_workflow(
+            "img.png", "prompt", 49, 960, 960, "prefix", 3, False,
+        )
+        assert wf["s0_unet_h"]["inputs"]["unet_name"] == _UNET_HIGH
+        assert wf["s0_unet_l"]["inputs"]["unet_name"] == _UNET_LOW
+
+
+class TestMinimaxFirstLastFrame:
+    """MiniMax H3's checkpoint is the fl2va one — first-last-to-video-audio.
+    MiniMaxH3ImageToVideo carries the `last_frame` input for it; this builder
+    simply never filled it in."""
+
+    def _cond(self, wf):
+        return next(n for n in wf.values() if n["class_type"] == "MiniMaxH3ImageToVideo")
+
+    def test_no_end_frame_by_default(self):
+        wf, _, _ = _build_minimax_single_workflow(
+            "img.png", "a prompt", 124, 768, 768, "prefix",
+        )
+        assert "last_frame" not in self._cond(wf)["inputs"]
+        assert "mmx_load_end" not in wf
+
+    def test_end_frame_is_loaded_scaled_and_wired(self):
+        wf, _, _ = _build_minimax_single_workflow(
+            "start.png", "a prompt", 124, 768, 768, "prefix",
+            end_comfy_filename="end.png",
+        )
+        assert wf["mmx_load_end"]["inputs"]["image"] == "end.png"
+        assert self._cond(wf)["inputs"]["last_frame"] == ["mmx_scale_end", 0]
+
+    def test_both_key_frames_reach_the_canvas_the_same_way(self):
+        # The node stretches first_frame and centre-crops last_frame. Two
+        # pictures arriving by different rules would not line up, and a
+        # transition is entirely about them lining up.
+        wf, _, _ = _build_minimax_single_workflow(
+            "start.png", "a prompt", 124, 1344, 768, "prefix",
+            end_comfy_filename="end.png",
+        )
+        assert wf["mmx_scale"]["inputs"] == wf["mmx_scale_end"]["inputs"] | {
+            "image": ["mmx_load", 0]
+        }
+
+    def test_first_frame_still_points_at_the_start_picture(self):
+        wf, _, _ = _build_minimax_single_workflow(
+            "start.png", "p", 124, 768, 768, "prefix", end_comfy_filename="end.png",
+        )
+        assert self._cond(wf)["inputs"]["first_frame"] == ["mmx_scale", 0]
+        assert wf["mmx_load"]["inputs"]["image"] == "start.png"
+
+    def test_rife_and_the_end_frame_coexist(self):
+        wf, save_id, _ = _build_minimax_single_workflow(
+            "start.png", "p", 124, 768, 768, "prefix", 3, end_comfy_filename="end.png",
+        )
+        assert wf["mmx_rife"]["inputs"]["multiplier"] == 3
+        assert wf[save_id]["inputs"]["images"] == ["mmx_rife", 0]
+        assert self._cond(wf)["inputs"]["last_frame"] == ["mmx_scale_end", 0]
+
+
+class TestWanTemporalGrid:
+    """Wan's VAE compresses time by 4 with the first frame standing alone, so a
+    clip is 1 + 4n frames — every Wan node in ComfyUI declares step 4 for
+    `length` and its own UI cannot express anything else. This tool's number
+    field used step 1 and let 48 through on a real job."""
+
+    @pytest.mark.parametrize("given,snapped", [
+        (5, 5), (9, 9), (33, 33), (49, 49), (81, 81),      # already on the grid
+        (46, 49), (47, 49), (48, 49),                       # snapped up, never down
+        (50, 53), (80, 81),
+    ])
+    def test_snaps_up_onto_the_grid(self, given, snapped):
+        assert align_wan_length(given) == snapped
+
+    @pytest.mark.parametrize("n", list(range(5, 82)))
+    def test_every_result_is_4n_plus_1_and_never_shorter(self, n):
+        out = align_wan_length(n)
+        assert (out - 1) % 4 == 0
+        assert out >= n
+
+    def test_floor_protects_against_zero_and_none(self):
+        assert align_wan_length(0) == 5
+        assert align_wan_length(None) == 5
+
+    def test_it_is_idempotent(self):
+        for n in range(5, 82):
+            assert align_wan_length(align_wan_length(n)) == align_wan_length(n)
+
+    def test_flf2v_graph_renders_the_snapped_length(self):
+        wf, _ = _build_flf2v_single_workflow(
+            "a.png", "b.png", "p", 48, 960, 960, "prefix", 3,
+        )
+        assert wf["t0_flf2v"]["inputs"]["length"] == 49
+
+    def test_i2v_graph_renders_the_snapped_length(self):
+        wf, _ = _build_i2v_single_workflow(
+            "img.png", "p", 48, 960, 960, "prefix", 3, False,
+        )
+        assert wf["s0_i2v"]["inputs"]["length"] == 49
+
+
+class TestGuidanceFollowsTheMotionDial:
+    """cfg 1 is what a distill LoRA requires, not a house style. The motion dial
+    can take the distill off the high-noise expert, and at that point cfg 1
+    leaves a plain Wan expert running guidance-free: the prompt barely steers
+    and the negative prompt — which ends in 慢动作 (slow motion) and
+    静止不动的画面 (static image) — is never scored at all. On a transition that
+    is the difference between a transformation and a cross-fade."""
+
+    def _flf(self, lora_high, steps=10):
+        return _build_flf2v_single_workflow(
+            "a.png", "b.png", "p", 49, 960, 960, "x", 3,
+            steps=steps, lora_high=lora_high,
+        )[0]
+
+    @pytest.mark.parametrize("lora_high", [0.1, 0.3, 0.5, 1.0])
+    def test_any_distill_keeps_the_guidance_free_path(self, lora_high):
+        assert wan_cfg_high(lora_high) == 1
+        assert self._flf(lora_high)["t0_ks_h"]["inputs"]["cfg"] == 1
+
+    def test_no_distill_gets_real_guidance(self):
+        assert wan_cfg_high(0.0) > 1
+        assert self._flf(0.0)["t0_ks_h"]["inputs"]["cfg"] == 3.0
+
+    @pytest.mark.parametrize("lora_high", [0.0, 0.5, 1.0])
+    def test_the_low_noise_expert_never_gets_guidance(self, lora_high):
+        # It keeps its distill at full strength in every case, so cfg 1 is
+        # right for it in every case.
+        assert self._flf(lora_high)["t0_ks_l"]["inputs"]["cfg"] == 1
+
+    def test_the_i2v_builder_follows_the_same_rule(self):
+        wf = _build_i2v_single_workflow(
+            "img.png", "p", 49, 960, 960, "x", 3, False, steps=10, lora_high=0.0,
+        )[0]
+        assert wf["s0_ks_h"]["inputs"]["cfg"] == 3.0
+        assert wf["s0_ks_l"]["inputs"]["cfg"] == 1
+
+    def test_guided_steps_are_counted_as_two_evaluations(self):
+        # Only the high-noise portion is guided, so the surcharge is the split.
+        assert wan_model_evals(10, 0.5) == 10
+        assert wan_model_evals(10, 0.0) == 10 + 3
+
+    def test_the_estimate_moves_with_it(self):
+        cheap = estimate_wan_seconds(960, 960, 49, 10, lora_high=0.5)
+        guided = estimate_wan_seconds(960, 960, 49, 10, lora_high=0.0)
+        assert guided > cheap
+        # Bounded: a guided high-noise pass is far from doubling the clip.
+        assert guided < cheap * 1.5
+
+    def test_the_deadline_covers_the_guided_clip(self):
+        assert wan_poll_timeout(960, 960, 49, 10, 0.0) >= wan_poll_timeout(960, 960, 49, 10, 0.5)
+
+
+class TestHighNoiseStyleLoraSlot:
+    """FLF2V infers the path between two pinned frames, so with two unrelated
+    pictures it infers a blend — there is no trajectory in its prior connecting
+    them. The community's answer is not a setting but a LoRA, and every one of
+    them is trained for the *high-noise* expert, because that is the expert that
+    decides what the clip becomes."""
+
+    def _chain(self, wf, prefix):
+        """LoRA file names feeding the high-noise sampler, nearest expert first."""
+        cur, out = wf[f"{prefix}samp_h"]["inputs"]["model"][0], []
+        while cur in wf and "model" in wf[cur]["inputs"]:
+            node = wf[cur]
+            if node["class_type"] == "LoraLoaderModelOnly":
+                out.append((node["inputs"]["lora_name"], node["inputs"]["strength_model"]))
+            cur = node["inputs"]["model"][0]
+        return out
+
+    def _flf(self, **kw):
+        return _build_flf2v_single_workflow(
+            "a.png", "b.png", "p", 49, 960, 960, "x", 3, steps=10, **kw
+        )[0]
+
+    def test_absent_by_default(self):
+        wf = self._flf(lora_high=0.5)
+        assert "t0_lora_s" not in wf
+        assert self._chain(wf, "t0_") == [(_LORA_HIGH_NAME, 0.5)]
+
+    def test_chains_after_the_distill_not_instead_of_it(self):
+        wf = self._flf(lora_high=0.5, style_lora="morph.safetensors")
+        # Nearest the sampler is the style LoRA; the distill is still under it.
+        assert self._chain(wf, "t0_") == [("morph.safetensors", 1.0), (_LORA_HIGH_NAME, 0.5)]
+
+    def test_works_with_the_distill_off(self):
+        wf = self._flf(lora_high=0.0, style_lora="morph.safetensors")
+        assert self._chain(wf, "t0_") == [("morph.safetensors", 1.0)]
+        # And the expert is still guided, because the distill is what cfg 1 was for.
+        assert wf["t0_ks_h"]["inputs"]["cfg"] == 3.0
+
+    def test_never_touches_the_low_noise_expert(self):
+        wf = self._flf(lora_high=0.0, style_lora="morph.safetensors")
+        cur, names = wf["t0_samp_l"]["inputs"]["model"][0], []
+        while cur in wf and "model" in wf[cur]["inputs"]:
+            if wf[cur]["class_type"] == "LoraLoaderModelOnly":
+                names.append(wf[cur]["inputs"]["lora_name"])
+            cur = wf[cur]["inputs"]["model"][0]
+        assert names == [_LORA_LOW_NAME]
+
+    @pytest.mark.parametrize("given,expected", [
+        (None, 1.0), (0.0, 0.0), (0.75, 0.75), (1.0, 1.0), (2.0, 2.0),
+        (3.5, 2.0), (-1.0, 0.0),
+    ])
+    def test_strength_is_clamped_to_a_range_wan_survives(self, given, expected):
+        assert clamp_style_strength(given) == expected
+
+    def test_the_i2v_builder_has_the_same_slot(self):
+        wf = _build_i2v_single_workflow(
+            "img.png", "p", 49, 960, 960, "x", 3, False,
+            steps=10, lora_high=0.0, style_lora="morph.safetensors",
+        )[0]
+        assert self._chain(wf, "s0_") == [("morph.safetensors", 1.0)]
+
+
+class TestTransitionLoraShelf:
+    """Which of ComfyUI's LoRAs the slot is allowed to offer.
+
+    The folder is shared with every other model family in the project, and a
+    LoRA built for one of them is not an error: ComfyUI loads it, no key
+    matches Wan's, and the clip comes out exactly as if nothing had been
+    selected. The mistake is invisible at the one place it could be noticed,
+    which is why the slot is an allow list rather than a directory listing."""
+
+    # A real listing of the loras folder on this machine, trimmed.
+    INSTALLED = {
+        "Spatial Magic_V2.safetensors",
+        "high_screen_flood.safetensors",
+        "mh3-lys.safetensors",                 # MiniMax H3, not Wan
+        "lcm-lora-sdxl.safetensors",
+        "Qwen-Image-Lightning-8steps-V1.0.safetensors",
+        "ltx-2.3-22b-distilled-lora-384.safetensors",
+        "zImageT_zidiusArt_melancholy.safetensors",
+        "Wan21_T2V_14B_lightx2v_cfg_step_distill_lora_rank32.safetensors",
+    }
+
+    def _labels(self, names):
+        return [e["label"] for e in offered_transition_loras(names)]
+
+    def test_only_the_transition_loras_are_offered(self):
+        assert self._labels(self.INSTALLED) == ["Spatial Magic", "Screen Flood"]
+
+    def test_a_wan_lora_that_is_not_a_transition_lora_stays_off(self):
+        # It is a Wan file and it would load — it just does something else.
+        assert "Wan21_T2V_14B_lightx2v_cfg_step_distill_lora_rank32" not in str(
+            offered_transition_loras(self.INSTALLED)
+        )
+
+    def test_an_entry_whose_file_is_missing_is_simply_absent(self):
+        # ComfyUI rejects the whole prompt over an unknown lora_name, so a
+        # shelf entry with no file behind it would kill the job, not the LoRA.
+        assert "Claymation Transformation" not in self._labels(self.INSTALLED)
+
+    def test_it_reappears_when_the_file_lands(self):
+        names = self.INSTALLED | {"Claymation_Transformation_v1.safetensors"}
+        assert "Claymation Transformation" in self._labels(names)
+
+    @pytest.mark.parametrize("name", [
+        "Spatial Magic_V3.safetensors",
+        "wan/Spatial Magic_V2.safetensors",
+        "spatial-magic.safetensors",
+    ])
+    def test_a_renamed_revision_still_matches(self, name):
+        # These arrive under whatever the uploader called that revision.
+        assert self._labels({name}) == ["Spatial Magic"]
+
+    def test_an_unknown_transition_lora_names_itself_on(self):
+        # The escape hatch: downloading one should not require a code change.
+        offers = offered_transition_loras({"wan22_metamorph_hi.safetensors"})
+        assert [o["label"] for o in offers] == ["wan22_metamorph_hi"]
+        assert offers[0]["trigger"] == ""       # nobody here knows what it wants
+
+    def test_the_file_is_reported_verbatim(self):
+        # It goes straight into the graph's lora_name, so it has to be the name
+        # ComfyUI gave, not the label or a normalised form of it.
+        assert offered_transition_loras(self.INSTALLED)[0]["file"] == "Spatial Magic_V2.safetensors"
+
+
+class TestLoraTriggerReachesThePrompt:
+    """A trigger-word LoRA that never sees its trigger behaves precisely like
+    no LoRA at all — the same silent nothing as loading one for the wrong
+    architecture. The trigger is a property of the selected file, not a
+    creative decision, so the builder puts it in."""
+
+    SPATIAL = "Spatial Magic_V2.safetensors"
+
+    def test_the_trigger_leads_the_prompt(self):
+        out = with_lora_trigger("The cliff cracks open.", self.SPATIAL)
+        assert out == "kjmf magic The cliff cracks open."
+
+    def test_it_is_not_added_twice(self):
+        typed = "kjmf magic the cliff cracks open"
+        assert with_lora_trigger(typed, self.SPATIAL) == typed
+
+    def test_a_lora_without_a_known_trigger_leaves_the_prompt_alone(self):
+        assert with_lora_trigger("p", "high_screen_flood.safetensors") == "p"
+        assert trigger_for("high_screen_flood.safetensors") == ""
+
+    def test_no_lora_leaves_the_prompt_alone(self):
+        assert with_lora_trigger("p", None) == "p"
+
+    def _pos(self, wf, prefix):
+        return wf[f"{prefix}pos"]["inputs"]["text"]
+
+    def test_the_transition_builder_encodes_it(self):
+        wf = _build_flf2v_single_workflow(
+            "a.png", "b.png", "the cliff opens", 49, 960, 960, "x", 3,
+            steps=10, lora_high=0.5, style_lora=self.SPATIAL,
+        )[0]
+        assert self._pos(wf, "t0_") == "kjmf magic the cliff opens"
+
+    def test_the_i2v_builder_encodes_it_too(self):
+        wf = _build_i2v_single_workflow(
+            "img.png", "the cliff opens", 49, 960, 960, "x", 3, False,
+            steps=10, lora_high=0.5, style_lora=self.SPATIAL,
+        )[0]
+        assert self._pos(wf, "s0_") == "kjmf magic the cliff opens"
+
+    def test_the_negative_prompt_never_gets_it(self):
+        wf = _build_flf2v_single_workflow(
+            "a.png", "b.png", "p", 49, 960, 960, "x", 3,
+            steps=10, lora_high=0.5, style_lora=self.SPATIAL,
+        )[0]
+        assert "kjmf" not in wf["t0_neg"]["inputs"]["text"]
+
+    def test_an_unselected_slot_leaves_the_prompt_verbatim(self):
+        wf = _build_flf2v_single_workflow(
+            "a.png", "b.png", "the cliff opens", 49, 960, 960, "x", 3,
+            steps=10, lora_high=0.5,
+        )[0]
+        assert self._pos(wf, "t0_") == "the cliff opens"
+
+
+@pytest.mark.asyncio
+class TestMinimaxTransitionWriter:
+    """Two stages, because one was measurably not enough. The single vision
+    call the Wan writer uses asks a 3B VLM to look at N images AND invent a
+    constrained, audio-carrying prompt; it produced one Audio: line in four,
+    banned cross-fade verbs in half, and once a destination that was not in
+    the picture at all. So the VLM now only DESCRIBES, and the instruct model
+    WRITES from those descriptions."""
+
+    def _spy(self, monkeypatch, *, n_prompts=1):
+        """Record every _chat_json call and answer each stage in its own shape."""
+        calls = []
+        async def fake_chat_json(**kwargs):
+            calls.append(kwargs)
+            if kwargs["label"] == "describe_key_frame":
+                return {"description": "a medium portrait, blue background"}
+            return {"transitions": ["x"] * n_prompts}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+        return calls
+
+    async def test_it_describes_every_key_frame_then_writes_once(self, monkeypatch):
+        calls = self._spy(monkeypatch, n_prompts=3)
+        await generate_minimax_transition_prompts([b"1", b"2", b"3", b"4"])
+        labels = [c["label"] for c in calls]
+        assert labels == ["describe_key_frame"] * 4 + ["generate_minimax_transition_prompts"]
+
+    async def test_the_describing_is_done_by_the_vision_model(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+        await generate_minimax_transition_prompts([b"1", b"2"])
+        describes = [c for c in calls if c["label"] == "describe_key_frame"]
+        assert all(c["model"] == video_settings.ollama_titler_model for c in describes)
+        assert all(c["jpgs"] for c in describes)      # it needs to see them
+
+    async def test_the_writing_is_done_by_the_instruct_model_without_images(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+        await generate_minimax_transition_prompts([b"1", b"2"])
+        write = calls[-1]
+        assert write["model"] == video_settings.ollama_prompt_model
+        assert not write["jpgs"]                      # it works from the descriptions
+
+    async def test_the_descriptions_reach_the_writer(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+        await generate_minimax_transition_prompts([b"1", b"2"])
+        assert "a medium portrait, blue background" in calls[-1]["user_text"]
+
+    async def test_it_uses_its_own_system_prompt(self, monkeypatch):
+        calls = self._spy(monkeypatch)
+        await generate_minimax_transition_prompts([b"1", b"2"])
+        system = calls[-1]["system"]
+        # The two properties that define this writer, rather than a heading
+        # that may be reworded: it asks for sound, and it asks the prompt to
+        # name where it arrives.
+        assert "Audio:" in system
+        assert "destination" in system
+
+    async def test_the_wan_writer_is_unchanged_and_silent(self, monkeypatch):
+        seen = {}
+        async def fake_chat_json(**kwargs):
+            seen.update(kwargs)
+            return {"transitions": ["x"]}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+        await generate_transition_prompts([b"1", b"2"])
+        assert "Audio:" not in seen["system"]
+        assert seen["jpgs"]                           # still one vision call
+
+    async def test_an_unreadable_frame_does_not_lose_the_sequence(self, monkeypatch):
+        async def fake_chat_json(**kwargs):
+            if kwargs["label"] == "describe_key_frame":
+                raise RuntimeError("VLM returned no description")
+            return {"transitions": ["still written"]}
+        monkeypatch.setattr(analysis_module, "_chat_json", fake_chat_json)
+        assert await generate_minimax_transition_prompts([b"1", b"2"]) == ["still written"]
+
+    async def test_the_token_budget_scales_with_the_number_of_pairs(self, monkeypatch):
+        calls = self._spy(monkeypatch, n_prompts=1)
+        await generate_minimax_transition_prompts([b"1", b"2"])
+        two = calls[-1]["options"]["num_predict"]
+        calls = self._spy(monkeypatch, n_prompts=5)
+        await generate_minimax_transition_prompts([b"1"] * 6)
+        six = calls[-1]["options"]["num_predict"]
+        # One call answers for every pair, so a long sequence must not be
+        # truncated into blank slots.
+        assert six > two
+
+    async def test_it_still_returns_one_prompt_per_pair(self, monkeypatch):
+        self._spy(monkeypatch, n_prompts=1)
+        assert await generate_minimax_transition_prompts([b"1", b"2", b"3"]) == ["x", ""]
+
+    async def test_two_images_are_the_minimum(self, monkeypatch):
+        self._spy(monkeypatch)
+        with pytest.raises(RuntimeError):
+            await generate_minimax_transition_prompts([b"1"])
+
+
+class TestSuggestedMinimaxPromptCarriesAudio:
+    """A small VLM does not reliably produce the Audio: line the system prompt
+    asks for. The builder would add a fallback at submit time, but then the
+    user never sees it and cannot edit it — so the endpoint completes it while
+    the answer is still on its way to a textarea."""
+
+    def test_a_prompt_without_audio_gains_one(self):
+        out = ensure_sound_only_audio("The skin opens and the man is drawn into the powder.")
+        assert "Audio:" in out
+        assert "The skin opens" in out
+
+    def test_a_prompt_that_has_one_keeps_its_own_words(self):
+        written = "The hall shatters into sand.\nAudio: grains hissing in a wide echo."
+        out = ensure_sound_only_audio(written)
+        assert "grains hissing in a wide echo" in out
+        assert out.count("Audio:") == 1

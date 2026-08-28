@@ -12,7 +12,7 @@ and anchor every phrase in what it actually contains.
 - Start from what is visibly IN the image (subject, materials, light,
   setting) and describe how it moves, transforms or defies expectation
   over the clip: paint flowing upward against gravity, shadows detaching
-  and walking away, textures breathing, objects slowly levitating or
+  and walking away, textures breathing, objects lifting off the ground or
   melting, reflections moving independently of their source, the scene
   folding into itself.
 - One clear motion idea per prompt, elaborated concretely — Wan2.2
@@ -22,6 +22,13 @@ and anchor every phrase in what it actually contains.
   slow orbit, gentle drift, static camera) — nothing rapid or cutty.
 - Use active, continuous verbs: rippling, unfurling, dissolving,
   billowing, rotating, dripping upward, breathing, splitting, blooming.
+- The motion must actually GET somewhere within the clip: whatever moves
+  should visibly travel, open or transform from start to end, not hover
+  near its starting position. Never write "in slow motion", "slowly
+  drifting", "almost imperceptibly" or any other instruction to slow the
+  subject down — Wan2.2 already under-moves and those phrases stack onto
+  it. "Slow" belongs to the CAMERA only (a slow push-in, a gentle orbit),
+  never to the thing being filmed.
 - 2 to 4 sentences per prompt. Concrete and depictable — every phrase
   should describe something a viewer could actually watch happen.
 - Stay inside the image's world: do not replace the subject, do not
@@ -48,9 +55,10 @@ never write a generic prompt that could apply to any picture.
 - "The figure's silhouette stays still while its shadow peels off the
   wall and drifts upward, dissolving into a flock of dark shapes. Static
   camera; the ambient light pulses gently, as if the room is breathing."
-- "The blue pour at the center opens like an iris, and the surrounding
-  texture folds inward in slow motion, feeding into the opening. A
-  gentle orbit reveals the surface bending like fabric."
+- "The blue pour at the center opens like an iris until it swallows half
+  the frame, and the surrounding texture folds inward after it, feeding
+  into the opening. A gentle orbit reveals the surface bending like
+  fabric."
 
 ## Output
 Return STRICT JSON: {"animation": "<the prompt>"} — one prompt for the

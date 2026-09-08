@@ -381,31 +381,8 @@
                         font-variant-numeric: tabular-nums; color: var(--text-dim); }
     .look-dial.active .label, .look-dial.active .value { color: var(--text); }
     .look-summary { font-size: 11px; color: var(--text-dim); }
-    /* ── Post-pass bar ──
-       One row of three buttons, one per derived rendition (soundtrack,
-       upscale/retime, look). Each names the state of its pass — the song's
-       title, "1080p 2×", the dials in use — and opens that pass's controls
-       underneath, one at a time. Three expanded blocks per card used to be
-       most of what a library page was made of. */
-    .pass-bar { display: flex; gap: 6px; }
-    .pass-btn {
-      flex: 1 1 0; min-width: 0;
-      display: flex; align-items: center; justify-content: center; gap: 6px;
-      padding: 8px 10px; border-radius: var(--radius-sm);
-      background: var(--surface2); border: 1.5px solid var(--border);
-      color: var(--text-dim); font-size: 12px; font-weight: 700;
-      cursor: pointer; font-family: inherit;
-      -webkit-tap-highlight-color: transparent;
-      transition: border-color 0.12s, background 0.12s, color 0.12s;
-    }
-    .pass-btn .glyph { font-size: 14px; flex-shrink: 0; }
-    .pass-btn .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .pass-btn:hover { border-color: var(--accent-border); color: var(--text); }
-    /* .set = the pass has been applied: the glyph lights up, the text is the result. */
-    .pass-btn.set { color: var(--text); border-color: var(--border-strong); }
-    .pass-btn.set .glyph { color: var(--accent); }
-    .pass-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-    .pass-btn.working .glyph { animation: step-pulse 1.4s ease-in-out infinite; }
+    /* The post-pass bar (.pass-bar / .pass-btn) lives in shared.css — the
+       gallery's wand/grain/upscale row is the same control. */
     .card-folds { display: flex; flex-direction: column; margin-top: -4px; }
 
     /* ── Song picker modal (vertical list, audio previews) ── */

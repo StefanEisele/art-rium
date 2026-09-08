@@ -232,7 +232,16 @@
        picture off the shelf. `touch-action: pan-y` keeps vertical scrolling
        with the page while claiming the horizontal axis — without it the
        browser steals the drag and the card never moves. */
-    .gallery-item .swipe-layer { touch-action: pan-y; will-change: transform; }
+    /* `user-select`/`user-drag`: with a mouse, dragging a card grabs the <img>
+       for a native HTML5 image drag, and the browser answers the grab with a
+       `pointercancel` — measured: the swipe died one move in and never
+       committed, so the gesture did nothing at all on a desktop. Touch was
+       unaffected, which is what hid it. The Gallery's modal already pins its
+       picture down the same way. */
+    .gallery-item .swipe-layer {
+      touch-action: pan-y; will-change: transform;
+      -webkit-user-select: none; user-select: none;
+    }
     .gallery-item .swipe-layer.settling { transition: transform .2s ease, opacity .2s ease; }
     .gallery-item .swipe-hint {
       position: absolute; top: 10px; right: 12px;
@@ -247,7 +256,7 @@
        gallery's swipe deck settled that: a flick is easy to misfire and a
        deleted picture does not come back, so the two are kept apart. */
     .undo-bar {
-      position: fixed; z-index: 120;
+      position: fixed; z-index: 140;   /* above #lightbox (130) — see below */
       left: 50%; transform: translateX(-50%) translateY(140%);
       bottom: calc(env(safe-area-inset-bottom) + 18px);
       display: flex; align-items: center; gap: 14px;
@@ -271,6 +280,71 @@
       width: 100%; border-radius: var(--radius);
       display: block; background: var(--surface2);
       aspect-ratio: 1; object-fit: cover;
+      cursor: zoom-in;
+      -webkit-user-drag: none;
+    }
+
+    /* ── Lightbox ────────────────────────────────────────────────────────────
+       A result in the grid is at most half a phone wide, which is not enough
+       to judge one by. Tapping opens it here at the size the screen allows,
+       and the swipe that deletes a card in the grid deletes it here too — the
+       same gesture, the same undo bar, so the two views cannot mean different
+       things by the same flick. */
+    #lightbox {
+      display: none; position: fixed; inset: 0; z-index: 130;
+      background: var(--bg);
+      flex-direction: column;
+      padding-top: env(safe-area-inset-top);
+    }
+    #lightbox.show { display: flex; }
+    .lb-head {
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 14px; flex-shrink: 0;
+    }
+    .lb-count {
+      flex: 1; font-size: 13px; color: var(--text-dim);
+      font-variant-numeric: tabular-nums;
+    }
+    .lb-icon {
+      background: none; border: none; color: var(--text);
+      font-size: 20px; line-height: 1; width: 34px; height: 34px;
+      border-radius: 50%; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .lb-icon:disabled { opacity: 0.28; cursor: default; }
+    .lb-stage {
+      flex: 1; min-height: 0; position: relative;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0 12px;
+      /* The gesture owns the horizontal axis; without this the browser claims
+         the drag and cancels the pointer mid-swipe. */
+      touch-action: pan-y;
+      user-select: none; -webkit-user-select: none;
+    }
+    #lb-img {
+      max-width: 100%; max-height: 100%;
+      object-fit: contain; border-radius: 10px;
+      will-change: transform; -webkit-user-drag: none;
+    }
+    /* The verdict, drawn on the picture as it moves — same stamp the Gallery
+       uses, in the one colour this view needs. */
+    .lb-stamp {
+      position: absolute; top: 14px; right: 24px;
+      font-size: 17px; font-weight: 800; letter-spacing: 1.2px;
+      text-transform: uppercase; padding: 6px 11px;
+      border: 3px solid currentColor; border-radius: var(--radius-sm);
+      color: var(--red); transform: rotate(11deg);
+      opacity: 0; pointer-events: none; will-change: opacity;
+    }
+    .lb-foot {
+      display: flex; gap: 8px; flex-shrink: 0;
+      padding: 12px 14px calc(14px + env(safe-area-inset-bottom));
+    }
+    .lb-foot .save-btn { flex: 1; }
+    .lb-hint {
+      text-align: center; font-size: 11px; color: var(--text-faint);
+      padding-bottom: 4px;
     }
 
     .gallery-item img.portrait  { aspect-ratio: 3/4; }
@@ -645,6 +719,24 @@
   <div id="picker-grid"></div>
 </div>
 
+<!-- Enlarged result — opened by tapping a card in the strip -->
+<div id="lightbox">
+  <div class="lb-head">
+    <button class="lb-icon" onclick="lightbox.close()" title="Schließen">✕</button>
+    <span class="lb-count" id="lb-count"></span>
+    <button class="lb-icon" id="lb-prev" onclick="lightbox.step(-1)" title="Vorheriges">‹</button>
+    <button class="lb-icon" id="lb-next" onclick="lightbox.step(1)" title="Nächstes">›</button>
+  </div>
+  <div class="lb-stage" id="lb-stage">
+    <img id="lb-img" alt="">
+    <div class="lb-stamp" id="lb-stamp">Löschen</div>
+  </div>
+  <div class="lb-hint">Zur Seite wischen löscht — mit Rückgängig für ein paar Sekunden.</div>
+  <div class="lb-foot">
+    <button class="save-btn" id="lb-save" onclick="lightbox.save()">Save to Gallery</button>
+  </div>
+</div>
+
 <div class="undo-bar" id="undo-bar">
   <span id="undo-text">Bild gelöscht</span>
   <button type="button" onclick="undoDelete()">Rückgängig</button>
@@ -882,6 +974,13 @@ const gallery = {
     const item = gallery.create(data);
     gal.appendChild(item);
 
+    // Swiping the strip empty hides the whole section (see `forget`) — but a
+    // run already in flight keeps delivering into it, and every result after
+    // that would be appended to a hidden container: present in the strip, in
+    // localStorage and in the Gallery, yet invisible here until a reload.
+    // A card being added is exactly the moment there is something to show.
+    $(DOM_IDS.result).classList.add('show');
+
     if (gal.children.length >= 2) gal.classList.add('multi');
     setText(DOM_IDS.resultCount, `${state.generatedImages.length} images`);
 
@@ -954,6 +1053,7 @@ let pendingDelete = null;        // {record, index, timer}
 
 function attachSwipeToDelete(item, layer, hint, data) {
   let startX = 0, startY = 0, dx = 0, at = 0, dragging = false, decided = false;
+  let moved = 0;
 
   const settle = (toX, fade) => {
     layer.classList.add('settling');
@@ -965,13 +1065,14 @@ function attachSwipeToDelete(item, layer, hint, data) {
   layer.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     startX = e.clientX; startY = e.clientY;
-    dx = 0; at = Date.now(); dragging = true; decided = false;
+    dx = 0; at = Date.now(); dragging = true; decided = false; moved = 0;
     layer.classList.remove('settling');
   });
 
   layer.addEventListener('pointermove', (e) => {
     if (!dragging) return;
     const mx = e.clientX - startX, my = e.clientY - startY;
+    moved = Math.max(moved, Math.hypot(mx, my));
     // Until the direction is settled, a mostly-vertical move belongs to the
     // page. Deciding once — rather than every frame — stops a diagonal drag
     // from flickering between scrolling and swiping.
@@ -994,12 +1095,144 @@ function attachSwipeToDelete(item, layer, hint, data) {
     if (Math.abs(dx) > SWIPE_COMMIT_PX || speed > SWIPE_FLICK_V) {
       settle(Math.sign(dx) * (item.offsetWidth + 60), '0');
       setTimeout(() => queueDelete(data), 180);
-    } else {
-      settle(0, '1');
+      return;
+    }
+    settle(0, '1');
+    // A press that never became a drag is a tap: at grid size a result is too
+    // small to judge, so it opens.
+    if (moved < 10 && Date.now() - at < 400) {
+      const i = state.generatedImages.findIndex(x => x.filename === data.filename);
+      if (i !== -1) lightbox.open(i);
     }
   };
   layer.addEventListener('pointerup', end);
   layer.addEventListener('pointercancel', end);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LIGHTBOX — one result, as large as the screen allows
+// ═══════════════════════════════════════════════════════════════════════════
+// It reads `state.generatedImages` by index rather than holding on to a card:
+// a deletion re-renders the whole strip, and a captured element would be a
+// pointer into a grid that no longer exists.
+
+const lightbox = {
+  index: -1,
+
+  get record() { return state.generatedImages[lightbox.index] || null; },
+
+  open(i) {
+    if (i < 0 || i >= state.generatedImages.length) return;
+    lightbox.index = i;
+    lightbox.paint();
+    $('lightbox').classList.add('show');
+  },
+
+  close() {
+    $('lightbox').classList.remove('show');
+    lightbox.index = -1;
+  },
+
+  paint() {
+    const rec = lightbox.record;
+    if (!rec) { lightbox.close(); return; }
+    const img = $('lb-img');
+    img.style.transition = 'none';
+    img.style.transform = '';
+    img.style.opacity = '';
+    img.src = withAuth(rec.url);
+    const n = state.generatedImages.length;
+    setText('lb-count', `${lightbox.index + 1} / ${n}`);
+    $('lb-prev').disabled = lightbox.index === 0;
+    $('lb-next').disabled = lightbox.index >= n - 1;
+    $('lb-stamp').style.opacity = '0';
+  },
+
+  step(d) {
+    const next = lightbox.index + d;
+    if (next < 0 || next >= state.generatedImages.length) return;
+    lightbox.index = next;
+    lightbox.paint();
+  },
+
+  save() {
+    const rec = lightbox.record;
+    if (rec) saveImage(rec.url, rec.filename);
+  },
+
+  /** Delete the picture on screen, then show whatever takes its place. The
+   *  strip closes up behind it, so the same index is the next picture; only
+   *  the last one has to step back. */
+  remove() {
+    const rec = lightbox.record;
+    if (!rec) return;
+    const at = lightbox.index;
+    queueDelete(rec);
+    if (!state.generatedImages.length) { lightbox.close(); return; }
+    lightbox.index = Math.min(at, state.generatedImages.length - 1);
+    lightbox.paint();
+  },
+};
+
+/** The same flick as on a card, on the enlarged picture. */
+function initLightboxSwipe() {
+  const stage = $('lb-stage');
+  const img = $('lb-img');
+  const stamp = $('lb-stamp');
+  let x0 = 0, y0 = 0, dx = 0, at = 0, dragging = false, decided = false, horizontal = false;
+
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (e.target.closest('button')) return;
+    x0 = e.clientX; y0 = e.clientY;
+    dx = 0; at = Date.now(); dragging = true; decided = false; horizontal = false;
+    img.style.transition = 'none';
+  });
+
+  stage.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const mx = e.clientX - x0, my = e.clientY - y0;
+    if (!decided) {
+      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return;
+      decided = true;
+      horizontal = Math.abs(mx) > Math.abs(my);
+      if (horizontal) stage.setPointerCapture(e.pointerId);
+    }
+    if (!horizontal) return;
+    dx = mx;
+    img.style.transform = `translate3d(${dx}px,0,0) rotate(${(dx / 22).toFixed(2)}deg)`;
+    img.style.opacity = String(Math.max(0.35, 1 - Math.abs(dx) / 420));
+    stamp.style.opacity = String(Math.min(1, Math.abs(dx) / SWIPE_COMMIT_PX));
+  });
+
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    const speed = Math.abs(dx) / Math.max(1, Date.now() - at);
+    const commit = horizontal
+      && (Math.abs(dx) > SWIPE_COMMIT_PX || speed > SWIPE_FLICK_V);
+    if (commit) {
+      img.style.transition = 'transform .24s ease-in, opacity .24s ease-in';
+      img.style.transform = `translate3d(${Math.sign(dx) * (window.innerWidth + 120)}px,0,0)`;
+      img.style.opacity = '0';
+      stamp.style.opacity = '0';
+      setTimeout(() => lightbox.remove(), 200);
+      return;
+    }
+    img.style.transition = 'transform .2s ease, opacity .2s ease';
+    img.style.transform = '';
+    img.style.opacity = '';
+    stamp.style.opacity = '0';
+  };
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', end);
+
+  document.addEventListener('keydown', (e) => {
+    if (!$('lightbox').classList.contains('show')) return;
+    if (e.key === 'Escape')     lightbox.close();
+    if (e.key === 'ArrowLeft')  lightbox.step(-1);
+    if (e.key === 'ArrowRight') lightbox.step(1);
+  });
 }
 
 /** Take the card out of the strip and start the clock on its deletion. */
@@ -1046,6 +1279,12 @@ function undoDelete() {
   storage.saveImages();
   gallery.render();
   updateShareButton();
+  // The strip just grew under the lightbox's index — put it back on the
+  // picture that was restored rather than on whatever slid into its place.
+  if ($('lightbox').classList.contains('show')) {
+    lightbox.index = at;
+    lightbox.paint();
+  }
 }
 
 // A deletion still inside its grace period would otherwise be lost on
@@ -1993,6 +2232,69 @@ const applyVariantDeepLink = async () => {
   history.replaceState(null, '', location.pathname);
 };
 
+// Which model made a picture, as this tool's own toggle names it. Anything
+// unrecognised (including the two Z-Image graphs) is Z-Image Turbo.
+const MODEL_BY_WORKFLOW = {
+  'artivision_xl': 'sdxl',
+  'ernie_image_turbo': 'ernie',
+};
+
+/** `?from=<image_id>` — the gallery's "Weiterarbeiten" button. Not the
+ *  picture, its recipe: prompt, model, size, seed and LoRA stack are put back
+ *  the way they were, and the tool opens in Direct mode ready to generate
+ *  something new from the same place. */
+const applyContinueDeepLink = async () => {
+  const id = new URLSearchParams(location.search).get('from');
+  if (!id) return;
+  history.replaceState(null, '', location.pathname);
+
+  let img;
+  try {
+    const r = await apiFetch(`/api/images/${encodeURIComponent(id)}`);
+    img = await r.json();
+  } catch (e) {
+    ArtRium.toast('Bild konnte nicht geladen werden.', true);
+    return;
+  }
+
+  setMode('direct');
+  // Before the LoRAs: switching models refetches the registry and resets the
+  // active set to that model's default.
+  const model = MODEL_BY_WORKFLOW[img.workflow_name] || 'zimage';
+  if (model !== state.model) await setModel(model);
+
+  $(DOM_IDS.prompt).value = img.prompt || '';
+  onPromptInput();
+
+  // Only a size the tool actually offers — a variant carries whatever its
+  // source had, and a button set that matches nothing would be a lie.
+  const sizeBtn = [...document.querySelectorAll('.size-btn')].find(b => {
+    const m = /setSize\((\d+),\s*(\d+)/.exec(b.getAttribute('onclick') || '');
+    return m && Number(m[1]) === img.width && Number(m[2]) === img.height;
+  });
+  if (sizeBtn) setSize(img.width, img.height, sizeBtn);
+
+  // The seed comes along, so the next run starts from the same roll. It is
+  // named on the Advanced fold's summary line even while that stays closed.
+  if (img.seed !== null && img.seed !== undefined) {
+    $(DOM_IDS.seed).value = String(img.seed);
+  }
+
+  const known = new Set(loraRegistry.list.map(l => l.filename));
+  const carried = (img.loras || []).filter(l => known.has(l.name));
+  if (carried.length) {
+    state.activeLoras = new Set(carried.map(l => l.name));
+    carried.forEach(l => { state.loraStrengths[l.name] = l.strength; });
+    renderLoraState();
+  }
+
+  updateAdvSummary();
+  const bits = [`${img.width}×${img.height}`];
+  if (img.seed !== null && img.seed !== undefined) bits.push(`Seed ${img.seed}`);
+  if (carried.length) bits.push(carried.length === 1 ? '1 LoRA' : `${carried.length} LoRAs`);
+  ArtRium.toast(`Übernommen: Prompt · ${bits.join(' · ')}`);
+};
+
 window.addEventListener('load', async () => {
   buildBatchRow();
   buildHeaderButtons();
@@ -2022,6 +2324,8 @@ window.addEventListener('load', async () => {
   });
 
   await applyVariantDeepLink();
+  await applyContinueDeepLink();
+  initLightboxSwipe();
 
   wsConn = ArtRium.connectWs({
     clientId:      state.clientId,

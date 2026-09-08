@@ -603,6 +603,15 @@
     .fx-hint { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
     .fx-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
+    /* One pass's controls, opened by its button in the bar above (.pass-bar
+       lives in shared.css). Only ever one is open — four passes shown at once
+       is what made this panel a wall. */
+    .fx-panel { display: none; flex-direction: column; gap: 8px; margin-top: 9px; }
+    .fx-panel.open { display: flex; }
+    /* The apply control inside a panel; the bar button only opens the panel. */
+    .fx-panel .fx-row { gap: 10px; }
+    .fx-jumps { display: flex; gap: 6px; margin-top: 9px; }
+
     /* ── Diffusion upscale ──
        More surface than the other two passes get, because it is the only one
        with a decision in it: how much the model is allowed to repaint. */
@@ -1082,44 +1091,51 @@
 
     <!-- Auto-enhance ("Zauberstab") -->
     <div>
-      <div class="section-label fx-head">
-        <span>Verbessern</span>
-        <!-- Holds the layer below the wand: the upscale when there is one,
-             the original otherwise — so what you see is this pass alone. -->
-        <button class="compare-btn" id="compare-btn" style="display:none">Ohne Korrektur halten</button>
-      </div>
-      <div class="fx-row">
-        <button class="wand-btn" id="wand-btn" onclick="onWand()" title="Automatisch verbessern">🪄</button>
-        <input type="range" id="enhance-strength" min="0" max="150" step="5" value="100" style="display:none">
-        <span class="fx-pct" id="enhance-pct" style="display:none">100%</span>
-      </div>
-      <div class="fx-hint" id="enhance-hint"></div>
-      <div class="fx-chips" id="enhance-chips"></div>
-    </div>
+      <div class="section-label">Bearbeiten</div>
 
-    <!-- Film grain -->
-    <div>
-      <div class="section-label fx-head">
-        <span>Körnung</span>
-        <button class="compare-btn" id="grain-compare-btn" style="display:none">Ohne Korn halten</button>
+      <!-- One button per pass, each naming what that pass currently is, and
+           opening its controls underneath — the same bar the video library
+           uses for soundtrack/upscale/look. -->
+      <div class="pass-bar" id="fx-bar">
+        <button class="pass-btn" id="fx-btn-enhance" type="button" onclick="toggleFxPass('enhance')">
+          <span class="glyph">🪄</span><span class="txt" id="fx-lbl-enhance">Verbessern</span>
+        </button>
+        <button class="pass-btn" id="fx-btn-grain" type="button" onclick="toggleFxPass('grain')">
+          <span class="glyph">🎞</span><span class="txt" id="fx-lbl-grain">Korn</span>
+        </button>
+        <button class="pass-btn" id="fx-btn-upscale" type="button" onclick="toggleFxPass('upscale')">
+          <span class="glyph">⤢</span><span class="txt" id="fx-lbl-upscale">Vergrößern</span>
+        </button>
       </div>
-      <div class="fx-row">
-        <button class="wand-btn" id="grain-btn" onclick="onGrainWand()" title="Filmkorn hinzufügen">🎞</button>
-        <input type="range" id="grain-strength" min="0" max="100" step="5" value="30" style="display:none">
-        <span class="fx-pct" id="grain-pct" style="display:none">30%</span>
-      </div>
-      <div class="fx-hint" id="grain-hint"></div>
-    </div>
 
-    <!-- Diffusion upscale (Z-Image Turbo + Ultimate SD Upscale) -->
-    <div>
-      <div class="section-label fx-head">
-        <span>Vergrößern</span>
-        <button class="compare-btn" id="upscale-compare-btn" style="display:none">Klein halten</button>
+      <div class="fx-panel" id="fx-panel-enhance">
+        <div class="fx-row">
+          <button class="wand-btn" id="wand-btn" onclick="onWand()" title="Automatisch verbessern">🪄</button>
+          <input type="range" id="enhance-strength" min="0" max="150" step="5" value="100" style="display:none">
+          <span class="fx-pct" id="enhance-pct" style="display:none">100%</span>
+          <!-- Holds the layer below the wand: the upscale when there is one,
+               the original otherwise — so what you see is this pass alone. -->
+          <button class="compare-btn" id="compare-btn" style="display:none">Ohne Korrektur halten</button>
+        </div>
+        <div class="fx-hint" id="enhance-hint"></div>
+        <div class="fx-chips" id="enhance-chips"></div>
       </div>
+
+      <div class="fx-panel" id="fx-panel-grain">
+        <div class="fx-row">
+          <button class="wand-btn" id="grain-btn" onclick="onGrainWand()" title="Filmkorn hinzufügen">🎞</button>
+          <input type="range" id="grain-strength" min="0" max="100" step="5" value="30" style="display:none">
+          <span class="fx-pct" id="grain-pct" style="display:none">30%</span>
+          <button class="compare-btn" id="grain-compare-btn" style="display:none">Ohne Korn halten</button>
+        </div>
+        <div class="fx-hint" id="grain-hint"></div>
+      </div>
+
+      <div class="fx-panel" id="fx-panel-upscale">
       <div class="fx-row">
         <button class="wand-btn" id="upscale-btn" onclick="onUpscaleClick()" title="Bild vergrößern">⤢</button>
         <span class="fx-pct" id="upscale-size"></span>
+        <button class="compare-btn" id="upscale-compare-btn" style="display:none">Klein halten</button>
       </div>
       <div class="fx-chips" id="upscale-chips"></div>
       <div class="us-panel" id="upscale-panel" style="display:none">
@@ -1149,19 +1165,21 @@
         <div class="us-detail" id="upscale-detail"></div>
       </div>
       <div class="fx-hint" id="upscale-hint"></div>
-    </div>
-
-    <!-- Varianten — the only pass here that makes *new* pictures rather than
-         another rendition of this one, so it hands off to the generator tool
-         instead of running in the gallery. -->
-    <div>
-      <div class="section-label fx-head"><span>Varianten</span></div>
-      <div class="fx-row">
-        <button class="wand-btn" id="variant-btn" onclick="openVariants()"
-                title="Varianten dieses Bildes erzeugen">⧉</button>
       </div>
-      <div class="fx-hint">
-        Öffnet z-Image mit diesem Bild als Latent — Prompt übernommen und änderbar.
+
+      <!-- The two handoffs. Neither is a rendition of this picture: both make
+           new ones, so they leave for the generator instead of running here.
+           Varianten keeps the pixels (img2img on this latent); Weiterarbeiten
+           keeps only the recipe. -->
+      <div class="fx-jumps">
+        <button class="pass-btn" id="variant-btn" type="button" onclick="openVariants()"
+                title="Varianten dieses Bildes erzeugen — img2img auf diesem Latent">
+          <span class="glyph">⧉</span><span class="txt">Varianten</span>
+        </button>
+        <button class="pass-btn" id="continue-btn" type="button" onclick="continueInGenerator()"
+                title="z-Image mit Prompt, Modell, Größe, Seed und LoRAs dieses Bildes öffnen">
+          <span class="glyph">↗</span><span class="txt">Weiterarbeiten</span>
+        </button>
       </div>
     </div>
 
@@ -1748,6 +1766,7 @@ const populateModal = (img) => {
   dl.href = withAuth(img.primary_url || img.url);
   dl.download = img.filename;
 
+  resetFxPasses();
   renderEnhanceUI(img);
   renderGrainUI(img);
   // Opening an image whose upscale is still running has to pick the progress
@@ -1834,6 +1853,39 @@ const enhanceParamChips = (p) => {
   return chips;
 };
 
+// ── The pass bar ────────────────────────────────────────────────────────────
+// Which panel is open, and what each button says about its pass. The labels
+// are read off the image row rather than tracked separately, so they cannot
+// disagree with the controls inside the panel.
+
+let openFxPass = null;
+
+const renderFxBar = (img) => {
+  if (!img) return;
+  const passes = [
+    ['enhance', img.enhanced, img.enhanced ? `${img.enhance_strength || 100} %` : 'Verbessern'],
+    ['grain',   img.grained,  img.grained  ? `${img.grain_strength || 0} %`     : 'Korn'],
+    ['upscale', img.upscaled, img.upscaled ? `${img.upscale_width}×${img.upscale_height}` : 'Vergrößern'],
+  ];
+  for (const [kind, set, label] of passes) {
+    const btn = $(`fx-btn-${kind}`);
+    if (!btn) continue;
+    const lbl = $(`fx-lbl-${kind}`);
+    if (lbl) lbl.textContent = label;
+    btn.classList.toggle('set', !!set);
+    btn.classList.toggle('on', openFxPass === kind);
+    $(`fx-panel-${kind}`).classList.toggle('open', openFxPass === kind);
+  }
+};
+
+const toggleFxPass = (kind) => {
+  openFxPass = openFxPass === kind ? null : kind;
+  renderFxBar(state.modal.image);
+};
+
+/** Opening another picture starts with every pass closed. */
+const resetFxPasses = () => { openFxPass = null; };
+
 const renderEnhanceUI = (img) => {
   const on = !!img.enhanced;
   const strength = img.enhance_strength || 100;
@@ -1850,6 +1902,7 @@ const renderEnhanceUI = (img) => {
     : 'Ein Klick analysiert das Bild und räumt Tonwerte, Brillanz und Farbe auf.';
   $('enhance-chips').innerHTML = (on ? enhanceParamChips(img.enhance_params) : [])
     .map(c => `<span class="fx-chip">${ArtRium.escHtml(c)}</span>`).join('');
+  renderFxBar(img);
 };
 
 const setEnhanceBusy = (busy) => {
@@ -1889,6 +1942,7 @@ const applyEnhance = async (strength) => {
 const onWand = () => {
   const img = state.modal.image;
   if (!img) return;
+  openFxPass = 'enhance';
   applyEnhance(img.enhanced ? 0 : parseInt($('enhance-strength').value, 10) || 100);
 };
 
@@ -1975,6 +2029,7 @@ const renderGrainUI = (img) => {
   $('grain-hint').textContent = on
     ? 'Regler ändert die Körnung — 0 % stellt den Zustand ohne Korn wieder her.'
     : 'Legt feines Filmkorn über das Bild. Das Original bleibt erhalten.';
+  renderFxBar(img);
 };
 
 const setGrainBusy = (busy) => {
@@ -2011,6 +2066,7 @@ const applyGrain = async (strength) => {
 const onGrainWand = () => {
   const img = state.modal.image;
   if (!img) return;
+  openFxPass = 'grain';
   applyGrain(img.grained ? 0 : parseInt($('grain-strength').value, 10) || GRAIN_DEFAULT);
 };
 
@@ -2095,6 +2151,7 @@ const renderUpscaleUI = (img) => {
         + '⤢ entfernt die Vergrößerung wieder — Zauberstab und Korn bleiben erhalten.'
       : 'Vergrößert das Originalbild und zeichnet dabei echte Details nach (Z-Image, kachelweise). '
         + 'Zauberstab und Korn werden danach neu darüber gelegt. Dauert Minuten.';
+  renderFxBar(img);
 };
 
 const UPSCALE_MODEL_LABELS = { nomos8ksc: '4x Nomos8kSC', realesrgan: 'RealESRGAN 4x+' };
@@ -2302,6 +2359,16 @@ const openVariants = () => {
   const img = state.modal.image;
   if (!img) return;
   location.href = `/tools/z-image/?variant=${encodeURIComponent(img.id)}`;
+};
+
+// The other handoff: not this picture's pixels, this picture's *recipe*.
+// z-Image opens in Direct mode with the prompt, model, size, seed and LoRA
+// stack this row was generated with, so the next run starts from the same
+// place rather than from the tool's defaults.
+const continueInGenerator = () => {
+  const img = state.modal.image;
+  if (!img) return;
+  location.href = `/tools/z-image/?from=${encodeURIComponent(img.id)}`;
 };
 
 const openTitler = () => {

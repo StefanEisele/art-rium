@@ -167,6 +167,39 @@ html, body {
 /* One choice's worth of chips, kept together and away from the next choice. */
 .chip-group { display: inline-flex; gap: 5px; flex-wrap: wrap; }
 
+/* ── Pass bar ────────────────────────────────────────────────────────────────
+   One row of buttons, one per pass that can be applied to the thing on screen
+   (a video's soundtrack/upscale/look, a picture's wand/grain/upscale). Each
+   button names the *state* of its pass — the song's title, "1080p 2x", the
+   dials in use — and opens that pass's controls underneath, one at a time.
+   Passes shown fully expanded, all at once, is what these two libraries used
+   to be made of.
+
+     .pass-btn          → the pass is available and not applied
+     .pass-btn.set      → it has been applied: glyph lit, label is the result
+     .pass-btn.on       → its panel is the one currently open
+     .pass-btn.working  → a render for it is in flight
+   ────────────────────────────────────────────────────────────────────────── */
+.pass-bar { display: flex; gap: 6px; }
+.pass-btn {
+  flex: 1 1 0; min-width: 0;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 8px 10px; border-radius: var(--radius-sm);
+  background: var(--surface2); border: 1.5px solid var(--border);
+  color: var(--text-dim); font-size: 12px; font-weight: 700;
+  cursor: pointer; font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+.pass-btn .glyph { font-size: 14px; flex-shrink: 0; }
+.pass-btn .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pass-btn:hover:not(:disabled) { border-color: var(--accent-border); color: var(--text); }
+.pass-btn:disabled { opacity: 0.45; cursor: default; }
+.pass-btn.set { color: var(--text); border-color: var(--border-strong); }
+.pass-btn.set .glyph { color: var(--accent); }
+.pass-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.pass-btn.working .glyph { animation: step-pulse 1.4s ease-in-out infinite; }
+
 /* ── Fold — a collapsible section built on <details>, so it works with no
    JS, keeps its state in the DOM and is keyboard/screen-reader accessible.
 

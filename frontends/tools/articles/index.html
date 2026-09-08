@@ -44,13 +44,7 @@
     .chip { font-size: 12px; font-weight: 600; padding: 6px 12px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all 0.13s; }
     .chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 
-    /* Collapsible sections */
-    details.collapsible { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 0; }
-    details.collapsible summary { padding: 12px 14px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text); list-style: none; display: flex; justify-content: space-between; align-items: center; }
-    details.collapsible summary::-webkit-details-marker { display: none; }
-    details.collapsible summary::after { content: '▾'; color: var(--text-dim); font-size: 12px; transition: transform 0.2s; }
-    details.collapsible[open] summary::after { transform: rotate(180deg); }
-    details.collapsible .body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+    /* Collapsible sections: the shared .fold (shared.css) */
 
     /* Singulart rows */
     .sing-row { background: var(--bg); border: 1.5px solid var(--border); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 6px; position: relative; }
@@ -183,9 +177,9 @@
           <div class="hint" style="margin-top:4px" id="series-hint">Used as the article title and quoted in the intro. Leave blank to let the model pick.</div>
         </div>
 
-        <details class="collapsible" id="parent-collapsible">
-          <summary>Parent series (optional)</summary>
-          <div class="body">
+        <details class="fold" id="parent-collapsible">
+          <summary><span class="fold-title">Parent series</span><span class="fold-value">optional</span></summary>
+          <div class="fold-body">
             <div class="hint">If this series continues a prior body of work, link to its page. The LLM weaves an inline anchor into the “Larger Practice” section.</div>
             <div>
               <label class="label" for="parent-name-input">Parent name</label>
@@ -198,9 +192,9 @@
           </div>
         </details>
 
-        <details class="collapsible" id="singulart-collapsible">
-          <summary>Singulart products (optional)</summary>
-          <div class="body">
+        <details class="fold" id="singulart-collapsible">
+          <summary><span class="fold-title">Singulart products</span><span class="fold-value">optional</span></summary>
+          <div class="fold-body">
             <div class="hint">Add up to 10 product links. Each renders as a card in the “Available Works” section.</div>
             <div id="sing-rows"></div>
             <button type="button" class="sing-add-btn" onclick="addSingulartRow()">+ Add Singulart product</button>

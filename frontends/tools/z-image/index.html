@@ -51,22 +51,10 @@
 
     .char-count { font-size: 11px; color: var(--text-dim); text-align: right; margin-top: -4px; }
 
-    /* ── Advanced toggle ── */
-    .adv-toggle {
-      display: flex; align-items: center; gap: 6px;
-      background: none; border: none; color: var(--text-dim);
-      font-size: 14px; font-family: inherit; cursor: pointer;
-      padding: 2px 0; width: fit-content;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .adv-toggle .chevron { transition: transform 0.22s ease; }
-    .adv-toggle.open .chevron { transform: rotate(180deg); }
-
-    .adv-panel {
-      display: none; flex-direction: column; gap: 16px;
-      background: var(--surface); border-radius: var(--radius); padding: 16px;
-    }
-    .adv-panel.show { display: flex; }
+    /* ── Advanced options: the shared .fold, on the card surface so the
+       size/batch buttons (surface2) still read as buttons inside it ── */
+    #adv-panel { background: var(--surface); border-radius: var(--radius); }
+    #adv-panel > .fold-body { gap: 16px; padding-top: 6px; }
 
     /* ── Size buttons 3-col ── */
     .size-grid {
@@ -238,6 +226,46 @@
     .gallery.multi { grid-template-columns: 1fr 1fr; }
 
     .gallery-item { display: flex; flex-direction: column; gap: 7px; }
+
+    /* ── Wegswipen ─────────────────────────────────────────────────────────
+       The card itself is what moves, so the gesture reads as pushing the
+       picture off the shelf. `touch-action: pan-y` keeps vertical scrolling
+       with the page while claiming the horizontal axis — without it the
+       browser steals the drag and the card never moves. */
+    .gallery-item .swipe-layer { touch-action: pan-y; will-change: transform; }
+    .gallery-item .swipe-layer.settling { transition: transform .2s ease, opacity .2s ease; }
+    .gallery-item .swipe-hint {
+      position: absolute; top: 10px; right: 12px;
+      background: rgba(0,0,0,0.66); color: #fff;
+      border-radius: var(--radius-pill); padding: 3px 10px;
+      font-size: 12px; font-weight: 700; opacity: 0;
+      pointer-events: none; transition: opacity .12s;
+    }
+    .gallery-item .shot { position: relative; }
+
+    /* Deletion is deferred behind this bar, not done on the gesture. The
+       gallery's swipe deck settled that: a flick is easy to misfire and a
+       deleted picture does not come back, so the two are kept apart. */
+    .undo-bar {
+      position: fixed; z-index: 120;
+      left: 50%; transform: translateX(-50%) translateY(140%);
+      bottom: calc(env(safe-area-inset-bottom) + 18px);
+      display: flex; align-items: center; gap: 14px;
+      max-width: calc(100vw - 32px);
+      padding: 11px 12px 11px 16px;
+      background: var(--surface2); color: var(--text);
+      border: 1.5px solid var(--border-strong); border-radius: var(--radius-pill);
+      box-shadow: var(--shadow-modal);
+      font-size: 13px; font-weight: 600;
+      transition: transform .22s cubic-bezier(.2,.8,.3,1);
+    }
+    .undo-bar.show { transform: translateX(-50%) translateY(0); }
+    .undo-bar span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .undo-bar button {
+      flex: 0 0 auto; border: none; border-radius: var(--radius-pill);
+      background: var(--accent); color: var(--on-accent);
+      font: inherit; font-weight: 700; padding: 7px 14px; cursor: pointer;
+    }
 
     .gallery-item img {
       width: 100%; border-radius: var(--radius);
@@ -516,22 +544,19 @@
       <div id="prompt-cards"></div>
     </div>
 
-    <!-- Advanced toggle -->
-    <button class="adv-toggle" id="adv-toggle" onclick="toggleAdv()">
-      <svg class="chevron" width="14" height="14" viewBox="0 0 14 14"
-           fill="none" stroke="currentColor" stroke-width="2"
-           stroke-linecap="round" stroke-linejoin="round">
-        <polyline points="3,5 7,9 11,5"/>
-      </svg>
-      Advanced options
-    </button>
-
-    <div class="adv-panel" id="adv-panel">
+    <!-- Advanced options — folded, with the current values on the summary
+         line so the fold can stay closed for the ordinary run. -->
+    <details class="fold" id="adv-panel">
+      <summary>
+        <span class="fold-title">Advanced options</span>
+        <span class="fold-value" id="adv-summary"></span>
+      </summary>
+      <div class="fold-body">
 
       <!-- Seed -->
       <div class="field">
         <label>Seed (−1 = random per image)</label>
-        <input type="number" id="seed" value="-1" min="-1" max="4294967295">
+        <input type="number" id="seed" value="-1" min="-1" max="4294967295" oninput="updateAdvSummary()">
       </div>
 
       <!-- Image size — hidden in variant mode, where the latent carries the
@@ -573,7 +598,8 @@
         <div class="lora-row" id="lora-row"></div>
       </div>
 
-    </div>
+      </div>
+    </details>
 
     <!-- Generate -->
     <button id="gen-btn" onclick="generate()">Generate</button>
@@ -619,6 +645,11 @@
   <div id="picker-grid"></div>
 </div>
 
+<div class="undo-bar" id="undo-bar">
+  <span id="undo-text">Bild gelöscht</span>
+  <button type="button" onclick="undoDelete()">Rückgängig</button>
+</div>
+
 <div id="toast"></div>
 
 <script src="/shared/shared.js"></script>
@@ -654,8 +685,6 @@ const DOM_IDS = {
   toast: 'toast',
   dot: 'dot',
   statusLabel: 'status-label',
-  advPanel: 'adv-panel',
-  advToggle: 'adv-toggle',
   seed: 'seed',
   batchRow: 'batch-row',
   loraRow: 'lora-row',
@@ -801,11 +830,30 @@ const gallery = {
     const item = document.createElement('div');
     item.className = 'gallery-item';
 
+    // The picture and its badge travel together under the finger; the Save
+    // button stays put, so a swipe cannot drag it out from under a thumb.
+    const layer = document.createElement('div');
+    layer.className = 'swipe-layer';
+    const shot = document.createElement('div');
+    shot.className = 'shot';
+
     const img = document.createElement('img');
     img.src = withAuth(data.url);
     img.alt = `Generated image ${state.generatedImages.length}`;
     const ratioClass = getImageRatioClass(state.imgWidth, state.imgHeight);
     if (ratioClass) img.className = ratioClass;
+
+    // A result is a real gallery row from the moment it is generated, and rows
+    // get deleted elsewhere — from the Gallery tool, or by a swipe here. The
+    // strip is remembered in localStorage, so it long outlives the files it
+    // points at, and what used to be left behind was a broken-image icon with
+    // no way to clear it. A picture that will not load no longer exists; drop
+    // it rather than draw a hole.
+    img.onerror = () => gallery.forget(data.filename);
+
+    const hint = document.createElement('div');
+    hint.className = 'swipe-hint';
+    hint.textContent = 'Löschen';
 
     const saveBtn = document.createElement('button');
     saveBtn.className = 'save-btn';
@@ -814,8 +862,10 @@ const gallery = {
       : 'Save to Gallery';
     saveBtn.onclick = () => saveImage(data.url, data.filename);
 
-    item.appendChild(img);
-    item.appendChild(saveBtn);
+    shot.append(img, hint);
+    layer.appendChild(shot);
+    item.append(layer, saveBtn);
+    attachSwipeToDelete(item, layer, hint, data);
     return item;
   },
 
@@ -823,7 +873,9 @@ const gallery = {
     // Dedup: same image_ready can arrive twice via WS replay race.
     if (state.generatedImages.some(i => i.filename === data.filename)) return false;
 
-    state.generatedImages.push({ url: data.url, filename: data.filename });
+    // `id` is the gallery row this result already has — the listener ingests
+    // before it announces. Without it a swipe could only hide the card.
+    state.generatedImages.push({ id: data.id, url: data.url, filename: data.filename });
     storage.saveImages();
 
     const gal = $(DOM_IDS.gallery);
@@ -860,7 +912,160 @@ const gallery = {
     updateShareButton();
     await clearPendingImagesQueue();
   },
+
+  /** Drop one result from the strip. Local only — nothing on the server is
+   *  touched, because this is also what a dead image calls when it fails to
+   *  load, and the file being gone is exactly why it is calling. */
+  forget: (filename) => {
+    const i = state.generatedImages.findIndex(x => x.filename === filename);
+    if (i === -1) return null;
+    const [removed] = state.generatedImages.splice(i, 1);
+    storage.saveImages();
+    if (state.generatedImages.length) {
+      gallery.render();
+    } else {
+      // `render` bails out on an empty list *before* it clears the container,
+      // so the last card has to be swept up here — otherwise it survives
+      // hidden and the next generated image lands underneath a ghost.
+      $(DOM_IDS.gallery).innerHTML = '';
+      $(DOM_IDS.gallery).classList.remove('multi');
+      $(DOM_IDS.result).classList.remove('show');
+      setText(DOM_IDS.resultCount, '');
+    }
+    updateShareButton();
+    return { record: removed, index: i };
+  },
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WEGSWIPEN — delete a result with a flick
+// ═══════════════════════════════════════════════════════════════════════════
+// The gesture removes the card at once and the deletion is held behind the undo
+// bar for a few seconds. That split is deliberate and not new here: the
+// Gallery's swipe deck keeps verdicts and deletions apart for the same reason —
+// a flick is cheap to misfire and `DELETE /api/images/{id}` unlinks the file,
+// the renditions and the row with nothing to restore from.
+
+const SWIPE_COMMIT_PX = 90;      // travel past which a slow drag counts
+const SWIPE_FLICK_V   = 0.55;    // px/ms past which a short one does too
+const UNDO_GRACE_MS   = 6000;    // how long the deletion stays revocable
+
+let pendingDelete = null;        // {record, index, timer}
+
+function attachSwipeToDelete(item, layer, hint, data) {
+  let startX = 0, startY = 0, dx = 0, at = 0, dragging = false, decided = false;
+
+  const settle = (toX, fade) => {
+    layer.classList.add('settling');
+    layer.style.transform = `translateX(${toX}px)`;
+    layer.style.opacity = fade;
+    hint.style.opacity = '0';
+  };
+
+  layer.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    startX = e.clientX; startY = e.clientY;
+    dx = 0; at = Date.now(); dragging = true; decided = false;
+    layer.classList.remove('settling');
+  });
+
+  layer.addEventListener('pointermove', (e) => {
+    if (!dragging) return;
+    const mx = e.clientX - startX, my = e.clientY - startY;
+    // Until the direction is settled, a mostly-vertical move belongs to the
+    // page. Deciding once — rather than every frame — stops a diagonal drag
+    // from flickering between scrolling and swiping.
+    if (!decided) {
+      if (Math.abs(mx) < 8 && Math.abs(my) < 8) return;
+      if (Math.abs(my) > Math.abs(mx)) { dragging = false; return; }
+      decided = true;
+      layer.setPointerCapture(e.pointerId);
+    }
+    dx = mx;
+    layer.style.transform = `translateX(${dx}px)`;
+    layer.style.opacity = String(Math.max(0.35, 1 - Math.abs(dx) / 320));
+    hint.style.opacity = String(Math.min(1, Math.abs(dx) / SWIPE_COMMIT_PX));
+  });
+
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    const speed = Math.abs(dx) / Math.max(1, Date.now() - at);
+    if (Math.abs(dx) > SWIPE_COMMIT_PX || speed > SWIPE_FLICK_V) {
+      settle(Math.sign(dx) * (item.offsetWidth + 60), '0');
+      setTimeout(() => queueDelete(data), 180);
+    } else {
+      settle(0, '1');
+    }
+  };
+  layer.addEventListener('pointerup', end);
+  layer.addEventListener('pointercancel', end);
+}
+
+/** Take the card out of the strip and start the clock on its deletion. */
+function queueDelete(data) {
+  commitPendingDelete();               // only one can be in flight
+  const dropped = gallery.forget(data.filename);
+  if (!dropped) return;
+  pendingDelete = {
+    ...dropped,
+    timer: setTimeout(commitPendingDelete, UNDO_GRACE_MS),
+  };
+  $('undo-text').textContent = dropped.record.id
+    ? 'Bild gelöscht' : 'Aus der Liste entfernt';
+  $('undo-bar').classList.add('show');
+}
+
+/** Actually delete — the grace period ran out, or another swipe replaced it. */
+async function commitPendingDelete() {
+  const p = pendingDelete;
+  if (!p) return;
+  pendingDelete = null;
+  clearTimeout(p.timer);
+  $('undo-bar').classList.remove('show');
+  // No id means this result predates the strip storing one, so there is
+  // nothing addressable to delete; removing the card is the whole action.
+  if (!p.record.id) return;
+  try {
+    await apiFetch(`/api/images/${p.record.id}`, { method: 'DELETE' });
+  } catch (e) {
+    ArtRium.toast('Löschen fehlgeschlagen — das Bild ist noch in der Galerie.', true);
+  }
+}
+
+function undoDelete() {
+  const p = pendingDelete;
+  if (!p) return;
+  pendingDelete = null;
+  clearTimeout(p.timer);
+  $('undo-bar').classList.remove('show');
+  // Back where it was: the strip is in generation order and a restored picture
+  // reappearing at the end would be its own small bug.
+  const at = Math.max(0, Math.min(p.index, state.generatedImages.length));
+  state.generatedImages.splice(at, 0, p.record);
+  storage.saveImages();
+  gallery.render();
+  updateShareButton();
+}
+
+// A deletion still inside its grace period would otherwise be lost on
+// navigation — the card is already gone from the strip, so silently keeping
+// the picture would contradict what the user was just shown.
+//
+// `keepalive` is what lets the request outlive the page. `sendBeacon` is the
+// reflex here and it is wrong: it can only POST, so the DELETE would quietly
+// become a 405 and the picture would survive while the card stayed gone.
+window.addEventListener('pagehide', () => {
+  const p = pendingDelete;
+  if (!p || !p.record.id) return;
+  pendingDelete = null;
+  clearTimeout(p.timer);
+  try {
+    fetch(`/api/images/${p.record.id}`, {
+      method: 'DELETE', headers: getAuthHeaders(), keepalive: true,
+    });
+  } catch { /* leaving anyway */ }
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PROGRESS MANAGEMENT
@@ -1400,6 +1605,7 @@ const setMode = (mode) => {
   // The latent carries the source's size — there is nothing left to choose.
   $(DOM_IDS.sizeField).classList.toggle('hidden', mode === 'variant');
   updateNegativePromptVisibility();
+  updateAdvSummary();
 
   if (mode === 'variant') {
     renderSourceCard();
@@ -1579,21 +1785,34 @@ const onPromptInput = () => {
   }
 };
 
-const toggleAdv = () => {
-  toggleClass(DOM_IDS.advPanel, 'show');
-  toggleClass(DOM_IDS.advToggle, 'open');
+// The fold's summary line: what a generation would run with, readable while
+// the fold is closed. Size is left out in variant mode, where the source
+// picture decides it.
+const updateAdvSummary = () => {
+  const el = $('adv-summary');
+  if (!el) return;
+  const parts = [];
+  if (state.mode !== 'variant') parts.push(`${state.imgWidth}×${state.imgHeight}`);
+  parts.push(`${state.batchCount}×`);
+  const seed = parseInt($(DOM_IDS.seed)?.value ?? '-1');
+  if (seed >= 0) parts.push(`seed ${seed}`);
+  const n = state.activeLoras.size;
+  if (n) parts.push(n === 1 ? '1 LoRA' : `${n} LoRAs`);
+  el.textContent = parts.join(' · ');
 };
 
 const setSize = (w, h, btn) => {
   state.imgWidth = w;
   state.imgHeight = h;
   selectButton('.size-btn', btn);
+  updateAdvSummary();
 };
 
 const setBatch = (n, btn) => {
   state.batchCount = n;
   selectButton('.batch-btn', btn);
   if (state.mode === 'variant') updateGenButton();
+  updateAdvSummary();
 };
 
 // LoRA registry — populated by buildLoraList() from GET /api/loras
@@ -1633,6 +1852,7 @@ const toggleLora = (filename, i) => {
   else state.activeLoras.add(filename);
 
   $(`lora-item-${i}`).classList.toggle('active', state.activeLoras.has(filename));
+  updateAdvSummary();
 
   if (isPromptMode()) {
     const promptEl = $(DOM_IDS.prompt);
@@ -1752,6 +1972,7 @@ const buildLoraList = async () => {
 
     item.append(toggle, strengthRow);
     row.appendChild(item);
+    updateAdvSummary();
   });
 };
 

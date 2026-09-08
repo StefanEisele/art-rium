@@ -794,7 +794,7 @@
 <div class="app">
 
   <header>
-    <button class="back-btn" onclick="history.back()">‹</button>
+    <a class="back-btn" href="/" title="Dashboard">‹</a>
     <h1>Instagram Scheduler</h1>
     <div class="dot" id="dot" style="opacity:0"></div>
   </header>
@@ -882,7 +882,15 @@
       <div class="computed-date" id="computed-date-line">—</div>
 
       <!-- Companion scheduling. Stories + Reel can both ride along on a feed
-           post; the Pi outpost handles them once Cloud-Schedule is enabled. -->
+           post; the Pi outpost handles them once Cloud-Schedule is enabled.
+           Folded: most posts ship without companions, and the summary line
+           says what is set without opening it. -->
+      <details class="fold">
+        <summary>
+          <span class="fold-title">Story &amp; Reel</span>
+          <span class="fold-value" id="companion-summary">Story off · Reel off</span>
+        </summary>
+        <div class="fold-body">
       <div class="companion-delay-section">
         <div class="companion-delay-row">
           <span class="companion-delay-label">Story</span>
@@ -919,6 +927,8 @@
           <button class="sel-video-btn" onclick="openVideoPicker('new')">📹 Select video</button>
         </div>
       </div>
+        </div>
+      </details>
 
       <!-- Meta's own AI self-disclosure, sent as is_ai_generated on the
            container. Defaults from INSTAGRAM_AI_LABEL_DEFAULT. -->
@@ -1043,7 +1053,13 @@
     </div>
 
     <!-- Companion delay selectors (only for scheduled posts) -->
-    <div class="companion-delay-section" id="detail-companion-section" style="display:none">
+    <details class="fold" id="detail-companion-section" style="display:none">
+      <summary>
+        <span class="fold-title">Story &amp; Reel</span>
+        <span class="fold-value" id="detail-companion-summary"></span>
+      </summary>
+      <div class="fold-body">
+    <div class="companion-delay-section">
       <div class="companion-delay-row">
         <span class="companion-delay-label">Story</span>
         <div class="delay-chips" id="detail-story-chips">
@@ -1079,6 +1095,8 @@
         <button class="sel-video-btn" onclick="openVideoPicker('detail')">📹 Select video</button>
       </div>
     </div>
+      </div>
+    </details>
 
     <div class="detail-actions">
       <button class="detail-btn save" onclick="saveDetail()">Save</button>
@@ -1431,6 +1449,7 @@ function setMode(m) {
   } else {
     reelVidRow.style.display = state.reelDelay !== null ? '' : 'none';
   }
+  _updateCompanionSummary('');
 
   // Reel-only posts must use the Pi outpost — force the cloud-schedule toggle on.
   if (m === 'reel') {
@@ -2085,6 +2104,29 @@ function _syncChips(chipsId, value) {
   });
 }
 
+// The companion fold's one-line state, read off the chips themselves so it
+// can never disagree with them. A row hidden by the mode (reel-only posts
+// have no reel companion) is left out rather than reported as "off".
+function _updateCompanionSummary(prefix) {
+  const el = $(`${prefix}companion-summary`);
+  if (!el) return;
+  const parts = [];
+  let anyOn = false;
+  for (const [kind, label] of [['story', 'Story'], ['reel', 'Reel']]) {
+    const chips = $(`${prefix}${kind}-chips`);
+    if (!chips) continue;
+    const row = chips.closest('.companion-delay-row');
+    if (row && row.style.display === 'none') continue;
+    const on = chips.querySelector('.delay-chip.active');
+    const txt = on ? on.textContent.trim() : 'Off';
+    if (txt !== 'Off') anyOn = true;
+    parts.push(`${label} ${txt === 'Off' ? 'off' : txt}`);
+  }
+  const time = $(prefix ? 'detail-companion-time' : 'companion-time-input');
+  if (anyOn && time && time.value) parts.push(`at ${time.value}`);
+  el.textContent = parts.join(' · ');
+}
+
 function setNewPostDelay(type, value) {
   const parsed = value === 'off' ? null : parseInt(value, 10);
   if (type === 'reel') {
@@ -2098,6 +2140,7 @@ function setNewPostDelay(type, value) {
     _syncChips('story-chips', parsed);
     _updateReelNudge();   // story-without-cloud has the same caveat as reel
   }
+  _updateCompanionSummary('');
 }
 
 function setDetailDelay(type, value) {
@@ -2111,6 +2154,7 @@ function setDetailDelay(type, value) {
     state.detailStoryDelay = parsed;
     _syncChips('detail-story-chips', parsed);
   }
+  _updateCompanionSummary('detail-');
 }
 
 // ── Video picker ──────────────────────────────────────────────────────────────
@@ -2349,6 +2393,7 @@ async function schedulePost() {
     _syncChips('reel-chips', null);
     _syncChips('story-chips', null);
     $('companion-time-input').value = '18:23';
+    _updateCompanionSummary('');
     $('reel-video-row').style.display = 'none';
     if ($('cloud-dispatch-toggle')) $('cloud-dispatch-toggle').checked = false;
     _updateReelNudge();
@@ -2570,6 +2615,7 @@ function openDetail(post) {
   _syncChips('detail-reel-chips',  state.detailReelDelay);
   _syncChips('detail-story-chips', state.detailStoryDelay);
   $('detail-companion-time').value = state.detailCompanionTime;
+  _updateCompanionSummary('detail-');
   // Reel video selection
   state.detailReelVideoId = post.reel_video_id || null;
   state.detailReelVideo   = state.detailReelVideoId
@@ -2854,7 +2900,7 @@ $('detail-collab').addEventListener('input', () => syncCollabChips('detail-colla
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 $('offset-days').addEventListener('input', updateComputedDate);
-$('companion-time-input').addEventListener('change', (e) => { state.companionTime = e.target.value || '18:23'; });
+$('companion-time-input').addEventListener('change', (e) => { state.companionTime = e.target.value || '18:23'; _updateCompanionSummary(''); });
 $('detail-companion-time').addEventListener('change', (e) => { state.detailCompanionTime = e.target.value || '18:23'; });
 
 function _updateDetailDateLabel() {

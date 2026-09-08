@@ -13,10 +13,9 @@
     /* ── Form panel ── */
     #form-section { padding: 16px; border-bottom: 1px solid var(--border); }
 
-    /* Mode chips */
-    .mode-chips { display: flex; gap: 6px; flex-wrap: wrap; }
-    .mode-chip { font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all 0.13s; }
-    .mode-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+    /* Option chips (mode, resolution, steps, motion, RIFE) are the shared
+       .chip-btn; the chosen one is .on. Nothing page-specific left to style. */
+    #mode-chips { display: flex; }
 
     /* Images strip */
     .images-strip { display: flex; gap: 8px; align-items: center; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; min-height: 72px; }
@@ -59,11 +58,6 @@
       #story-section .field-input { width: 68px; }
     }
 
-    /* Resolution chips */
-    .res-chips { display: flex; gap: 6px; flex-wrap: wrap; }
-    .res-chip { font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 6px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); cursor: pointer; font-family: inherit; transition: all 0.13s; }
-    .res-chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-
     /* Per-image section (i2v_multi) */
     .per-img-section { display: flex; flex-direction: column; gap: 10px; }
     .per-img-row { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
@@ -94,7 +88,7 @@
     .per-transition-frames-row { display: flex; align-items: center; gap: 10px; }
 
     /* Story frames panel (flf2v only) */
-    .story-box { background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+    .story-box { display: flex; flex-direction: column; gap: 10px; }   /* the fold is the box */
     .story-head { display: flex; align-items: center; gap: 10px; }
     .story-head .field-label { flex: 1; min-width: 0; }
     .story-hint { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
@@ -113,18 +107,16 @@
     /* ── Video list ── */
     #videos-section { padding: 16px; }
     .section-label { letter-spacing: 0.8px; margin-bottom: 12px; }
+    /* One how-to line for the whole library, instead of one under every stack. */
+    .library-hint { font-size: 12px; color: var(--text-dim); margin: -6px 0 12px; line-height: 1.4; }
     .video-empty { text-align: center; padding: 32px 0; color: var(--text-dim); font-size: 14px; }
 
     .video-card { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 10px; }
     .video-header { display: flex; justify-content: space-between; align-items: center; }
     .video-meta { font-size: 12px; color: var(--text-dim); display: flex; gap: 8px; flex-wrap: wrap; }
     .video-meta strong { color: var(--text); font-weight: 600; }
-    /* Collapsible prompt — kept folded so long per-clip prompts don't bloat the card */
-    .prompt-collapse { margin-top: 2px; }
-    .prompt-toggle { background: none; border: none; padding: 2px 0; color: var(--text-dim); font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; display: flex; align-items: center; gap: 5px; }
-    .prompt-toggle .caret { transition: transform 0.15s; display: inline-block; }
-    .prompt-toggle.open .caret { transform: rotate(90deg); }
-    .prompt-buckets { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+    /* Prompt buckets sit inside a quiet fold on the card (see _promptFold) */
+    .prompt-buckets { display: flex; flex-direction: column; gap: 6px; }
     .prompt-bucket { display: flex; align-items: flex-start; gap: 8px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; }
     .prompt-bucket .bucket-num { flex-shrink: 0; font-size: 10px; font-weight: 700; color: var(--text-dim); background: var(--bg); border-radius: 5px; padding: 2px 6px; margin-top: 1px; }
     .prompt-bucket .bucket-text { flex: 1; min-width: 0; font-size: 12px; color: var(--text); line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
@@ -358,7 +350,7 @@
        specific. Rendered in production order: upscale first, grain on top. */
     .post-chip {
       display: flex; flex-direction: column; gap: 8px;
-      padding: 8px 10px; margin-top: 8px;
+      padding: 8px 10px;
       background: var(--surface2); border: 1.5px solid var(--border);
       border-radius: 8px; font-size: 13px;
     }
@@ -376,17 +368,45 @@
     .grain-preview { margin-top: 2px; }
     .grain-preview video { width: 100%; border-radius: 6px; display: block; background: #000; }
     .grain-preview .hint { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
-    /* Badges stack in a column rather than offsetting each other with sibling
-       selectors — with three of them that would need a rule per combination. */
-    .badge-stack {
-      position: absolute; top: 8px; left: 8px;
-      display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
-      pointer-events: none;
+    /* ── Look dials ──
+       Seven of them is too many to leave open on a phone, so the chip shows
+       the presets and opens the sliders on request. The label column is fixed
+       so the handles line up into one axis rather than a ragged stack. */
+    .look-dials { display: none; flex-direction: column; gap: 5px; margin-top: 2px; }
+    .look-dials.open { display: flex; }
+    .look-dial { display: flex; align-items: center; gap: 8px; }
+    .look-dial .label { flex: 0 0 88px; font-size: 11px; color: var(--text-dim); }
+    .look-dial input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); height: 22px; }
+    .look-dial .value { flex: 0 0 32px; text-align: right; font-size: 11px;
+                        font-variant-numeric: tabular-nums; color: var(--text-dim); }
+    .look-dial.active .label, .look-dial.active .value { color: var(--text); }
+    .look-summary { font-size: 11px; color: var(--text-dim); }
+    /* ── Post-pass bar ──
+       One row of three buttons, one per derived rendition (soundtrack,
+       upscale/retime, look). Each names the state of its pass — the song's
+       title, "1080p 2×", the dials in use — and opens that pass's controls
+       underneath, one at a time. Three expanded blocks per card used to be
+       most of what a library page was made of. */
+    .pass-bar { display: flex; gap: 6px; }
+    .pass-btn {
+      flex: 1 1 0; min-width: 0;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 8px 10px; border-radius: var(--radius-sm);
+      background: var(--surface2); border: 1.5px solid var(--border);
+      color: var(--text-dim); font-size: 12px; font-weight: 700;
+      cursor: pointer; font-family: inherit;
+      -webkit-tap-highlight-color: transparent;
+      transition: border-color 0.12s, background 0.12s, color 0.12s;
     }
-    .badge-stack > div {
-      background: rgba(0,0,0,0.62); color: #fff;
-      border-radius: 4px; padding: 1px 7px; font-size: 12px;
-    }
+    .pass-btn .glyph { font-size: 14px; flex-shrink: 0; }
+    .pass-btn .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pass-btn:hover { border-color: var(--accent-border); color: var(--text); }
+    /* .set = the pass has been applied: the glyph lights up, the text is the result. */
+    .pass-btn.set { color: var(--text); border-color: var(--border-strong); }
+    .pass-btn.set .glyph { color: var(--accent); }
+    .pass-btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+    .pass-btn.working .glyph { animation: step-pulse 1.4s ease-in-out infinite; }
+    .card-folds { display: flex; flex-direction: column; margin-top: -4px; }
 
     /* ── Song picker modal (vertical list, audio previews) ── */
     /* Above #cut-modal (102), not below it: the picker is an overlay on
@@ -418,10 +438,21 @@
        it, and nothing is rendered until the timeline looks right. The timeline
        is the point — a list of timings is not something anyone can judge. */
     #cut-modal { display: none; position: fixed; inset: 0; z-index: 102; background: var(--bg); flex-direction: column; padding-top: env(safe-area-inset-top); }
+    /* Loop seams on the layer timeline. Every one of them is a moment where
+       the picture jumps back to the loop's first frame — invisible if the
+       render really loops, and the first place to look if it does not. */
+    .wrap-mark { position: absolute; top: 0; bottom: 0; width: 1px;
+                 background: var(--text-dim); opacity: .55; pointer-events: none; }
+    body.layer-mode .beat-only { display: none; }
+    body:not(.layer-mode) .layer-only { display: none; }
     #cut-modal.show { display: flex; }
     #cut-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px 20px; display: flex; flex-direction: column; gap: 14px; }
     .cut-card { background: var(--surface); border: 1.5px solid var(--border); border-radius: 10px; padding: 12px; }
     .cut-card > h3 { margin: 0 0 9px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; color: var(--text-dim); }
+    /* The secondary settings are folds on the same surface as the cards; the
+       summary line names the chosen option, so they open only to change it. */
+    #cut-body .fold { background: var(--surface); }
+    #cut-body .fold > .fold-body { gap: 0; padding-top: 0; }
     .cut-chips { display: flex; flex-wrap: wrap; gap: 6px; }
     .cut-chips button {
       padding: 6px 12px; border-radius: 999px; cursor: pointer; font-family: inherit;
@@ -477,8 +508,8 @@
 <body>
 <div class="app">
   <header>
-    <button class="back-btn" onclick="history.back()">‹</button>
-    <h1>Video Generator</h1>
+    <a class="back-btn" href="/" title="Dashboard">‹</a>
+    <h1>Video</h1>
   </header>
 
   <main>
@@ -490,11 +521,11 @@
         <!-- Mode selector -->
         <div class="field-row">
           <span class="field-label">Mode</span>
-          <div class="mode-chips" id="mode-chips">
-            <button class="mode-chip active" data-mode="i2v_multi" onclick="setMode('i2v_multi',this)">Animate (i2v)</button>
-            <button class="mode-chip" data-mode="minimax_i2v" onclick="setMode('minimax_i2v',this)">MiniMax H3 (i2v)</button>
-            <button class="mode-chip" data-mode="flf2v" onclick="setMode('flf2v',this)">Transitions (Wan)</button>
-            <button class="mode-chip" data-mode="minimax_flf" onclick="setMode('minimax_flf',this)">Transitions (MiniMax H3)</button>
+          <div class="chip-group" id="mode-chips">
+            <button class="chip-btn on" data-mode="i2v_multi" onclick="setMode('i2v_multi',this)">Animate (i2v)</button>
+            <button class="chip-btn" data-mode="minimax_i2v" onclick="setMode('minimax_i2v',this)">MiniMax H3 (i2v)</button>
+            <button class="chip-btn" data-mode="flf2v" onclick="setMode('flf2v',this)">Transitions (Wan)</button>
+            <button class="chip-btn" data-mode="minimax_flf" onclick="setMode('minimax_flf',this)">Transitions (MiniMax H3)</button>
           </div>
         </div>
 
@@ -506,19 +537,25 @@
           <div style="font-size:12px;color:var(--text-dim);margin-top:6px" id="img-hint"></div>
         </div>
 
-        <!-- Story frames (flf2v only) -->
+        <!-- Story frames (transition modes only). Folded: it is one way of
+             getting key frames, not a step every transition job takes. -->
         <div id="story-section" style="display:none">
+          <details class="fold">
+            <summary>
+              <span class="fold-title">📖 Story frames</span>
+              <span class="fold-value">1 source image → N key frames</span>
+            </summary>
+            <div class="fold-body">
           <div class="story-box">
-            <div class="story-head">
-              <span class="field-label">📖 Story frames</span>
-              <button type="button" class="paste-btn" onclick="pasteInto(this)">📋 Paste</button>
-            </div>
             <div class="story-hint">
-              Pick exactly <strong>1 source image</strong> above, describe a short story, and
-              N follow-up key frames are generated from it — each one "Beat" seconds of
-              story time apart (like film cuts), kept consistent with the source image's
-              subject and style. They are inserted into the strip and transition prompts
-              are suggested automatically.
+              Pick exactly <strong>1 source image</strong> above and describe a short story.
+              N follow-up key frames are generated from it, one "Beat" seconds of story time
+              apart, consistent with the source's subject and style. They land in the strip
+              and the transition prompts are suggested automatically.
+            </div>
+            <div class="story-head">
+              <span class="field-label">Story</span>
+              <button type="button" class="paste-btn" onclick="pasteInto(this)">📋 Paste</button>
             </div>
             <textarea id="story-text" class="per-transition-prompt" rows="3"
                       placeholder="Short story to unfold across the frames…"></textarea>
@@ -554,32 +591,32 @@
               <div class="story-thumbs" id="story-thumbs"></div>
             </div>
           </div>
+            </div>
+          </details>
         </div>
+
+        <!-- The prompts come right after the pictures they belong to; the
+             sampler settings below them are a fold. -->
+        <!-- Per-image section (i2v_multi only) -->
+        <div id="per-img-section" class="per-img-section" style="display:none"></div>
+
+        <!-- Per-transition section (flf2v only) -->
+        <div id="per-transition-section" class="per-transition-section" style="display:none"></div>
+
+        <!-- Settings. Folded by default: the summary line carries every value
+             a run would use, so the ordinary run never has to open it. -->
+        <details class="fold" id="settings-fold">
+          <summary>
+            <span class="fold-title">Settings</span>
+            <span class="fold-value" id="settings-summary"></span>
+          </summary>
+          <div class="fold-body">
 
         <!-- Resolution (chips are re-rendered per-mode by renderResChips(), since MiniMax H3
              renders on its own fixed canvas — a 768px short edge — rather than Wan2.2's sizes) -->
         <div class="field-row">
           <span class="field-label">Resolution</span>
-          <div class="res-chips" id="res-chips"></div>
-        </div>
-
-        <!-- FPS is not a choice in any current mode, and pretending it was is
-             what made every Wan clip play at half speed. MiniMax's audio latent
-             is tied to 24; Wan animates at 16 and RIFE multiplies the frames,
-             so the clip has to be written at 16 x RIFE or the extra frames
-             stretch it instead of smoothing it. The select is kept, disabled,
-             so the rate the file will actually carry is visible. -->
-        <div class="field-row">
-          <span class="field-label">FPS</span>
-          <select class="field-select" id="fps-select" disabled>
-            <option value="16">16</option>
-            <option value="24" selected>24</option>
-            <option value="30">30</option>
-            <option value="32">32</option>
-            <option value="48">48</option>
-            <option value="64">64</option>
-          </select>
-          <span id="fps-note" style="font-size:11px;color:var(--text-dim)"></span>
+          <div class="chip-group" id="res-chips"></div>
         </div>
 
         <!-- Wan sampler controls (i2v_multi + flf2v only; MiniMax H3 runs its own
@@ -588,14 +625,14 @@
              renderStepsChips() for what each one costs. -->
         <div class="field-row" id="wan-steps-row">
           <span class="field-label">Steps</span>
-          <div class="res-chips" id="steps-chips"></div>
+          <div class="chip-group" id="steps-chips"></div>
           <span id="split-note" style="font-size:11px;color:var(--text-dim)"></span>
         </div>
 
         <div class="field-row" id="wan-motion-row"
              title="Strength of the 4-step distill LoRA on the high-noise expert. It plans the motion, and at full strength it plans almost none.">
           <span class="field-label">Motion</span>
-          <div class="res-chips" id="motion-chips"></div>
+          <div class="chip-group" id="motion-chips"></div>
           <span id="motion-note" style="font-size:11px;color:var(--text-dim)"></span>
         </div>
 
@@ -623,17 +660,21 @@
              minimax_i2v additionally offers a "1× (off)" default: RIFE stretches real-time
              duration (more frames at the same fps), which for minimax_i2v also requires
              stretching its native audio to match, so it opts in rather than defaulting on. -->
+        <!-- FPS is not a choice in any mode: MiniMax's audio latent is tied
+             to 24, Wan animates at 16 and RIFE multiplies the frames, so the
+             file is written at 16 x RIFE or the extra frames stretch the clip
+             instead of smoothing it. The note says what the file will carry. -->
         <div class="field-row" id="rife-row">
           <span class="field-label">RIFE ×</span>
-          <div class="res-chips" id="rife-chips"></div>
-          <span style="font-size:11px;color:var(--text-dim)">frame interpolation</span>
+          <div class="chip-group" id="rife-chips"></div>
+          <span id="fps-note" style="font-size:11px;color:var(--text-dim)"></span>
         </div>
 
         <!-- Pingpong (i2v_multi only) -->
         <div class="field-row" id="pingpong-row">
           <span class="field-label">Loop</span>
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-dim);">
-            <input type="checkbox" id="pingpong-toggle" onchange="state.pingpong = this.checked" style="width:16px;height:16px;accent-color:var(--accent);">
+            <input type="checkbox" id="pingpong-toggle" onchange="state.pingpong = this.checked; updateSettingsSummary()" style="width:16px;height:16px;accent-color:var(--accent);">
             Pingpong (boomerang)
           </label>
         </div>
@@ -642,16 +683,13 @@
         <div class="field-row" id="endkf-row" style="display:none">
           <span class="field-label">Ending</span>
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:var(--text-dim);">
-            <input type="checkbox" id="endkf-toggle" onchange="state.endOnKeyframe = this.checked" style="width:16px;height:16px;accent-color:var(--accent);">
+            <input type="checkbox" id="endkf-toggle" onchange="state.endOnKeyframe = this.checked; updateSettingsSummary()" style="width:16px;height:16px;accent-color:var(--accent);">
             End exactly on key frame (appends the raw photo — can read as a cut)
           </label>
         </div>
 
-        <!-- Per-image section (i2v_multi only) -->
-        <div id="per-img-section" class="per-img-section" style="display:none"></div>
-
-        <!-- Per-transition section (flf2v only) -->
-        <div id="per-transition-section" class="per-transition-section" style="display:none"></div>
+          </div>
+        </details>
 
         <button class="gen-btn" id="gen-btn" onclick="generate()" disabled>Generate Video</button>
       </div>
@@ -660,6 +698,7 @@
     <!-- Video list -->
     <div id="videos-section">
       <div class="section-label">Generated Videos</div>
+      <div class="library-hint">Tap a clip's thumbnail to play it, tap its row to add it to a merge. ⤢ upscales a single clip.</div>
       <div id="videos-list">
         <div class="video-empty">No videos yet.</div>
       </div>
@@ -710,6 +749,16 @@
     <h2>Rhythmusschnitt</h2>
   </div>
   <div id="cut-body">
+    <!-- Two ways to read one beat map. The Rhythmusschnitt deals shots from a
+         bag; the Schichtenschnitt stacks renders of ONE control video and
+         cross-fades between them at a shared source position, so the form
+         holds while the material changes. -->
+    <div class="cut-card">
+      <h3>Modus</h3>
+      <div class="cut-chips" id="cut-mode-row"></div>
+      <div class="cut-hint" id="cut-mode-hint"></div>
+    </div>
+
     <div class="cut-card">
       <h3>Song</h3>
       <div class="cut-song">
@@ -728,15 +777,91 @@
     <!-- Colour. The clips come from different models and sit next to each other
          with different black levels and different casts; this closes the gap
          without closing it all the way. -->
-    <div class="cut-card">
-      <h3>Angleichen</h3>
-      <div class="cut-chips" id="cut-harmony-row"></div>
-      <div class="cut-hint" id="cut-harmony-hint"></div>
-      <div class="cut-hint" id="cut-harmony-report"></div>
-    </div>
+    <details class="fold">
+      <summary><span class="fold-title">Angleichen</span><span class="fold-value" id="cut-harmony-val"></span></summary>
+      <div class="fold-body">
+        <div class="cut-chips" id="cut-harmony-row"></div>
+        <div class="cut-hint" id="cut-harmony-hint"></div>
+        <div class="cut-hint" id="cut-harmony-report"></div>
+      </div>
+    </details>
 
-    <div class="cut-card">
-      <h3>Feinheiten</h3>
+    <!-- Bewegung: how a retimed shot is put back on the frame grid. Shared by
+         both modes, because both retime — the beat cut in slow motion, the
+         layer cut over the whole stack. -->
+    <details class="fold">
+      <summary><span class="fold-title">Bewegung</span><span class="fold-value" id="cut-motion-val"></span></summary>
+      <div class="fold-body">
+        <div class="cut-chips" id="cut-motion-row"></div>
+        <div class="cut-hint" id="cut-motion-hint"></div>
+      </div>
+    </details>
+
+    <details class="fold layer-only">
+      <summary><span class="fold-title">Übergang</span><span class="fold-value" id="cut-trans-val"></span></summary>
+      <div class="fold-body">
+        <div class="cut-chips" id="cut-trans-row"></div>
+        <div class="cut-hint" id="cut-trans-hint"></div>
+      </div>
+    </details>
+
+    <details class="fold layer-only">
+      <summary><span class="fold-title">Tempo</span><span class="fold-value" id="cut-tempo-val"></span></summary>
+      <div class="fold-body">
+      <label class="cut-dial">
+        <span>In leisen Takten</span>
+        <input type="range" id="cut-speed-low" min="35" max="250" step="5" value="70"
+               oninput="onLayerDial()">
+        <span class="val" id="cut-speed-low-val">0.70×</span>
+      </label>
+      <label class="cut-dial">
+        <span>In lauten Takten</span>
+        <input type="range" id="cut-speed-high" min="35" max="250" step="5" value="160"
+               oninput="onLayerDial()">
+        <span class="val" id="cut-speed-high-val">1.60×</span>
+      </label>
+      <label class="cut-dial">
+        <span>Ab Takt</span>
+        <input type="range" id="cut-layer-startbar" min="0" max="0" step="1" value="0"
+               oninput="onLayerDial()">
+        <span class="val" id="cut-layer-startbar-val">1</span>
+      </label>
+      <label class="cut-dial">
+        <span>Schwelle</span>
+        <input type="range" id="cut-swell" min="0" max="100" step="5" value="100"
+               oninput="onLayerDial()">
+        <span class="val" id="cut-swell-val">100%</span>
+      </label>
+      <label class="cut-dial">
+        <span>Puls am Wechsel</span>
+        <input type="range" id="cut-pulse" min="0" max="75" step="5" value="35"
+               oninput="onLayerDial()">
+        <span class="val" id="cut-pulse-val">35%</span>
+      </label>
+      <div class="cut-hint">
+        Der ganze Stapel wird gemeinsam umgetaktet, nie eine Spur allein — nur so
+        zeigen alle Spuren zum selben Zeitpunkt dieselbe Form. Das Tempo läuft
+        dabei als weiche Kurve, nie als Stufe: <b>Schwelle</b> ist die lange
+        Welle, die der Lautstärke folgt, <b>Puls</b> das kurze Abbremsen in
+        einen Materialwechsel hinein und das Durchschieben danach. Beide auf 0
+        heißt ein einziges konstantes Tempo.
+      </div>
+      <label class="cut-dial" style="margin-top:10px">
+        <span>Ton der Spuren</span>
+        <input type="checkbox" id="cut-layer-bed" style="width:16px;height:16px;accent-color:var(--accent);flex:0 0 auto">
+        <span class="cut-hint" style="flex:1;margin:0">leise unter dem Song mitlaufen lassen</span>
+      </label>
+      <label class="cut-dial" style="margin-top:6px">
+        <span>Aus Schwarz einblenden</span>
+        <input type="checkbox" id="cut-layer-fadein" style="width:16px;height:16px;accent-color:var(--accent);flex:0 0 auto">
+        <span class="cut-hint" style="flex:1;margin:0">sonst beginnt das Video sofort mit dem ersten Bild</span>
+      </label>
+      </div>
+    </details>
+
+    <details class="fold beat-only">
+      <summary><span class="fold-title">Feinheiten</span><span class="fold-value" id="cut-fine-val"></span></summary>
+      <div class="fold-body">
       <label class="cut-dial">
         <span>Zeitlupe bis</span>
         <input type="range" id="cut-stretch" min="100" max="400" step="10" value="200" oninput="onCutDial()">
@@ -761,7 +886,13 @@
         <input type="checkbox" id="cut-bed" style="width:16px;height:16px;accent-color:var(--accent);flex:0 0 auto">
         <span class="cut-hint" style="flex:1;margin:0">leise unter dem Song mitlaufen lassen</span>
       </label>
-    </div>
+      <label class="cut-dial" style="margin-top:6px">
+        <span>Aus Schwarz einblenden</span>
+        <input type="checkbox" id="cut-fadein" style="width:16px;height:16px;accent-color:var(--accent);flex:0 0 auto">
+        <span class="cut-hint" style="flex:1;margin:0">sonst beginnt das Video sofort mit dem ersten Bild</span>
+      </label>
+      </div>
+    </details>
 
     <div class="cut-card">
       <h3>Vorschau</h3>
@@ -843,7 +974,8 @@ const state = {
   // both kinds, so a finished video can be spliced between two clips.
   mergeSelection: new Map(),
   clipUpscaleRes:  1080,         // shared by the per-clip button and the bulk action
-  clipUpscaleRife: 1,
+  clipUpscaleRife: 1,            // null = derive the factor from clipUpscaleFps
+  clipUpscaleFps:  null,         // null = keep the source's rate (slow motion when interpolating)
   clipUpscaling:   new Set(),    // clip ids queued locally, until the poller sees them finish
   deleteAfterMerge: false,       // remove the sources once the merge succeeds
   songPickerForCut: false,       // the song picker is serving the beat-cut planner
@@ -917,8 +1049,8 @@ function frameBounds() {
 function setMode(mode, el) {
   const prevMode = state.mode;
   state.mode = mode;
-  document.querySelectorAll('.mode-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
+  document.querySelectorAll('#mode-chips .chip-btn').forEach(c => c.classList.remove('on'));
+  el.classList.add('on');
   const maxN = maxImagesForMode();
   if (state.selectedImages.length > maxN) {
     state.selectedImages = state.selectedImages.slice(0, maxN);
@@ -971,12 +1103,32 @@ function _updateModeFields() {
 const WAN_NATIVE_FPS = 16;
 const wanOutputFps = () => WAN_NATIVE_FPS * Math.max(1, Math.min(4, state.rifeMultiplier || 1));
 
+const outputFps = () => isMinimax() ? 24 : wanOutputFps();
+
 function renderFpsRow() {
-  const fps = isMinimax() ? 24 : wanOutputFps();
-  $('fps-select').value = String(fps);
   $('fps-note').textContent = isMinimax()
-    ? 'fixed by MiniMax H3'
-    : `${WAN_NATIVE_FPS} fps native x ${state.rifeMultiplier} RIFE`;
+    ? '→ 24 fps, fixed by MiniMax H3'
+    : `→ ${wanOutputFps()} fps (${WAN_NATIVE_FPS} native × ${state.rifeMultiplier})`;
+  updateSettingsSummary();
+}
+
+// The settings fold's summary line: every value a run would use, in the order
+// the rows inside have them, so the fold can stay closed for the ordinary run.
+function updateSettingsSummary() {
+  const el = $('settings-summary');
+  if (!el) return;
+  const parts = [`${state.width}×${state.height}`];
+  parts.push(state.rifeMultiplier > 1
+    ? `RIFE ${state.rifeMultiplier}× → ${outputFps()} fps`
+    : `${outputFps()} fps`);
+  if (isWanMode()) {
+    parts.push(`${state.wanSteps} steps`, `motion ${motionLabel(state.wanLoraHigh)}`);
+    const lora = wanLoras.find(l => l.file === state.styleLora);
+    if (lora) parts.push(lora.label);
+  }
+  if (state.mode === 'i2v_multi' && state.pingpong) parts.push('pingpong');
+  if (state.mode === 'flf2v' && state.endOnKeyframe) parts.push('ends on key frame');
+  el.textContent = parts.join(' · ');
 }
 
 // ── Resolution ────────────────────────────────────────────────────────────────
@@ -1015,19 +1167,20 @@ function renderResChips() {
   const stillValid = presets.some(([w, h]) => w === state.width && h === state.height);
   if (!stillValid) { state.width = presets[0][0]; state.height = presets[0][1]; }
   $('res-chips').innerHTML = presets.map(([w, h, label]) => {
-    const active = (w === state.width && h === state.height) ? ' active' : '';
-    return `<button class="res-chip${active}" onclick="setRes(${w},${h},this)">${label}</button>`;
+    const on = (w === state.width && h === state.height) ? ' on' : '';
+    return `<button class="chip-btn${on}" onclick="setRes(${w},${h},this)">${label}</button>`;
   }).join('');
 }
 
 function setRes(w, h, el) {
   state.width = w; state.height = h;
-  document.querySelectorAll('#res-chips .res-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
+  document.querySelectorAll('#res-chips .chip-btn').forEach(c => c.classList.remove('on'));
+  el.classList.add('on');
   // MiniMax's frame ceiling is a VRAM budget shared with the frame size, so a
   // resolution change moves it — re-render so the spinners follow.
   if (isMinimax()) renderPerImageSection();
   updateSplitNote();   // a bigger canvas is a longer render
+  updateSettingsSummary();
 }
 
 // ── RIFE ──────────────────────────────────────────────────────────────────────
@@ -1042,16 +1195,16 @@ function renderRifeChips() {
   renderFpsRow();
   $('rife-chips').innerHTML = mults.map(m => {
     const label = m === 1 ? '1× (off)' : `${m}×`;
-    const active = m === state.rifeMultiplier ? ' active' : '';
-    return `<button class="res-chip${active}" onclick="setRife(${m},this)">${label}</button>`;
+    const on = m === state.rifeMultiplier ? ' on' : '';
+    return `<button class="chip-btn${on}" onclick="setRife(${m},this)">${label}</button>`;
   }).join('');
 }
 
 function setRife(mult, el) {
   state.rifeMultiplier = mult;
-  document.querySelectorAll('#rife-chips .res-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
-  // The Wan container rate is 16 x this, so the FPS row moves with the chip.
+  document.querySelectorAll('#rife-chips .chip-btn').forEach(c => c.classList.remove('on'));
+  el.classList.add('on');
+  // The Wan container rate is 16 x this, so the FPS note moves with the chip.
   renderFpsRow();
 }
 
@@ -1091,17 +1244,18 @@ const isWanMode = () => state.mode === 'i2v_multi' || state.mode === 'flf2v';
 
 function renderStepsChips() {
   $('steps-chips').innerHTML = WAN_STEP_OPTIONS.map(s => {
-    const active = s === state.wanSteps ? ' active' : '';
-    return `<button class="res-chip${active}" onclick="setWanSteps(${s},this)">${s}</button>`;
+    const on = s === state.wanSteps ? ' on' : '';
+    return `<button class="chip-btn${on}" onclick="setWanSteps(${s},this)">${s}</button>`;
   }).join('');
   updateSplitNote();
 }
 
 function setWanSteps(steps, el) {
   state.wanSteps = steps;
-  document.querySelectorAll('#steps-chips .res-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
+  document.querySelectorAll('#steps-chips .chip-btn').forEach(c => c.classList.remove('on'));
+  el.classList.add('on');
   updateSplitNote();
+  updateSettingsSummary();
 }
 
 // Fallbacks for the same coefficients estimate_wan_seconds() uses in
@@ -1139,14 +1293,14 @@ function onStyleLoraChange() {
     $('style-lora-strength').value = String(entry.strength);
   }
   const note = $('style-lora-note');
-  if (!entry) { note.textContent = ''; return; }
   // The trigger goes into the prompt server-side (with_lora_trigger); saying so
   // is what stops someone typing it a second time.
-  note.textContent = [
+  note.textContent = !entry ? '' : [
     entry.note,
     entry.trigger ? `Trigger “${entry.trigger}” is put in front of the prompt automatically.`
                   : 'No trigger phrase on record for this one.',
   ].filter(Boolean).join(' ');
+  updateSettingsSummary();
 }
 
 async function loadWanLoras() {
@@ -1217,17 +1371,18 @@ function updateSplitNote() {
 
 function renderMotionChips() {
   $('motion-chips').innerHTML = WAN_MOTION_OPTIONS.map(([v, label]) => {
-    const active = v === state.wanLoraHigh ? ' active' : '';
-    return `<button class="res-chip${active}" onclick="setWanMotion(${v},this)">${label}</button>`;
+    const on = v === state.wanLoraHigh ? ' on' : '';
+    return `<button class="chip-btn${on}" onclick="setWanMotion(${v},this)">${label}</button>`;
   }).join('');
   updateMotionNote();
 }
 
 function setWanMotion(strength, el) {
   state.wanLoraHigh = strength;
-  document.querySelectorAll('#motion-chips .res-chip').forEach(c => c.classList.remove('active'));
-  el.classList.add('active');
+  document.querySelectorAll('#motion-chips .chip-btn').forEach(c => c.classList.remove('on'));
+  el.classList.add('on');
   updateMotionNote();
+  updateSettingsSummary();
 }
 
 function updateMotionNote() {
@@ -1265,15 +1420,15 @@ function renderStrip() {
   if (isPerImageMode()) {
     const maxLabel = maxImagesForMode();
     $('img-hint').textContent = n === 0
-      ? `Select 1–${maxLabel} images. Each becomes its own clip in the library — merge any clips (across jobs) into a video afterwards.`
-      : `${n} image${n === 1 ? '' : 's'} — ${n} independent clip${n === 1 ? '' : 's'} land in the library; merge freely afterwards.`;
+      ? `Select 1–${maxLabel} images — each becomes its own clip in the library.`
+      : `${n} image${n === 1 ? '' : 's'} → ${n} clip${n === 1 ? '' : 's'} in the library, to merge afterwards.`;
     $('gen-btn').disabled = n < 1;
   } else {
     const maxLabel = maxImagesForMode();
     $('img-hint').textContent = n === 0
-      ? `Select 2–${maxLabel} key frames. Each adjacent pair becomes its own transition clip in the library — merge freely afterwards.`
+      ? `Select 2–${maxLabel} key frames — each adjacent pair becomes a transition clip.`
       : n < 2 ? `${n} selected — add at least one more.`
-      : `${n} key frames · ${n-1} transition clip${n > 2 ? 's' : ''} — land in the library; merge freely afterwards.`;
+      : `${n} key frames → ${n-1} transition clip${n > 2 ? 's' : ''} in the library, to merge afterwards.`;
     $('gen-btn').disabled = n < 2;
   }
   renderPerImageSection();
@@ -2074,8 +2229,12 @@ function renderClipStack(videoId, opts = {}) {
   const rows = clips.map(c => {
     const order = state.mergeSelection.get(clipKey(c.id));
     const busy = c.upscale_rendering || state.clipUpscaling.has(c.id);
+    // `upscale_resolution` 0 means the pass kept the size — it ran for its
+    // timing alone, so the badge names that instead of a resolution.
     const up = c.has_upscale
-      ? ` · ⤢ ${c.upscale_resolution}p${c.upscale_rife > 1 ? ` ${c.upscale_rife}×` : ''} → ${c.out_width}×${c.out_height}`
+      ? ` · ⤢ ${c.upscale_resolution ? c.upscale_resolution + 'p' : 'retimed'}`
+        + `${c.upscale_rife > 1 ? ` ${c.upscale_rife}×` : ''}`
+        + `${c.upscale_fps ? ` ${c.upscale_fps}fps` : ''} → ${c.out_width}×${c.out_height}`
       : '';
     // What the Wan sampler was told. Null on MiniMax clips and on anything
     // rendered before these were settings — say nothing rather than imply a
@@ -2120,7 +2279,7 @@ function renderClipStack(videoId, opts = {}) {
   const total = opts.expected || clips.length;
   const hint = opts.running
     ? `${clips.length}${opts.expected ? ' of ' + opts.expected : ''} clip${total === 1 ? '' : 's'} ready — playable now, the rest are still rendering.`
-    : `${clips.length} clip${clips.length === 1 ? '' : 's'} — tap a thumbnail to preview, tap a row to add it to the merge selection. ⤢ upscales a single clip.`;
+    : `${clips.length} clip${clips.length === 1 ? '' : 's'}`;
   host.innerHTML = `
     <div class="seg-hint">${hint}</div>
     ${rows}
@@ -2252,10 +2411,19 @@ const CUT_COLORS = [
 ];
 
 const cutState = {
+  mode: 'beat',         // 'beat' = Rhythmusschnitt | 'layer' = Schichtenschnitt
   options: null,        // GET /api/cut/styles
+  layerOptions: null,   // GET /api/cut/layer/styles
   song: null,           // the chosen song row
   style: null,
+  layerStyle: null,
+  transition: null,
+  speedLow: 0.7,
+  speedHigh: 1.6,
+  swell: 1.0,
+  pulse: 0.35,
   harmony: null,
+  motion: null,
   seed: null,
   startBar: 0,
   stretch: 2.0,
@@ -2285,43 +2453,164 @@ function closeCutModal() {
   if (cutState.rafId) { cancelAnimationFrame(cutState.rafId); cutState.rafId = null; }
 }
 
+const CUT_MODES = [
+  ['beat', 'Rhythmus',
+   'Schneidet die Auswahl zum Beat: eine Einstellung nach der anderen, harte Schnitte, '
+   + 'lange Einstellungen in Zeitlupe gefüllt.'],
+  ['layer', 'Schichten',
+   'Legt die Auswahl übereinander statt hintereinander. Alle Spuren zeigen zum selben '
+   + 'Zeitpunkt dieselbe Form — die Überblendung tauscht nur das Material. Für Renders '
+   + 'aus EINEM Controlvideo, die loopen.'],
+];
+
 async function initCutModal() {
   if (!cutState.options) {
     try {
-      cutState.options = await (await api('/api/cut/styles')).json();
-      cutState.style = cutState.options.default_style;
-      cutState.harmony = cutState.options.default_harmony;
-      $('cut-stretch').max = Math.round(cutState.options.max_stretch_ceiling * 100);
-      $('cut-antic').max = Math.round(cutState.options.anticipation_max * 1000);
-      cutState.stretch = cutState.options.max_stretch_default;
+      const [beat, layer] = await Promise.all([
+        (await api('/api/cut/styles')).json(),
+        (await api('/api/cut/layer/styles')).json(),
+      ]);
+      cutState.options = beat;
+      cutState.layerOptions = layer;
+      cutState.style = beat.default_style;
+      cutState.harmony = beat.default_harmony;
+      cutState.motion = beat.default_motion;
+      cutState.layerStyle = layer.default_style;
+      cutState.transition = layer.default_transition;
+      cutState.swell = layer.speed.swell_default;
+      cutState.pulse = layer.speed.pulse_default;
+      cutState.speedLow = layer.speed.low_default;
+      cutState.speedHigh = layer.speed.high_default;
+      $('cut-speed-low').value = Math.round(cutState.speedLow * 100);
+      $('cut-speed-high').value = Math.round(cutState.speedHigh * 100);
+      $('cut-stretch').max = Math.round(beat.max_stretch_ceiling * 100);
+      $('cut-antic').max = Math.round(beat.anticipation_max * 1000);
+      cutState.stretch = beat.max_stretch_default;
       $('cut-stretch').value = Math.round(cutState.stretch * 100);
     } catch (e) {
       ArtRium.toast('Schnittarten konnten nicht geladen werden.', true);
       return;
     }
   }
+  renderCutModes();
   renderCutStyles();
+  renderCutTransitions();
   renderCutHarmonies();
+  renderCutMotions();
   onCutDial();
+  onLayerDial();
   // No song yet on the first open — the picker is the natural next step, and
   // opening it saves the user a tap they were always going to make.
   if (!cutState.song) openCutSongPicker();
   else refreshCutPlan();
 }
 
+const _isLayer = () => cutState.mode === 'layer';
+
+function renderCutModes() {
+  const row = $('cut-mode-row');
+  row.innerHTML = '';
+  for (const [key, label, hint] of CUT_MODES) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.className = cutState.mode === key ? 'active' : '';
+    b.onclick = () => {
+      if (cutState.mode === key) return;
+      cutState.mode = key;
+      // The two planners roll their own seeds off different tables, so a seed
+      // carried across modes would look like a bug rather than a repeat.
+      cutState.seed = null;
+      cutState.plan = null;
+      document.body.classList.toggle('layer-mode', _isLayer());
+      $('cut-modal').querySelector('h2').textContent =
+        _isLayer() ? 'Schichtenschnitt' : 'Rhythmusschnitt';
+      renderCutModes();
+      renderCutStyles();
+      refreshCutPlan();
+    };
+    row.appendChild(b);
+  }
+  const active = CUT_MODES.find(m => m[0] === cutState.mode);
+  $('cut-mode-hint').textContent = active ? active[2] : '';
+  document.body.classList.toggle('layer-mode', _isLayer());
+}
+
+function renderCutTransitions() {
+  const row = $('cut-trans-row');
+  if (!row || !cutState.layerOptions) return;
+  row.innerHTML = '';
+  for (const t of cutState.layerOptions.transitions) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = t.label;
+    b.className = cutState.transition === t.key ? 'active' : '';
+    b.onclick = () => {
+      cutState.transition = t.key; renderCutTransitions(); refreshCutPlan();
+    };
+    row.appendChild(b);
+  }
+  const active = cutState.layerOptions.transitions.find(t => t.key === cutState.transition);
+  $('cut-trans-hint').textContent = active ? active.hint : '';
+  $('cut-trans-val').textContent = active ? active.label : '';
+}
+
+function onLayerDial() {
+  if (!$('cut-speed-low')) return;
+  cutState.speedLow = parseInt($('cut-speed-low').value, 10) / 100;
+  cutState.speedHigh = parseInt($('cut-speed-high').value, 10) / 100;
+  cutState.swell = parseInt($('cut-swell').value, 10) / 100;
+  cutState.pulse = parseInt($('cut-pulse').value, 10) / 100;
+  cutState.startBar = parseInt($('cut-layer-startbar').value, 10) || 0;
+  $('cut-speed-low-val').textContent = cutState.speedLow.toFixed(2) + '×';
+  $('cut-speed-high-val').textContent = cutState.speedHigh.toFixed(2) + '×';
+  $('cut-swell-val').textContent = Math.round(cutState.swell * 100) + '%';
+  $('cut-pulse-val').textContent = Math.round(cutState.pulse * 100) + '%';
+  $('cut-layer-startbar-val').textContent = (cutState.startBar + 1);
+  $('cut-tempo-val').textContent =
+    `${cutState.speedLow.toFixed(2)}× – ${cutState.speedHigh.toFixed(2)}× · ` +
+    `Schwelle ${Math.round(cutState.swell * 100)}% · Puls ${Math.round(cutState.pulse * 100)}%`;
+  if (_isLayer()) scheduleCutPlan();
+}
+
 function renderCutStyles() {
   const row = $('cut-style-row');
   row.innerHTML = '';
-  for (const st of cutState.options.styles) {
+  const styles = _isLayer() ? cutState.layerOptions.styles : cutState.options.styles;
+  const current = () => _isLayer() ? cutState.layerStyle : cutState.style;
+  for (const st of styles) {
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = st.label;
-    b.className = cutState.style === st.key ? 'active' : '';
-    b.onclick = () => { cutState.style = st.key; renderCutStyles(); refreshCutPlan(); };
+    b.className = current() === st.key ? 'active' : '';
+    b.onclick = () => {
+      if (_isLayer()) cutState.layerStyle = st.key; else cutState.style = st.key;
+      renderCutStyles(); refreshCutPlan();
+    };
     row.appendChild(b);
   }
-  const active = cutState.options.styles.find(x => x.key === cutState.style);
+  const active = styles.find(x => x.key === current());
   $('cut-style-hint').textContent = active ? active.hint : '';
+}
+
+// Bewegung does not change the plan — the same slots at the same moments,
+// only resampled differently — so switching it does not re-plan. Every other
+// chip here does; this one deliberately does not.
+function renderCutMotions() {
+  const row = $('cut-motion-row');
+  if (!row || !cutState.options) return;
+  row.innerHTML = '';
+  for (const m of (cutState.options.motions || [])) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = m.label;
+    b.className = cutState.motion === m.key ? 'active' : '';
+    b.onclick = () => { cutState.motion = m.key; renderCutMotions(); };
+    row.appendChild(b);
+  }
+  const active = (cutState.options.motions || []).find(m => m.key === cutState.motion);
+  $('cut-motion-hint').textContent = active ? active.hint : '';
+  $('cut-motion-val').textContent = active ? active.label : '';
 }
 
 function renderCutHarmonies() {
@@ -2338,6 +2627,7 @@ function renderCutHarmonies() {
   }
   const active = (cutState.options.harmonies || []).find(h => h.key === cutState.harmony);
   $('cut-harmony-hint').textContent = active ? active.hint : '';
+  $('cut-harmony-val').textContent = active ? active.label : '';
 }
 
 // What the pass would actually do, per clip, before anything is rendered.
@@ -2370,6 +2660,8 @@ function onCutDial() {
   $('cut-stretch-val').textContent = cutState.stretch.toFixed(1) + '×';
   $('cut-antic-val').textContent = Math.round(cutState.anticipation * 1000) + ' ms';
   $('cut-startbar-val').textContent = (cutState.startBar + 1);
+  $('cut-fine-val').textContent =
+    `Zeitlupe ${cutState.stretch.toFixed(1)}× · Vorlauf ${Math.round(cutState.anticipation * 1000)} ms`;
   scheduleCutPlan();
 }
 
@@ -2414,12 +2706,31 @@ function scheduleCutPlan() {
   _cutPlanTimer = setTimeout(refreshCutPlan, 180);
 }
 
+function layerRequestBody() {
+  return {
+    song_id: cutState.song.id,
+    items: _mergeSelectionKeys().map(_splitMergeKey),
+    style: cutState.layerStyle,
+    transition: cutState.transition,
+    harmonize: cutState.harmony,
+    motion: cutState.motion,
+    seed: cutState.seed,
+    start_bar: cutState.startBar,
+    speed_low: cutState.speedLow,
+    speed_high: cutState.speedHigh,
+    swell: cutState.swell,
+    pulse: cutState.pulse,
+  };
+}
+
 function cutRequestBody() {
+  if (_isLayer()) return layerRequestBody();
   return {
     song_id: cutState.song.id,
     items: _mergeSelectionKeys().map(_splitMergeKey),
     style: cutState.style,
     harmonize: cutState.harmony,
+    motion: cutState.motion,
     seed: cutState.seed,
     start_bar: cutState.startBar,
     max_stretch: cutState.stretch,
@@ -2435,7 +2746,7 @@ async function refreshCutPlan() {
   cutState.planning = true;
   $('cut-go').disabled = true;
   try {
-    const r = await api('/api/cut/plan', {
+    const r = await api(_isLayer() ? '/api/cut/layer/plan' : '/api/cut/plan', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(cutRequestBody()),
@@ -2448,8 +2759,8 @@ async function refreshCutPlan() {
     cutState.seed = d.plan.seed;           // adopt the roll, so render repeats it
     renderHarmonyReport(d.harmonize);
     const maxBar = Math.max(0, d.beatmap.bar_count - 2);
-    if (parseInt($('cut-startbar').max, 10) !== maxBar) {
-      $('cut-startbar').max = maxBar;
+    for (const id of ['cut-startbar', 'cut-layer-startbar']) {
+      if (parseInt($(id).max, 10) !== maxBar) $(id).max = maxBar;
     }
     renderCutPreview();
     $('cut-go').disabled = false;
@@ -2465,6 +2776,7 @@ async function refreshCutPlan() {
 }
 
 function renderCutPreview() {
+  if (_isLayer()) return renderLayerPreview();
   const plan = cutState.plan, bm = cutState.beatmap;
   const span = Math.max(0.001, plan.song_end - plan.song_start);
 
@@ -2513,6 +2825,68 @@ function renderCutPreview() {
   $('cut-warn').innerHTML = (plan.warnings || []).map(_esc).join('<br>');
 }
 
+function renderLayerPreview() {
+  const plan = cutState.plan, bm = cutState.beatmap;
+  const span = Math.max(0.001, plan.song_end - plan.song_start);
+  const col = i => CUT_COLORS[i % CUT_COLORS.length];
+
+  // A hold is its track's colour; a transition is a gradient between the two,
+  // drawn in the direction it actually runs. Speed is opacity, as in the beat
+  // cut — paler is slower, and the eye reads that without being told.
+  $('cut-shots').innerHTML = plan.slots.map(sl => {
+    const left = ((sl.start - plan.song_start) / span * 100).toFixed(3);
+    const width = Math.max(0.15, (sl.end - sl.start) / span * 100).toFixed(3);
+    const blend = sl.from_track !== null && sl.from_track !== sl.track;
+    const bg = blend
+      ? `linear-gradient(90deg, ${col(sl.from_track)}, ${col(sl.track)})`
+      : col(sl.track);
+    const alpha = (0.45 + 0.55 * Math.min(1, sl.speed / 1.6)).toFixed(2);
+    const title = blend
+      ? `${sl.blend} · Spur ${sl.from_track + 1}→${sl.track + 1} · ${Math.round(sl.speed * 100)}%`
+      : `Spur ${sl.track + 1} · ${Math.round(sl.speed * 100)}%`;
+    return `<div class="shot${sl.section ? ' sect' : ''}" style="left:${left}%;width:${width}%;` +
+           `background:${bg};opacity:${alpha}" title="${_esc(title)}"></div>`;
+  }).join('') +
+  // Loop seams on top of the shots, not under them.
+  (plan.wraps || []).map(w => {
+    const at = ((w - plan.song_start) / span * 100);
+    if (at < 0 || at > 100) return '';
+    return `<div class="wrap-mark" style="left:${at.toFixed(3)}%" title="Loop beginnt von vorn"></div>`;
+  }).join('');
+
+  const times = bm.bar_times || [];
+  $('cut-energy').innerHTML = (bm.bar_energy || []).map((e, i) => {
+    const from = times[i], to = i + 1 < times.length ? times[i + 1] : plan.song_end;
+    if (from === undefined || to <= plan.song_start || from >= plan.song_end) return '';
+    const a = Math.max(from, plan.song_start), b = Math.min(to, plan.song_end);
+    const left = ((a - plan.song_start) / span * 100).toFixed(3);
+    const width = Math.max(0.2, (b - a) / span * 100 - 0.15).toFixed(3);
+    const fill = bm.sections.includes(i) ? 'var(--accent)' : 'var(--border)';
+    return `<div style="position:absolute;bottom:0;left:${left}%;width:${width}%;` +
+           `height:${(10 + e * 90).toFixed(1)}%;background:${fill}"></div>`;
+  }).join('');
+
+  $('cut-legend').innerHTML = cutState.sources.map((src, i) =>
+    `<span><i style="background:${col(i)}"></i>${_esc(src.label)}</span>`
+  ).join('');
+
+  const blends = plan.slots.filter(sl => sl.from_track !== null && sl.from_track !== sl.track).length;
+  const out = cutState.output;
+  const pulse = bm.confidence >= 0.5 ? 'deutlicher Puls'
+              : bm.confidence >= 0.2 ? 'schwacher Puls'
+              : 'kein hörbarer Puls — das Raster ist ein Metronom';
+  $('cut-facts').innerHTML =
+    `<span><b>${blends}</b> Überblendung${blends === 1 ? '' : 'en'}</span>` +
+    `<span><b>${plan.tracks}</b> Spuren</span>` +
+    `<span><b>${bm.bpm.toFixed(1)}</b> BPM · ${pulse}</span>` +
+    `<span><b>${out.duration.toFixed(1)}</b> s</span>` +
+    // How far through the loop the piece walks, and how often it comes back
+    // around — the answer to "wird das repetitiv", which this mode invites.
+    `<span>Loop ${out.loop.toFixed(1)} s · <b>${out.loops_used.toFixed(1)}×</b> durchlaufen</span>` +
+    `<span>${out.width}×${out.height} · ${out.fps} fps</span>`;
+  $('cut-warn').innerHTML = (plan.warnings || []).map(_esc).join('<br>');
+}
+
 // Playhead: the preview is only worth anything while the song is playing under
 // it, so the position is driven off the audio element itself rather than a timer.
 function _cutTick() {
@@ -2531,16 +2905,20 @@ async function startCut() {
   const was = btn.textContent;
   btn.textContent = 'Wird eingereiht…';
   try {
+    const layer = _isLayer();
     const body = cutRequestBody();
-    body.include_bed = $('cut-bed').checked;
-    body.title = (cutState.song.title || 'Rhythmusschnitt');
-    const r = await api('/api/cut/render', {
+    body.include_bed = $(layer ? 'cut-layer-bed' : 'cut-bed').checked;
+    body.fade_in = $(layer ? 'cut-layer-fadein' : 'cut-fadein').checked;
+    body.title = (cutState.song.title || (layer ? 'Schichtenschnitt' : 'Rhythmusschnitt'));
+    const r = await api(layer ? '/api/cut/layer/render' : '/api/cut/render', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(body),
     });
     const d = await r.json();
-    ArtRium.toast(`Rhythmusschnitt läuft — ${d.cuts} Schnitte, ${d.duration.toFixed(1)} s`);
+    ArtRium.toast(layer
+      ? `Schichtenschnitt läuft — ${d.slots} Wechsel, ${d.transitions} Überblendungen, ${d.duration.toFixed(1)} s`
+      : `Rhythmusschnitt läuft — ${d.cuts} Schnitte, ${d.duration.toFixed(1)} s`);
     closeCutModal();
     state.mergeSelection = new Map();
     _refreshMergeSelectionUI();
@@ -2592,13 +2970,24 @@ function _clipById(clipId) {
 // they are the same pass; `targets` is just how many clips it will queue.
 const upscaleMenu = { targets: [], anchor: null, etaToken: 0 };
 
-const CLIP_UPSCALE_RESOLUTIONS = [720, 1080];
-const CLIP_UPSCALE_RIFE_OPTIONS = [1, 2, 3, 4];
+// Shared with the video card's chip below — declared here because this block
+// runs first, and a const is unusable before its own line executes.
+// 0 is "keep": leave the picture at the size it already is and run the pass
+// for its timing alone. null as a multiplier is "auto": derive it from the
+// target rate, so 24 fps out of a 16 fps clip picks 2x on its own.
+const UPSCALE_KEEP = 0;
+const _rifeLabel = m => m === null ? 'auto' : (m === 1 ? 'off' : m + '×');
+
+const CLIP_UPSCALE_RESOLUTIONS = [UPSCALE_KEEP, 720, 1080];
+const CLIP_UPSCALE_RIFE_OPTIONS = [1, null, 2, 3, 4];
+const CLIP_UPSCALE_FPS_OPTIONS = [null, 24, 30, 60];
 
 /** Clips that a run would actually do something to. */
 function _upscalableClipIds(ids) {
   return ids.filter(id => {
     const c = _clipById(id);
+    // Still keyed on has_upscale, retimes included: a clip that already carries
+    // a pass has to have it removed first, or a second run reads its own output.
     return c && !c.has_upscale && !c.upscale_rendering && !state.clipUpscaling.has(id);
   });
 }
@@ -2628,14 +3017,24 @@ function renderUpscaleMenu() {
   const n = upscaleMenu.targets.length;
   const resChips = CLIP_UPSCALE_RESOLUTIONS.map(res =>
     `<button class="chip-btn ${res === state.clipUpscaleRes ? 'on' : ''}" type="button"
-             onclick="pickClipUpscaleRes(${res})">${res}p</button>`
+             onclick="pickClipUpscaleRes(${res})">${
+      res === UPSCALE_KEEP ? 'keep' : res + 'p'}</button>`
   ).join('');
   const rifeChips = CLIP_UPSCALE_RIFE_OPTIONS.map(m =>
     `<button class="chip-btn ${m === state.clipUpscaleRife ? 'on' : ''}" type="button"
-             onclick="pickClipUpscaleRife(${m})">${m === 1 ? 'off' : m + '×'}</button>`
+             onclick="pickClipUpscaleRife(${m})">${_rifeLabel(m)}</button>`
   ).join('');
+  const fpsChips = CLIP_UPSCALE_FPS_OPTIONS.map(f =>
+    `<button class="chip-btn ${f === state.clipUpscaleFps ? 'on' : ''}" type="button"
+             onclick="pickClipUpscaleFps(${f === null ? 'null' : f})">${
+      f === null ? 'keep (slow-mo)' : f + ' fps'}</button>`
+  ).join('');
+  // "keep" resolution makes this a retime rather than an upscale, and the
+  // title says so — the same menu, doing markedly less work.
+  const retime = state.clipUpscaleRes === UPSCALE_KEEP;
+  const subject = n === 1 ? 'clip' : n + ' clips';
   $('upscale-menu').innerHTML = `
-    <div class="um-title">⤢ Upscale ${n === 1 ? 'clip' : n + ' clips'}</div>
+    <div class="um-title">⤢ ${retime ? 'Retime' : 'Upscale'} ${subject}</div>
     <div class="um-field">
       <span class="label">Resolution</span>
       <span class="chip-group">${resChips}</span>
@@ -2643,6 +3042,10 @@ function renderUpscaleMenu() {
     <div class="um-field">
       <span class="label">Interpolation</span>
       <span class="chip-group">${rifeChips}</span>
+    </div>
+    <div class="um-field">
+      <span class="label">Frame rate</span>
+      <span class="chip-group">${fpsChips}</span>
     </div>
     <div class="um-eta" id="um-eta"></div>
     <div class="um-actions">
@@ -2686,6 +3089,15 @@ function pickClipUpscaleRife(mult) {
   loadClipUpscaleEta();
 }
 
+function pickClipUpscaleFps(fps) {
+  state.clipUpscaleFps = fps;
+  // Same reasoning as the card's picker: reaching a rate by duplicating whole
+  // frames is worse than interpolating to it, so a rate turns interpolation on.
+  if (fps !== null && state.clipUpscaleRife === 1) state.clipUpscaleRife = null;
+  renderUpscaleMenu();
+  loadClipUpscaleEta();
+}
+
 /** Target size + wall-clock for the settings currently picked. */
 async function loadClipUpscaleEta() {
   const el = $('um-eta');
@@ -2694,37 +3106,51 @@ async function loadClipUpscaleEta() {
   const n = upscaleMenu.targets.length;
   const res = state.clipUpscaleRes;
   const rife = state.clipUpscaleRife;
+  const fps = state.clipUpscaleFps;
   const token = ++upscaleMenu.etaToken;
   el.textContent = 'Estimating…';
   try {
     const r = await api(
-      `/api/video/clips/${first}/upscale/estimate?resolution=${res}&rife_multiplier=${rife}`);
+      `/api/video/clips/${first}/upscale/estimate?resolution=${res}`
+      + (rife === null ? '' : `&rife_multiplier=${rife}`)   // omitted = derive from fps
+      + (fps ? `&fps=${fps}` : ''));
     const d = await r.json();
     if (token !== upscaleMenu.etaToken) return;   // settings changed meanwhile
     // The estimate is for one clip. With several selected the clips differ in
     // length, so the total is not n× this one — say what is known instead of
     // inventing a sum.
-    el.textContent = n === 1
-      ? `→ ${d.width}×${d.height} · ${fmtEta(d.seconds)}`
-      : `→ ${d.width}×${d.height} · ${fmtEta(d.seconds)} for the first, then one after another`;
+    const line = _etaText(d);
+    el.textContent = n === 1 ? line : `${line} for the first, then one after another`;
   } catch(e) {
     if (token !== upscaleMenu.etaToken) return;
-    // A courtesy, not a gate: the run stays available without it.
-    el.textContent = 'The GPU is busy for the whole render.';
+    // A courtesy, not a gate: the run stays available without it. A 422 here
+    // is the "nothing to do" case, which is worth naming rather than blaming
+    // the GPU for.
+    el.textContent = /nothing to do/i.test(e.message || '')
+      ? 'Nothing to do — pick a resolution, an interpolation factor or a frame rate'
+      : 'The GPU is busy for the whole render.';
   }
 }
 
 async function confirmUpscaleMenu() {
   const ids = upscaleMenu.targets.slice();
-  closeUpscaleMenu();
   const res = state.clipUpscaleRes;
   const rife = state.clipUpscaleRife;
+  const fps = state.clipUpscaleFps;
+  if (res === UPSCALE_KEEP && rife === 1 && fps === null) {
+    ArtRium.toast('Nothing to do — pick a resolution, an interpolation factor or a frame rate', true);
+    return;
+  }
+  closeUpscaleMenu();
   let queued = 0;
   for (const id of ids) {
-    if (await _queueClipUpscale(id, res, rife)) queued++;
+    if (await _queueClipUpscale(id, res, rife, fps)) queued++;
   }
   if (queued) {
-    ArtRium.toast(queued === 1 ? 'Upscaling…' : `Queued ${queued} clip upscales`);
+    const verb = res === UPSCALE_KEEP ? 'retime' : 'upscale';
+    ArtRium.toast(queued === 1
+      ? (res === UPSCALE_KEEP ? 'Retiming…' : 'Upscaling…')
+      : `Queued ${queued} clip ${verb}s`);
   }
   for (const jobId of state.clipsByJob.keys()) renderClipStack(jobId);
   renderMergeBar();
@@ -2752,12 +3178,12 @@ async function toggleClipUpscale(clipId, btnEl) {
   openUpscaleMenu(btnEl, [clipId]);
 }
 
-async function _queueClipUpscale(clipId, res, rife) {
+async function _queueClipUpscale(clipId, res, rife, fps) {
   try {
     await api(`/api/video/clips/${clipId}/upscale`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({resolution: res, rife_multiplier: rife}),
+      body: JSON.stringify({resolution: res, rife_multiplier: rife, fps: fps ?? null}),
     });
     state.clipUpscaling.add(clipId);
     return true;
@@ -2877,7 +3303,10 @@ function applyProgress(videoId, prog) {
 // ── Video list ────────────────────────────────────────────────────────────────
 async function loadVideos() {
   try {
-    const [r] = await Promise.all([api('/api/video'), loadClips()]);
+    // The look presets come along on the first load and are cached after
+    // that, so the chips can draw their names without a second round trip
+    // and without a flash of an empty preset row.
+    const [r] = await Promise.all([api('/api/video'), loadClips(), loadLookPresets()]);
     state.videos = await r.json();
     // A picked video can disappear (deleted elsewhere, or consumed by a merge
     // that deleted its sources) — and one that went back to rendering is no
@@ -2942,9 +3371,10 @@ function _videoMeta(v) {
 }
 
 // Per-clip prompts are joined with " | " for storage; split them back into
-// buckets so each can be copied on its own. Folded by default so a card with
-// six long prompts stays compact.
-function _promptCollapse(v) {
+// buckets so each can be copied on its own. A quiet fold, closed by default,
+// whose summary shows the first prompt — a card with six long prompts stays
+// one line tall.
+function _promptFold(v) {
   if (!v.prompt) return '';
   const perClip = ['i2v_multi', 'minimax_i2v', 'minimax_flf', 'ltx_i2v', 'flf2v'].includes(v.workflow);
   const buckets = perClip ? v.prompt.split(' | ').filter(Boolean) : [v.prompt];
@@ -2957,18 +3387,101 @@ function _promptCollapse(v) {
       <button class="copy-btn" type="button" onclick="copyBucket(this)" title="Copy">📋</button>
     </div>`).join('');
   return `
-    <div class="prompt-collapse">
-      <button class="prompt-toggle" type="button" onclick="togglePrompt(this)">
-        <span class="caret">▸</span> ${label}
-      </button>
-      <div class="prompt-buckets" style="display:none">${rows}</div>
-    </div>`;
+    <details class="fold quiet">
+      <summary><span class="fold-title">${label}</span><span class="fold-value">${_esc(buckets[0])}</span></summary>
+      <div class="fold-body"><div class="prompt-buckets">${rows}</div></div>
+    </details>`;
 }
 
-function togglePrompt(btn) {
-  btn.classList.toggle('open');
-  const buckets = btn.parentElement.querySelector('.prompt-buckets');
-  buckets.style.display = btn.classList.contains('open') ? 'flex' : 'none';
+// Notes are read rarely and written more rarely — the first line on the
+// summary, the editor behind it. Same save-on-blur as the title.
+function _notesFold(v) {
+  const notesVal = (v.notes || '').replace(/</g, '&lt;');
+  const preview = (v.notes || '').trim().split('\n')[0];
+  return `
+    <details class="fold quiet">
+      <summary><span class="fold-title">Notes</span><span class="fold-value">${_esc(preview)}</span></summary>
+      <div class="fold-body">
+        <textarea class="video-notes-input" id="notes-${v.id}" placeholder="Notes…" rows="3"
+                  oninput="markDirty('notes','${v.id}')"
+                  onblur="saveVideoField('notes','${v.id}')">${notesVal}</textarea>
+      </div>
+    </details>`;
+}
+
+function _cardFolds(v) {
+  const prompt = _promptFold(v);
+  const notes = v.status === 'done' ? _notesFold(v) : '';
+  if (!prompt && !notes) return '';
+  return `<div class="card-folds">${prompt}${notes}</div>`;
+}
+
+// ── Post-pass bar ─────────────────────────────────────────────────────────────
+// A finished video carries up to three derived renditions — soundtrack,
+// upscale/retime, look — and each used to sit fully expanded on every card.
+// Now one row of three buttons names the state of each pass, and the controls
+// for one of them at a time open underneath. state.passOpen remembers which.
+function _passArea(v) {
+  if (v.status !== 'done' || !v.filename) return '';
+  return `<div class="pass-area" id="pass-area-${v.id}">${_passAreaInner(v)}</div>`;
+}
+
+function _passLabels(v) {
+  const muxing = state.muxingVideos.has(v.id);
+  const song = state.songs.find(s => s.id === v.soundtrack_song_id);
+  const songLabel = muxing ? 'Muxing…'
+    : v.has_soundtrack
+      ? ((song && song.title) || 'Song') + (v.soundtrack_bed_volume ? ' + Clip-Ton' : '')
+      : 'Soundtrack';
+  const upWorking = !!(v.upscale_rendering || state.upscalingVideos.has(v.id));
+  // "keep" resolution is a retime, and the button says so instead of claiming
+  // an upscale that never happened.
+  const upLabel = upWorking
+    ? ((state.upscalingVideos.has(v.id) && _upscaleResolution(v.id) === UPSCALE_KEEP) ? 'Retiming…' : 'Upscaling…')
+    : v.has_upscale
+      ? (v.upscale_resolution ? `${v.upscale_resolution}p` : 'retimed')
+        + (v.upscale_rife > 1 ? ` ${v.upscale_rife}×` : '')
+        + (v.upscale_fps ? ` ${v.upscale_fps} fps` : '')
+      : 'Upscale';
+  const grading = state.grainingVideos.has(v.id);
+  const lookLabel = grading ? 'Grading…'
+    : v.has_grain ? _lookSummary({...EMPTY_LOOK, ...(v.look || {})}) : 'Look';
+  return [
+    {kind: 'song',    glyph: '♪', label: songLabel, set: !!v.has_soundtrack, working: muxing},
+    {kind: 'upscale', glyph: '⤢', label: upLabel,   set: !!v.has_upscale,    working: upWorking},
+    {kind: 'look',    glyph: '▒', label: lookLabel, set: !!v.has_grain,      working: grading},
+  ];
+}
+
+function _passAreaInner(v) {
+  const open = state.passOpen.get(v.id) || null;
+  const bar = _passLabels(v).map(p => `
+    <button class="pass-btn${open === p.kind ? ' on' : ''}${p.set ? ' set' : ''}${p.working ? ' working' : ''}"
+            type="button" title="${_esc(p.label)}" onclick="togglePass('${v.id}', '${p.kind}')">
+      <span class="glyph">${p.glyph}</span><span class="txt">${_esc(p.label)}</span>
+    </button>`).join('');
+  const panels = {song: _soundtrackBlock, upscale: _upscaleBlock, look: _lookBlock};
+  const panel = open && panels[open] ? `<div class="pass-panel">${panels[open](v)}</div>` : '';
+  return `<div class="pass-bar">${bar}</div>${panel}`;
+}
+
+function togglePass(id, kind) {
+  const v = state.videos.find(x => x.id === id);
+  // Nothing attached yet: the only control the song panel would offer is the
+  // picker, so open that directly instead of a panel with one button in it.
+  if (kind === 'song' && v && !v.has_soundtrack && !state.muxingVideos.has(id)) {
+    openSongPicker(id);
+    return;
+  }
+  state.passOpen.set(id, state.passOpen.get(id) === kind ? null : kind);
+  _redrawPassArea(id);
+}
+
+/** Swap the pass area alone — a card re-render would stop the player. */
+function _redrawPassArea(id) {
+  const v = state.videos.find(x => x.id === id);
+  const area = document.getElementById(`pass-area-${id}`);
+  if (v && area) area.innerHTML = _passAreaInner(v);
 }
 
 async function copyBucket(btn) {
@@ -3032,17 +3545,11 @@ function makeVideoCard(v) {
   } else if (v.status === 'done' && v.url) {
     const videoUrl = withAuth(v.url);
     const thumbUrl = v.thumb_url ? withAuth(v.thumb_url) : null;
-    const badges = [
-      v.has_soundtrack ? '<div>♪</div>' : '',
-      v.has_upscale ? `<div>⤢ ${v.upscale_resolution}p${v.upscale_rife > 1 ? ` ${v.upscale_rife}×` : ''}</div>` : '',
-      v.has_grain ? `<div>▒ ${v.grain_strength}</div>` : '',
-    ].join('');
-    const stBadge = badges ? `<div class="badge-stack">${badges}</div>` : '';
+    // No state badges on the picture: the pass bar under it names each pass.
     if (thumbUrl) {
       body = `
         <div class="video-preview-wrap" id="wrap-${v.id}">
           <img class="video-thumb" src="${thumbUrl}" alt="">
-          ${stBadge}
           <div class="thumb-play-overlay" onclick="revealVideo('${v.id}','${videoUrl}')">
             <div class="play-icon">▶</div>
           </div>
@@ -3082,7 +3589,8 @@ function makeVideoCard(v) {
     : `<button class="action-btn delete" onclick="deleteVideo('${v.id}')">Delete</button>`;
 
   const titleVal = (v.title || '').replace(/"/g, '&quot;');
-  const notesVal = (v.notes || '').replace(/</g, '&lt;');
+  // The title is the card's identity and stays in view; the notes editor is a
+  // fold further down (_notesFold). One save indicator serves both.
   const editor = v.status === 'done' ? `
     <div class="video-meta-edit">
       <input type="text" class="video-title-input"
@@ -3090,14 +3598,11 @@ function makeVideoCard(v) {
              maxlength="255" value="${titleVal}"
              oninput="markDirty('title','${v.id}')"
              onblur="saveVideoField('title','${v.id}')">
-      <textarea class="video-notes-input"
-                id="notes-${v.id}" placeholder="Notes…"
-                rows="2"
-                oninput="markDirty('notes','${v.id}')"
-                onblur="saveVideoField('notes','${v.id}')">${notesVal}</textarea>
       <div class="save-indicator" id="save-ind-${v.id}"></div>
     </div>` : '';
 
+  // Reading order: what it is, the picture, what has been done to it, the
+  // details behind folds, and the actions last.
   card.innerHTML = `
     <div class="video-header">
       <span style="font-size:13px;color:var(--text-dim)">${date}</span>
@@ -3105,11 +3610,9 @@ function makeVideoCard(v) {
     </div>
     ${editor}
     <div class="video-meta"><strong>${meta}</strong></div>
-    ${_promptCollapse(v)}
-    ${_soundtrackBlock(v)}
-    ${_upscaleBlock(v)}
-    ${_grainBlock(v)}
     ${body}
+    ${_passArea(v)}
+    ${_cardFolds(v)}
     <div class="video-actions">${actions}</div>
   `;
   return card;
@@ -3158,21 +3661,33 @@ function _soundtrackBlock(v) {
 // stops multiplying the expensive stage. Measured, 124 frames at 1080p — 3x
 // costs the upscale nothing extra and RIFE itself 50 s, against ~32 extra
 // minutes when the interpolated frames go through SEEDVR2 instead.
+//
+// All three dials are independent. "keep" resolution runs the pass for its
+// timing alone — no restoration, so seconds instead of minutes — which is how
+// a clip gets interpolated or retimed without also being bought a resolution
+// it did not need.
 
-const UPSCALE_RESOLUTIONS = [720, 1080];
+// UPSCALE_KEEP and _rifeLabel are declared with the clip menu above, which
+// runs first and needs them at load time.
+const UPSCALE_RESOLUTIONS = [UPSCALE_KEEP, 720, 1080];
 const UPSCALE_DEFAULT = 1080;
-const UPSCALE_RIFE_OPTIONS = [1, 2, 3, 4];
+// null is "auto": derive the factor from the target rate, so asking for 24 fps
+// out of a 16 fps clip picks 2x without anyone dividing anything.
+const UPSCALE_RIFE_OPTIONS = [1, null, 2, 3, 4];
 
 function _upscaleResolution(id) {
   // A chip the user has already picked wins over the persisted value, so a
-  // card re-render doesn't snap the selection back.
+  // card re-render doesn't snap the selection back. `??` rather than `||`:
+  // 0 is a real choice here, not a missing one.
   if (state.upscaleDraft.has(id)) return state.upscaleDraft.get(id);
   const v = state.videos.find(x => x.id === id);
-  return (v && v.upscale_resolution) || UPSCALE_DEFAULT;
+  return (v && v.upscale_resolution != null) ? v.upscale_resolution : UPSCALE_DEFAULT;
 }
 
 function _upscaleFps(id) {
-  return state.upscaleFpsDraft.has(id) ? state.upscaleFpsDraft.get(id) : null;
+  if (state.upscaleFpsDraft.has(id)) return state.upscaleFpsDraft.get(id);
+  const v = state.videos.find(x => x.id === id);
+  return (v && v.upscale_fps) || null;
 }
 
 function _upscaleRife(id) {
@@ -3195,8 +3710,15 @@ function _upscaleBlock(v) {
     // The detail line is filled in by pollUpscale from /progress — SEEDVR2
     // runs for many minutes, and "Upscaling…" alone says nothing about where
     // in that it currently is.
+    // "minutes" is true of a restoration and wrong about a retime. The draft
+    // still holds what was submitted in this session; after a reload the row
+    // does not say, so the old wording stands.
+    const label = (state.upscalingVideos.has(v.id)
+                   && _upscaleResolution(v.id) === UPSCALE_KEEP)
+      ? 'Retiming…'
+      : 'Upscaling… (minutes)';
     return `<div class="post-chip working">
-      <div class="row"><span class="glyph">⤢</span><span class="label">Upscaling… (minutes)</span></div>
+      <div class="row"><span class="glyph">⤢</span><span class="label">${label}</span></div>
       <div class="progress-detail" id="up-detail-${v.id}"></div>
     </div>`;
   }
@@ -3206,40 +3728,42 @@ function _upscaleBlock(v) {
   const eta = state.upscaleEta.get(_etaKey(v.id, r, rife, fps));
   const chips = UPSCALE_RESOLUTIONS.map(res =>
     `<button class="chip-btn ${res === r ? 'on' : ''}"
-             onclick="pickUpscaleResolution('${v.id}', ${res})">${res}p</button>`
+             onclick="pickUpscaleResolution('${v.id}', ${res})">${
+      res === UPSCALE_KEEP ? 'keep' : res + 'p'}</button>`
   ).join('');
-  // Interpolation time-stretches whatever audio is present, which re-syncs a
-  // model's own generated track but would wreck an attached song — so the row
-  // states the reason instead of offering a control that 409s.
-  const rifeRow = v.has_soundtrack
-    ? `<div class="row"><span class="label">Interpolation</span>
-         <span class="hint">unavailable while a song is attached</span></div>`
-    : `<div class="row wrap">
+  const rifeRow = `<div class="row wrap">
          <span class="label">Interpolation</span>
          <span class="chip-group">${UPSCALE_RIFE_OPTIONS.map(m =>
            `<button class="chip-btn ${m === rife ? 'on' : ''}"
-                    onclick="pickUpscaleRife('${v.id}', ${m})">${m === 1 ? 'off' : m + '×'}</button>`
+                    onclick="pickUpscaleRife('${v.id}', ${m})">${_rifeLabel(m)}</button>`
          ).join('')}</span>
        </div>`;
-  // Only meaningful once frames are being interpolated: at 1x there is
-  // nothing to raise the rate for, and offering it there would invite a
-  // retime nobody asked for.
-  const fpsRow = (rife > 1 && !v.has_soundtrack)
-    ? `<div class="row wrap">
+  // Interpolation with no target rate time-stretches whatever audio is
+  // present. That re-syncs a model's own generated track and wrecks an
+  // attached song, so with a song the "keep" rate is withheld rather than
+  // offered as a control that 409s — picking a rate holds the length, and the
+  // song survives.
+  const fpsOptions = v.has_soundtrack
+    ? UPSCALE_FPS_OPTIONS.filter(f => f !== null)
+    : UPSCALE_FPS_OPTIONS;
+  const fpsRow = `<div class="row wrap">
          <span class="label">Frame rate</span>
-         <span class="chip-group">${UPSCALE_FPS_OPTIONS.map(f =>
+         <span class="chip-group">${fpsOptions.map(f =>
            `<button class="chip-btn ${f === fps ? 'on' : ''}"
                     onclick="pickUpscaleFps('${v.id}', ${f === null ? 'null' : f})">${
              f === null ? 'keep (slow-mo)' : f + ' fps'}</button>`
          ).join('')}</span>
-       </div>`
+       </div>`;
+  const songNote = (v.has_soundtrack && rife !== 1)
+    ? `<div class="row"><span class="hint">A song is attached — pick a frame
+         rate so the clip keeps its length.</span></div>`
     : '';
   // One labelled row per choice, in the same order and wording as the clip
   // menu — the two are the same pass, so they should not read as two features.
   return `<div class="post-chip" id="upscale-chip-${v.id}">
     <div class="row">
       <span class="glyph">⤢</span>
-      <span class="label">Upscale</span>
+      <span class="label">Upscale &amp; retime</span>
       <span class="hint" id="upscale-eta-${v.id}">${eta ? _etaText(eta) : ''}</span>
     </div>
     <div class="row wrap">
@@ -3248,6 +3772,7 @@ function _upscaleBlock(v) {
     </div>
     ${rifeRow}
     ${fpsRow}
+    ${songNote}
     <div class="row">
       <button class="chip-btn apply" onclick="applyUpscale('${v.id}')">${v.has_upscale ? 'Re-run' : 'Run'}</button>
       ${v.has_upscale ? `<button class="chip-btn remove" onclick="removeUpscale('${v.id}')">Remove</button>` : ''}
@@ -3260,6 +3785,9 @@ function _etaKey(id, res, rife, fps) {
 }
 
 function _etaText(eta) {
+  // With no restoration the size is not news — it is the size it already was —
+  // so the line leads with what the pass actually changes instead.
+  const size = eta.restore ? `→ ${eta.width}×${eta.height}` : `→ ${eta.width}×${eta.height} kept`;
   const rife = eta.rife_multiplier > 1 ? ` · ${eta.rife_multiplier}× frames` : '';
   // Say what the rate choice actually does. Without a target the clip gets
   // longer; with one the duration holds, and an unreachable target is met by
@@ -3268,11 +3796,11 @@ function _etaText(eta) {
   let rate = '';
   if (eta.target_fps) {
     rate = ` · ${eta.target_fps} fps`;
-    if (eta.needs_conform) rate += ` (aus ${Math.round(eta.render_fps)})`;
+    if (eta.needs_conform) rate += ` (from ${Math.round(eta.render_fps)})`;
   } else if (eta.duration_factor > 1) {
-    rate = ` · ${eta.duration_factor}× länger`;
+    rate = ` · ${eta.duration_factor}× longer`;
   }
-  return `→ ${eta.width}×${eta.height}${rife}${rate} · ${fmtEta(eta.seconds)}`;
+  return `${size}${rife}${rate} · ${fmtEta(eta.seconds)}`;
 }
 
 function pickUpscaleResolution(id, res) {
@@ -3283,15 +3811,17 @@ function pickUpscaleResolution(id, res) {
 
 function pickUpscaleRife(id, mult) {
   state.upscaleRifeDraft.set(id, mult);
-  // Turning interpolation off takes the rate choice with it — the row
-  // disappears, and a target left behind would still be sent.
-  if (mult <= 1) state.upscaleFpsDraft.delete(id);
   _redrawUpscaleChip(id);
   loadUpscaleEstimate(id, _upscaleResolution(id), mult, _upscaleFps(id));
 }
 
 function pickUpscaleFps(id, fps) {
   state.upscaleFpsDraft.set(id, fps);
+  // Asking for a rate while interpolation is off would otherwise conform by
+  // duplicating or dropping whole frames — technically the rate asked for,
+  // visibly worse than interpolating to it. Move to "auto", which reaches the
+  // target with real in-between frames; clicking "off" again overrides it.
+  if (fps !== null && _upscaleRife(id) === 1) state.upscaleRifeDraft.set(id, null);
   _redrawUpscaleChip(id);
   loadUpscaleEstimate(id, _upscaleResolution(id), _upscaleRife(id), fps);
 }
@@ -3311,7 +3841,8 @@ async function loadUpscaleEstimate(id, res, rife, fps) {
   if (state.upscaleEta.has(key)) return state.upscaleEta.get(key);
   try {
     const r = await api(
-      `/api/video/jobs/${id}/upscale/estimate?resolution=${res}&rife_multiplier=${rife}`
+      `/api/video/jobs/${id}/upscale/estimate?resolution=${res}`
+      + (rife === null ? '' : `&rife_multiplier=${rife}`)   // omitted = derive from fps
       + (fps ? `&fps=${fps}` : ''));
     const d = await r.json();
     state.upscaleEta.set(key, d);
@@ -3324,22 +3855,32 @@ async function loadUpscaleEstimate(id, res, rife, fps) {
 async function applyUpscale(id) {
   const resolution = _upscaleResolution(id);
   const v0 = state.videos.find(x => x.id === id);
+  const rife = _upscaleRife(id);
+  let fps = _upscaleFps(id);
   // A draft picked before a song was attached would otherwise survive into a
-  // request the server refuses — the chip hides the control, so the value
-  // has to be neutralised here rather than left to 409.
-  const rife = (v0 && v0.has_soundtrack) ? 1 : _upscaleRife(id);
-  const fps = rife > 1 ? _upscaleFps(id) : null;
+  // request the server refuses: interpolating with no target rate stretches
+  // the music. Give it the source's rate to hold the length rather than
+  // leaving it to 409.
+  if (v0 && v0.has_soundtrack && rife !== 1 && fps === null) {
+    fps = Math.round(v0.fps || 24);
+  }
   // The estimate is what makes this decision informed, so it is worth waiting
   // for before the confirm rather than showing a bare "are you sure".
   const eta = await loadUpscaleEstimate(id, resolution, rife, fps);
+  if (!eta && resolution === UPSCALE_KEEP && rife === 1 && fps === null) {
+    ArtRium.toast('Nothing to do — pick a resolution, an interpolation factor or a frame rate', true);
+    return;
+  }
   const cost = eta ? ` It should take ${fmtEta(eta.seconds)} and produce ${eta.width}×${eta.height}.` : '';
   // Name the outcome, not the setting: with a target rate the clip keeps its
   // length, without one it gets that many times longer, and those are two
-  // different things to be agreeing to.
-  const interp = rife > 1
-    ? (fps ? ` with ${rife}× interpolation at ${fps} fps (same length)`
-           : ` with ${rife}× interpolation (${rife}× longer, slow motion)`)
-    : '';
+  // different things to be agreeing to. `eta.rife_multiplier` rather than the
+  // chip, because "auto" only becomes a number on the server.
+  const mult = eta ? eta.rife_multiplier : rife;
+  const interp = mult > 1
+    ? (fps ? ` with ${mult}× interpolation at ${fps} fps (same length)`
+           : ` with ${mult}× interpolation (${mult}× longer, slow motion)`)
+    : (fps ? ` at ${fps} fps` : '');
   // A merge has hard cuts in it, and this pass reads across them: SEEDVR2
   // restores several frames jointly and RIFE invents frames between pairs, so
   // an edit gets morphed instead of staying an edit. Upscaling the clips first
@@ -3351,7 +3892,13 @@ async function applyUpscale(id) {
       'cuts can smear the edits — upscaling the individual clips before merging ' +
       'avoids that.'
     : '';
-  if (!confirm(`Upscale to ${resolution}p${interp}?${cost} The GPU is busy for the whole render.${cutWarning}`)) return;
+  // Without a restoration there is no GPU-hogging stage to warn about: the
+  // pass is RIFE at ~0.2 s a frame, or plain ffmpeg when there is no
+  // interpolation either.
+  const what = resolution === UPSCALE_KEEP ? 'Retime this video' : `Upscale to ${resolution}p`;
+  const gpu = resolution === UPSCALE_KEEP ? '' : ' The GPU is busy for the whole render.';
+  if (!confirm(`${what}${interp}?${cost}${gpu}${cutWarning}`)) return;
+  state.passOpen.set(id, 'upscale');
   state.upscalingVideos.add(id);
   try {
     const r = await api(`/api/video/jobs/${id}/upscale`, {
@@ -3415,7 +3962,9 @@ function pollUpscale(id, resolution, etaSeconds) {
         clearInterval(interval);
         state.upscalingVideos.delete(id);
         updateVideoCard(v);
-        ArtRium.toast(`Upscaled to ${v.upscale_resolution}p`);
+        ArtRium.toast(v.upscale_resolution
+          ? `Upscaled to ${v.upscale_resolution}p`
+          : 'Retimed');
         return;
       }
       if (v.error) {
@@ -3435,43 +3984,107 @@ function pollUpscale(id, resolution, etaSeconds) {
   }, 5000);
 }
 
-// ── Film grain ────────────────────────────────────────────────────────────────
-// Wan2.2 clips come out plastic-smooth. The grain pass re-encodes into a
-// sibling file, so any strength can be tried and undone. The preview grades
-// 4s out of the middle with the exact encoder settings the full render uses,
-// which is what makes "too much / too little" a decidable question before
-// committing to a ~9s full render.
+// ── Look pass ─────────────────────────────────────────────────────────────────
+// Wan2.2 and AnimateLCM clips come out plastic-smooth, and this pass is the
+// last thing between a render and delivery — so it carries the whole
+// correction, not just the grain it started as. Seven dials, one ffmpeg chain,
+// one sibling file, all of it undoable.
+//
+// The preview grades 4s out of the middle with the exact encoder settings the
+// full render uses, which is what makes "too much / too little" a decidable
+// question before committing to a ~30s full render.
 
-const GRAIN_DEFAULT = 30;
+// Filled from GET /api/video/look/presets on first use. Read from the server
+// rather than duplicated here so a retuned preset never has to be declared
+// twice — the same rule the cut styles follow.
+let LOOK_PRESETS = null;
 
-function _grainStrength(v) {
-  // A slider the user has already moved wins over the persisted value, so a
-  // card re-render mid-adjustment doesn't snap the handle back.
-  if (state.grainDraft.has(v.id)) return state.grainDraft.get(v.id);
-  return v.grain_strength || GRAIN_DEFAULT;
+// label, dial key, and whether the slider runs signed. Order matches the
+// order the filters are applied in, so reading the chip top to bottom reads
+// the chain left to right.
+const LOOK_DIALS = [
+  ['Kontrast',   'contrast',    true],
+  ['Sättigung',  'saturation',  true],
+  ['Temperatur', 'temperature', true],
+  ['Schärfe',    'sharpen',     false],
+  ['Lichthof',   'halation',    false],
+  ['Vignette',   'vignette',    false],
+  ['Aberration', 'aberration',  false],
+  ['Korn',       'grain',       false],
+];
+
+const EMPTY_LOOK = Object.fromEntries(LOOK_DIALS.map(([, key]) => [key, 0]));
+
+async function loadLookPresets() {
+  if (LOOK_PRESETS) return LOOK_PRESETS;
+  try {
+    const r = await api('/api/video/look/presets');
+    LOOK_PRESETS = (await r.json()).presets || [];
+  } catch (e) {
+    LOOK_PRESETS = [];
+  }
+  return LOOK_PRESETS;
 }
 
-function _grainBlock(v) {
+/** The look currently on the sliders: the draft if one is being edited, else
+ *  whatever the row is carrying, else nothing. */
+function _look(v) {
+  if (state.lookDraft.has(v.id)) return state.lookDraft.get(v.id);
+  return {...EMPTY_LOOK, ...(v.look || {})};
+}
+
+function _lookIsEmpty(look) {
+  return !LOOK_DIALS.some(([, key]) => look[key]);
+}
+
+/** One line naming the dials that are actually doing something. */
+function _lookSummary(look) {
+  // Only the signed dials get a sign — a "+" on Korn reads as "more than
+  // what?" when the scale starts at zero.
+  const on = LOOK_DIALS.filter(([, key]) => look[key])
+    .map(([label, key, signed]) =>
+      `${label} ${signed && look[key] > 0 ? '+' : ''}${look[key]}`);
+  return on.length ? on.join(' · ') : 'nichts eingestellt';
+}
+
+function _lookBlock(v) {
   if (v.status !== 'done' || !v.filename) return '';
   if (state.grainingVideos.has(v.id)) {
     return `<div class="post-chip working">
-      <div class="row"><span class="glyph">▒</span><span class="label">Applying grain…</span></div>
+      <div class="row"><span class="glyph">▒</span><span class="label">Grading…</span></div>
     </div>`;
   }
-  const s = _grainStrength(v);
+  const look = _look(v);
   const prev = state.grainPreviewUrl.get(v.id);
+  const open = state.lookOpen.has(v.id);
+  const presets = (LOOK_PRESETS || []).map(p =>
+    `<button class="chip-btn" title="${_esc(p.hint)}"
+             onclick="pickLookPreset('${v.id}', '${p.key}')">${_esc(p.label)}</button>`
+  ).join('');
+  const dials = LOOK_DIALS.map(([label, key, signed]) => `
+    <div class="look-dial ${look[key] ? 'active' : ''}">
+      <span class="label">${label}</span>
+      <input type="range" min="${signed ? -100 : 0}" max="100" value="${look[key]}"
+             id="look-${key}-${v.id}"
+             oninput="onLookSlide('${v.id}', '${key}', this.value)">
+      <span class="value" id="look-val-${key}-${v.id}">${look[key]}</span>
+    </div>`).join('');
   return `<div class="post-chip" id="grain-chip-${v.id}">
     <div class="row">
       <span class="glyph">▒</span>
-      <span class="label">Grain</span>
-      <input type="range" min="1" max="100" value="${s}" id="grain-range-${v.id}"
-             oninput="onGrainSlide('${v.id}', this.value)">
-      <span class="value" id="grain-val-${v.id}">${s}</span>
+      <span class="label">Look</span>
+      <span class="look-summary" id="look-sum-${v.id}">${_esc(_lookSummary(look))}</span>
     </div>
+    <div class="row wrap">
+      <span class="chip-group">${presets}</span>
+      <button class="chip-btn ${open ? 'on' : ''}" onclick="toggleLookDials('${v.id}')">
+        ${open ? 'Regler zu' : 'Regler'}</button>
+    </div>
+    <div class="look-dials ${open ? 'open' : ''}" id="look-dials-${v.id}">${dials}</div>
     <div class="row">
-      <button class="chip-btn" id="grain-prev-btn-${v.id}" onclick="previewGrain('${v.id}')">Preview 4s</button>
-      <button class="chip-btn apply" onclick="applyGrain('${v.id}')">${v.has_grain ? 'Re-apply' : 'Apply'}</button>
-      ${v.has_grain ? `<button class="chip-btn remove" onclick="removeGrain('${v.id}')">Remove</button>` : ''}
+      <button class="chip-btn" id="grain-prev-btn-${v.id}" onclick="previewLook('${v.id}')">Preview 4s</button>
+      <button class="chip-btn apply" onclick="applyLook('${v.id}')">${v.has_grain ? 'Re-apply' : 'Apply'}</button>
+      ${v.has_grain ? `<button class="chip-btn remove" onclick="removeLook('${v.id}')">Remove</button>` : ''}
     </div>
     ${prev ? _grainPreviewHtml(prev) : ''}
   </div>`;
@@ -3480,34 +4093,71 @@ function _grainBlock(v) {
 function _grainPreviewHtml(url) {
   return `<div class="grain-preview">
     <video src="${url}" controls playsinline autoplay muted loop></video>
-    <div class="hint">4s from the middle, encoded exactly like the full render.</div>
+    <div class="hint">4s aus der Mitte, exakt wie der volle Render kodiert.</div>
   </div>`;
 }
 
-function onGrainSlide(id, value) {
-  state.grainDraft.set(id, parseInt(value, 10));
-  const el = document.getElementById(`grain-val-${id}`);
-  if (el) el.textContent = value;
+/** Swap the chip alone rather than re-rendering the card — updateVideoCard
+ *  replaces the <video> element too, which would stop playback mid-look. */
+function _redrawLookChip(id) {
+  const v = state.videos.find(x => x.id === id);
+  const chip = document.getElementById(`grain-chip-${id}`);
+  if (v && chip) chip.outerHTML = _lookBlock(v);
 }
 
-async function previewGrain(id) {
-  const strength = state.grainDraft.get(id)
-    ?? (parseInt(document.getElementById(`grain-range-${id}`)?.value, 10) || GRAIN_DEFAULT);
+function toggleLookDials(id) {
+  if (state.lookOpen.has(id)) state.lookOpen.delete(id);
+  else state.lookOpen.add(id);
+  _redrawLookChip(id);
+}
+
+function pickLookPreset(id, key) {
+  const preset = (LOOK_PRESETS || []).find(p => p.key === key);
+  if (!preset) return;
+  state.lookDraft.set(id, {...EMPTY_LOOK, ...preset.look});
+  // A preset is a starting point, so the sliders open with it — otherwise the
+  // chip changes its summary line and nothing else visibly happens.
+  state.lookOpen.add(id);
+  _redrawLookChip(id);
+}
+
+function onLookSlide(id, key, value) {
+  const v = state.videos.find(x => x.id === id);
+  const look = {..._look(v || {id}), [key]: parseInt(value, 10)};
+  state.lookDraft.set(id, look);
+  // Patch the two labels rather than redrawing: a redraw mid-drag would take
+  // the slider out from under the pointer.
+  const val = document.getElementById(`look-val-${key}-${id}`);
+  if (val) {
+    val.textContent = value;
+    val.parentElement.classList.toggle('active', !!look[key]);
+  }
+  const sum = document.getElementById(`look-sum-${id}`);
+  if (sum) sum.textContent = _lookSummary(look);
+}
+
+async function previewLook(id) {
+  const v = state.videos.find(x => x.id === id);
+  const look = _look(v || {id});
+  if (_lookIsEmpty(look)) {
+    ArtRium.toast('Nichts eingestellt — wähle ein Preset oder einen Regler', true);
+    return;
+  }
   const btn = document.getElementById(`grain-prev-btn-${id}`);
   if (btn) { btn.disabled = true; btn.textContent = 'Rendering…'; }
   try {
-    const r = await api(`/api/video/jobs/${id}/grain/preview`, {
+    const r = await api(`/api/video/jobs/${id}/look/preview`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({strength}),
+      body: JSON.stringify({look}),
     });
     const d = await r.json();
     // One preview file per video, overwritten on every call — without a
-    // cache-buster the browser replays the previous strength.
+    // cache-buster the browser replays the previous look.
     const url = withAuth(`${d.url}?_t=${Date.now()}`);
     state.grainPreviewUrl.set(id, url);
-    // Patch the DOM instead of re-rendering the card, so the slider keeps
-    // both its position and its focus while iterating.
+    // Patch the DOM instead of re-rendering the card, so the sliders keep
+    // both their positions and their focus while iterating.
     const chip = document.getElementById(`grain-chip-${id}`);
     if (chip) {
       const old = chip.querySelector('.grain-preview');
@@ -3521,68 +4171,74 @@ async function previewGrain(id) {
   }
 }
 
-async function applyGrain(id) {
-  const strength = state.grainDraft.get(id)
-    ?? (parseInt(document.getElementById(`grain-range-${id}`)?.value, 10) || GRAIN_DEFAULT);
+async function applyLook(id) {
+  const v = state.videos.find(x => x.id === id);
+  const look = _look(v || {id});
+  if (_lookIsEmpty(look)) {
+    ArtRium.toast('Nichts eingestellt — wähle ein Preset oder einen Regler', true);
+    return;
+  }
+  state.passOpen.set(id, 'look');
   state.grainingVideos.add(id);
   try {
-    const r = await api(`/api/video/jobs/${id}/grain`, {
+    const r = await api(`/api/video/jobs/${id}/look`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({strength}),
+      body: JSON.stringify({look}),
     });
     updateVideoCard(await r.json());
-    pollGrain(id, strength);
+    pollLook(id, look);
   } catch (e) {
     state.grainingVideos.delete(id);
-    ArtRium.toast('Grain failed: ' + e.message, true);
+    ArtRium.toast('Look failed: ' + e.message, true);
   }
 }
 
-async function removeGrain(id) {
-  if (!confirm('Remove grain and go back to the clean render?')) return;
+async function removeLook(id) {
+  if (!confirm('Look entfernen und zum unbearbeiteten Render zurück?')) return;
   try {
-    const r = await api(`/api/video/jobs/${id}/grain`, {method: 'DELETE'});
-    state.grainDraft.delete(id);
+    const r = await api(`/api/video/jobs/${id}/look`, {method: 'DELETE'});
+    state.lookDraft.delete(id);
     state.grainPreviewUrl.delete(id);
     updateVideoCard(await r.json());
-    ArtRium.toast('Grain removed');
+    ArtRium.toast('Look entfernt');
   } catch (e) {
     ArtRium.toast('Remove failed: ' + e.message, true);
   }
 }
 
-function pollGrain(id, strength) {
+function pollLook(id, look) {
   // Mirrors pollSoundtrackMux: status stays 'done' throughout, so completion
-  // needs its own signal. It has to be `grain_rendering`, not the strength:
-  // re-applying the SAME strength leaves grain_strength untouched, so a
-  // strength check alone reports success on the first poll while ffmpeg is
-  // still writing the file — and the card then loads a half-written render.
+  // needs its own signal. It has to be `grain_rendering`, not the dials:
+  // re-applying the SAME look leaves them untouched, so a value check alone
+  // reports success on the first poll while ffmpeg is still writing the file
+  // — and the card then loads a half-written render.
   const startedAt = Date.now();
   const interval = setInterval(async () => {
     try {
       const r = await api(`/api/video/jobs/${id}`);
       const v = await r.json();
-      if (!v.grain_rendering && v.has_grain && v.grain_strength === strength) {
+      if (!v.grain_rendering && v.has_grain) {
         clearInterval(interval);
         state.grainingVideos.delete(id);
         state.grainPreviewUrl.delete(id);
+        state.lookDraft.delete(id);
         updateVideoCard(v);
-        ArtRium.toast('Grain applied');
+        ArtRium.toast('Look angewendet');
         return;
       }
       if (v.error) {
         clearInterval(interval);
         state.grainingVideos.delete(id);
         updateVideoCard(v);
-        ArtRium.toast('Grain failed: ' + v.error, true);
+        ArtRium.toast('Look failed: ' + v.error, true);
         return;
       }
     } catch (e) { /* transient network error — keep polling */ }
-    if (Date.now() - startedAt > 5 * 60 * 1000) {
+    if (Date.now() - startedAt > 10 * 60 * 1000) {
       clearInterval(interval);
       state.grainingVideos.delete(id);
-      ArtRium.toast('Grain took too long — refresh to see status', true);
+      ArtRium.toast('Look took too long — refresh to see status', true);
     }
   }, 2000);
 }
@@ -3671,8 +4327,10 @@ state.songs = [];
 state.songPickerVideoId = null;
 state.songPickerSearch = '';
 state.muxingVideos = new Set();
-state.grainingVideos = new Set();   // videos with a grain render in flight
-state.grainDraft = new Map();       // videoId → strength currently on the slider
+state.grainingVideos = new Set();   // videos with a look render in flight
+state.lookDraft = new Map();        // videoId → the seven dials currently shown
+state.lookOpen = new Set();         // videoIds whose slider panel is expanded
+state.passOpen = new Map();         // videoId → 'song' | 'upscale' | 'look': the pass whose controls are open
 state.grainPreviewUrl = new Map();  // videoId → last rendered preview URL
 state.upscalingVideos = new Set();  // videos with a SEEDVR2 render in flight
 state.upscaleDraft = new Map();     // videoId → target short edge currently picked
@@ -3682,7 +4340,7 @@ state.upscaleFpsDraft = new Map();  // videoId → target playback rate, null = 
 // clip comes out N times longer — slow motion. Picking a rate keeps the
 // duration and raises the rate instead; the server derives the factor from it.
 const UPSCALE_FPS_OPTIONS = [null, 24, 30, 60];
-state.upscaleEta = new Map();       // "videoId:resolution:rife" → {width, height, seconds, …}
+state.upscaleEta = new Map();       // "videoId:resolution:rife:fps" → {width, height, seconds, …}
 
 async function openSongPicker(videoId) {
   state.songPickerVideoId = videoId;
@@ -3772,6 +4430,7 @@ async function useSong(songId) {
   // ever changes.
   const bedWanted = $('song-bed-toggle').checked;
   closeSongPicker();
+  state.passOpen.set(videoId, 'song');
   state.muxingVideos.add(videoId);
   const cached = state.videos.find(v => v.id === videoId);
   if (cached) updateVideoCard(cached);

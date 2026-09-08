@@ -167,6 +167,61 @@ html, body {
 /* One choice's worth of chips, kept together and away from the next choice. */
 .chip-group { display: inline-flex; gap: 5px; flex-wrap: wrap; }
 
+/* ── Fold — a collapsible section built on <details>, so it works with no
+   JS, keeps its state in the DOM and is keyboard/screen-reader accessible.
+
+     <details class="fold" open>
+       <summary>
+         <span class="fold-title">Settings</span>
+         <span class="fold-value">960×960 · 6 steps</span>   ← optional: the
+       </summary>                                              state, readable
+       <div class="fold-body">…</div>                          while closed
+     </details>
+
+   .fold        → boxed (surface2 + border): a section of a form or a modal
+   .fold.quiet  → no box, hairline only: a detail folded inside a card
+   .fold.plain  → no box, no hairline: bare summary row
+
+   The value slot is the whole reason this exists: a closed fold that still
+   says what is inside it can be left closed. ── */
+.fold {
+  background: var(--surface2);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.fold > summary {
+  display: flex; align-items: center; gap: 10px;
+  padding: 11px 14px;
+  cursor: pointer; list-style: none;
+  -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::after {
+  content: ''; flex-shrink: 0;
+  width: 7px; height: 7px; margin: 0 3px 3px 2px;
+  border-right: 2px solid var(--text-dim);
+  border-bottom: 2px solid var(--text-dim);
+  transform: rotate(45deg);
+  transition: transform 0.18s ease;
+}
+.fold[open] > summary::after { transform: rotate(-135deg); margin-bottom: -3px; }
+.fold > summary:hover::after { border-color: var(--text); }
+.fold-title { font-size: 13px; font-weight: 700; flex-shrink: 0; }
+.fold-value {
+  margin-left: auto; min-width: 0;
+  font-size: 12px; color: var(--text-dim); text-align: right;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fold-body {
+  padding: 2px 14px 14px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.fold.quiet, .fold.plain { background: none; border: none; border-radius: 0; }
+.fold.quiet { border-top: 1px solid var(--border); }
+.fold.quiet > summary, .fold.plain > summary { padding: 9px 2px; }
+.fold.quiet > .fold-body, .fold.plain > .fold-body { padding: 0 2px 10px; }
+
 /* ── Toast notification ── */
 #toast {
   position: fixed; left: 16px; right: 16px;

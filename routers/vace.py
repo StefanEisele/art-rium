@@ -52,7 +52,26 @@ from core.video_thumb import (
     probe_video_frames,
 )
 from routers.video import _progress, _segments_dir, _set_progress
+from services.segment import (
+    DURATIONS as SEGMENT_DURATIONS,
+)
+from services.segment import (
+    STRIDES as SEGMENT_STRIDES,
+)
+from services.segment import (
+    FRAME_CEILING,
+    MAX_REGIONS,
+    REGION_COLORS,
+    REGION_LABELS,
+    SegmentError,
+    budget_dict,
+    build_spec,
+    plan_frames,
+    run_segmentation,
+    trim_filters,
+)
 from services.comfy.client import free_memory, poll_history, post_workflow
+from services.comfy.vram import free_vram_for
 from services.comfy.animatelcm import (
     DEPTH_SWEEP as LCM_DEPTH_SWEEP,
 )
@@ -72,6 +91,7 @@ from services.comfy.animatelcm import (
     HIRES_DENOISE_DEFAULT as LCM_HIRES_DEFAULT,
 )
 from services.comfy.animatelcm import (
+    BASE_IP_DEFAULT as LCM_BASE_DEFAULT,
     IP_DEFAULT as LCM_IP_DEFAULT,
 )
 from services.comfy.animatelcm import (
@@ -121,6 +141,13 @@ router = APIRouter(prefix="/api/vace", dependencies=[Depends(require_auth)])
 
 WORKFLOW_NAME = "vace_control"
 _KINDS = ("depth", "footage", "mask")
+# What the card needs free before a structure render is posted. Well below
+# routers/video.py's 9 GB default because this stack is SD 1.5 — Juggernaut, a
+# motion module, two ControlNets and an IP-Adapter — and even the 1088² hires
+# pass stays under this. Set low on purpose: the point is to catch a dead
+# ComfyUI and a card still held by the render before, not to gate a job that
+# would have fit.
+_LCM_MIN_FREE_VRAM = 6.0 * 1024**3
 _JOB_TIMEOUT = 7200          # a 720 region sequence is three ~12-minute passes
 _MAX_UPLOAD_BYTES = 600 * 1024 * 1024
 
@@ -128,7 +155,15 @@ _MAX_UPLOAD_BYTES = 600 * 1024 * 1024
 class RegionSpec(BaseModel):
     color: tuple[int, int, int]
     image_id: uuid.UUID              # reference picture, from the gallery
+    # VACE only: how freely that region's pass may repaint. AnimateLCM has no
+    # per-region denoise — it renders every region in one sampler pass — so it
+    # reads `ip_weight` instead, and reading this one there would silently wire
+    # the "Wörtlich ↔ Frei" slider to a reference weight.
     strength: float = STRENGTH_DEFAULT
+    # AnimateLCM only: how hard this region's picture is pressed into its mask.
+    # None follows the job's global ip_weight, which is what every render did
+    # before the dial existed.
+    ip_weight: Optional[float] = None
     threshold: int = 20
 
 
@@ -137,6 +172,11 @@ class GenerateRequest(BaseModel):
     prompt: str
     mask_track_id: Optional[uuid.UUID] = None
     image_id: Optional[uuid.UUID] = None      # reference for the no-region case
+    # The picture everything the masks do NOT cover is made of. Its own image
+    # rather than one of the regions': it is the ground they sit in. Only
+    # meaningful with regions; without them `image_id` already covers the frame.
+    base_image_id: Optional[uuid.UUID] = None
+    base_weight: float = LCM_BASE_DEFAULT
     regions: list[RegionSpec] = []
     # Which graph renders this. `animatelcm` is the rebuild of the user's own
     # AnimateDiff workflow and is the default: measured 2026-08-19, VACE cannot
@@ -199,6 +239,10 @@ def _serialize_track(t: ControlTrack) -> dict:
         "url": f"/api/vace/tracks/{t.id}/file",
         "thumb_url": f"/api/vace/tracks/{t.id}/thumb" if t.thumbnail_path else None,
         "created_at": t.created_at.isoformat(),
+        # A mask is only meaningful against the frames it was keyed out of, so
+        # the pairing travels with it and the UI can offer the two together.
+        "source_track_id": str(t.source_track_id) if t.source_track_id else None,
+        "regions": t.regions or None,
     }
 
 
@@ -216,18 +260,117 @@ async def _transcode_to_mp4(src: Path, dest: Path) -> None:
         raise RuntimeError(err.decode(errors="replace")[:400] or "ffmpeg failed")
 
 
+async def _apply_budget(src: Path, dest: Path, budget, lossless: bool = False) -> None:
+    """Write `src` back out holding only the frames a budget allows.
+
+    Both dials are baked into the file here rather than asked for at render
+    time. `VHS_LoadVideoPath`'s own `force_rate` is the alternative and it is a
+    trap: against a 30 fps source it returns a different frame count than the
+    job asked for, and the surplus is padded with flat grey that steers
+    nothing. A file that already holds exactly the wanted frames cannot do that.
+
+    `-fps_mode passthrough` is what makes `select` stick — ffmpeg otherwise
+    re-times the thinned stream back up to the source rate by duplicating the
+    frames just dropped.
+
+    `lossless` for mask videos: ColorToMask keys on an exact RGB triple, and a
+    re-encode at 4:2:0 would put a ramp of unkeyable in-between colours around
+    every region.
+    """
+    args = [settings.ffmpeg_path, "-y", "-v", "error"]
+    if budget.start:
+        args += ["-ss", f"{budget.start:g}"]
+    args += ["-i", str(src)]
+    if budget.seconds:
+        args += ["-t", f"{budget.seconds:g}"]
+    args += ["-vf", ",".join(trim_filters(budget))]
+    # No `-r`: it is a CFR conversion that may duplicate frames, and ffmpeg
+    # rejects it alongside `-fps_mode passthrough` anyway. The rate comes from
+    # the timestamps `setpts` writes. See services/segment/plan.py.
+    args += ["-frames:v", str(budget.kept), "-fps_mode", "passthrough", "-an"]
+    args += (["-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p"] if lossless
+             else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+                   "-pix_fmt", "yuv420p"])
+    args.append(str(dest))
+
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0 or not dest.is_file():
+        raise RuntimeError(err.decode(errors="replace")[:400] or "ffmpeg failed")
+
+
+async def _register_track(
+    db: AsyncSession,
+    track_id: uuid.UUID,
+    dest: Path,
+    rel: str,
+    kind: str,
+    filename: str,
+    title: Optional[str],
+    source_track_id: Optional[uuid.UUID] = None,
+    regions: Optional[list[dict]] = None,
+) -> ControlTrack:
+    """Probe, thumbnail and store one track that is already on disk.
+
+    The probe is not a nicety: `frame_count` is what later clamps a job's
+    length, and without it a request for more frames than the track holds comes
+    back with a silently unguided tail.
+    """
+    width, height = await probe_video_dimensions(dest)
+    frames, fps = await probe_video_frames(dest)
+    if not frames:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail="Could not read any video frames from that file",
+        )
+
+    thumb_rel = _track_rel(track_id, "_thumb.jpg")
+    try:
+        await make_video_thumbnail(dest, settings.storage_dir / thumb_rel)
+    except Exception as exc:
+        logger.warning("Control-track thumbnail failed for %s: %s", track_id, exc)
+        thumb_rel = None
+
+    track = ControlTrack(
+        id=track_id,
+        filename=filename,
+        filepath=rel,
+        kind=kind,
+        title=title or None,
+        thumbnail_path=thumb_rel,
+        width=width, height=height, frame_count=frames, fps=fps,
+        source_track_id=source_track_id,
+        regions=regions,
+    )
+    db.add(track)
+    await db.commit()
+    await db.refresh(track)
+    logger.info(
+        "Control track %s stored (%s, %sx%s, %s frames @ %.4g fps)",
+        track_id, kind, width, height, frames, fps or 0,
+    )
+    return track
+
+
 @router.post("/tracks", status_code=201)
 async def upload_track(
     file: UploadFile = File(...),
     kind: str = Form("depth"),
     title: Optional[str] = Form(None),
+    seconds: Optional[float] = Form(None),
+    stride: int = Form(1),
+    start: float = Form(0.0),
     db: AsyncSession = Depends(get_db),
 ):
-    """Take a control track into the library: store, probe, thumbnail.
+    """Take a control track into the library: store, trim, probe, thumbnail.
 
-    The probe is not a nicety. `frame_count` is what later clamps a job's
-    length, and without it a request for more frames than the track holds comes
-    back with a silently unguided tail.
+    `seconds` and `stride` are the frame budget, and they are applied here so
+    that the stored file *is* the budget — see `_apply_budget` for why asking
+    the render's loader for a different rate instead is a trap. A 20 s phone
+    clip at 30 fps is 600 frames of render; 6 s at every 2nd frame is 90.
     """
     if kind not in _KINDS:
         raise HTTPException(status_code=400, detail=f"kind must be one of {_KINDS}")
@@ -271,37 +414,33 @@ async def upload_track(
                 status_code=400, detail="Could not convert that recording"
             ) from exc
 
-    width, height = await probe_video_dimensions(dest)
-    frames, fps = await probe_video_frames(dest)
-    if not frames:
-        dest.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=400,
-            detail="Could not read any video frames from that file",
-        )
+    # Trim and thin before anything else looks at the file, so every number
+    # recorded from here on describes what the render will actually see.
+    if seconds or stride > 1 or start:
+        frames, fps = await probe_video_frames(dest)
+        budget = plan_frames(frames or 0, fps, seconds, stride, start)
+        if budget.kept < 1:
+            dest.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=400,
+                detail="Mit diesen Einstellungen bleibt kein einziges Bild übrig",
+            )
+        trimmed = dest.with_name(f"{dest.stem}_cut{dest.suffix}")
+        try:
+            await _apply_budget(dest, trimmed, budget, lossless=(kind == "mask"))
+            dest.unlink(missing_ok=True)
+            trimmed.replace(dest)
+        except Exception as exc:
+            trimmed.unlink(missing_ok=True)
+            dest.unlink(missing_ok=True)
+            logger.warning("Control-track trim failed for %s: %s", track_id, exc)
+            raise HTTPException(
+                status_code=400, detail="Zuschneiden ist fehlgeschlagen"
+            ) from exc
 
-    thumb_rel = _track_rel(track_id, "_thumb.jpg")
-    try:
-        await make_video_thumbnail(dest, settings.storage_dir / thumb_rel)
-    except Exception as exc:
-        logger.warning("Control-track thumbnail failed for %s: %s", track_id, exc)
-        thumb_rel = None
-
-    track = ControlTrack(
-        id=track_id,
-        filename=file.filename or f"{track_id}{suffix}",
-        filepath=rel,
-        kind=kind,
-        title=title or None,
-        thumbnail_path=thumb_rel,
-        width=width, height=height, frame_count=frames, fps=fps,
-    )
-    db.add(track)
-    await db.commit()
-    await db.refresh(track)
-    logger.info(
-        "Control track %s stored (%s, %sx%s, %s frames @ %.4g fps)",
-        track_id, kind, width, height, frames, fps or 0,
+    track = await _register_track(
+        db, track_id, dest, rel, kind,
+        file.filename or f"{track_id}{suffix}", title,
     )
     return _serialize_track(track)
 
@@ -344,7 +483,8 @@ async def get_track_thumb(track_id: uuid.UUID, db: AsyncSession = Depends(get_db
 @router.delete("/tracks/{track_id}", status_code=204)
 async def delete_track(track_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     track = await _get_track(track_id, db)
-    for rel in filter(None, (track.filepath, track.thumbnail_path)):
+    for rel in filter(None, (track.filepath, track.thumbnail_path,
+                             _track_rel(track_id, "_preview.mp4"))):
         path = settings.storage_dir / rel
         if path.exists():
             try:
@@ -353,6 +493,390 @@ async def delete_track(track_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
                 logger.warning("Could not delete %s: %s", path, exc)
     await db.delete(track)
     await db.commit()
+
+
+# ── Frame budget, trimming, segmentation ─────────────────────────────────────
+
+class DeriveRequest(BaseModel):
+    start: float = 0.0
+    seconds: Optional[float] = None
+    stride: int = 1
+    title: Optional[str] = None
+
+
+class Concept(BaseModel):
+    """One thing to find in the footage, and the colour it becomes."""
+    text: str
+    color: Optional[tuple[int, int, int]] = None
+
+
+class SegmentRequest(BaseModel):
+    concepts: list[Concept]
+    # Applied to the footage *before* segmenting, producing a trimmed track that
+    # the mask is then keyed against — see `_run_segmentation` on why the mask
+    # cannot be trimmed on its own.
+    start: float = 0.0
+    seconds: Optional[float] = None
+    stride: int = 1
+    score_threshold: Optional[float] = None
+    title: Optional[str] = None
+
+
+@router.get("/tracks/{track_id}/budget")
+async def track_budget(
+    track_id: uuid.UUID,
+    seconds: Optional[float] = None,
+    stride: int = 1,
+    start: float = 0.0,
+    db: AsyncSession = Depends(get_db),
+):
+    """What a trim/stride setting would leave, in frames.
+
+    The same function the ingest uses, so the number shown before pressing the
+    button is the number that comes out of it.
+    """
+    track = await _get_track(track_id, db)
+    return budget_dict(
+        plan_frames(track.frame_count or 0, track.fps, seconds, stride, start)
+    )
+
+
+@router.post("/tracks/{track_id}/derive", status_code=201)
+async def derive_track(
+    track_id: uuid.UUID,
+    body: DeriveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Cut a shorter, thinner copy out of a track already in the library.
+
+    The upload form does this too; this is the same operation for takes that
+    are already stored — and for the case that matters, producing the trimmed
+    footage a mask will be keyed against.
+    """
+    source = await _get_track(track_id, db)
+    src_path = settings.storage_dir / source.filepath
+    if not src_path.is_file():
+        raise HTTPException(status_code=404, detail="Control track missing on disk")
+
+    budget = plan_frames(
+        source.frame_count or 0, source.fps, body.seconds, body.stride, body.start,
+    )
+    if budget.kept < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Mit diesen Einstellungen bleibt kein einziges Bild übrig",
+        )
+
+    new_id = uuid.uuid4()
+    rel = _track_rel(new_id, ".mp4")
+    dest = settings.storage_dir / rel
+    settings.control_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        await _apply_budget(src_path, dest, budget, lossless=(source.kind == "mask"))
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        logger.warning("Derive failed for %s: %s", track_id, exc)
+        raise HTTPException(status_code=400, detail="Zuschneiden ist fehlgeschlagen") from exc
+
+    track = await _register_track(
+        db, new_id, dest, rel, source.kind,
+        f"{Path(source.filename).stem}_cut.mp4",
+        body.title or f"{source.title or source.filename} · {budget.kept}f",
+        source_track_id=source.id,
+    )
+    return _serialize_track(track)
+
+
+@router.post("/tracks/{track_id}/segment", status_code=202)
+async def segment_track(
+    track_id: uuid.UUID,
+    body: SegmentRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Turn filmed footage into a colour-ID mask, one colour per named thing.
+
+    This is the automatic version of what used to be a Blender job: name the
+    things in the shot ("Tomate", "Hand", "Holzbrett") and SAM 3 finds every
+    instance of each and tracks it through the clip, so the render can key a
+    different reference picture into each one.
+
+    Returns immediately; poll `GET /api/video/jobs/{job_id}/progress`. The mask
+    track appears in the library when it lands.
+    """
+    source = await _get_track(track_id, db)
+    if source.kind == "mask":
+        raise HTTPException(
+            status_code=400,
+            detail="Das ist schon eine Maske — segmentiert wird gefilmtes Material.",
+        )
+    if not (settings.storage_dir / source.filepath).is_file():
+        raise HTTPException(status_code=404, detail="Control track missing on disk")
+
+    concepts = [c for c in body.concepts if c.text.strip()]
+    if not concepts:
+        raise HTTPException(status_code=400, detail="Mindestens ein Begriff wird gebraucht")
+    if len(concepts) > MAX_REGIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Höchstens {MAX_REGIONS} Regionen — der Renderpfad kettet drei IP-Adapter.",
+        )
+    # SAM 3 keys its prompts by their text, so two identical words collapse into
+    # one object set and the second colour would never be painted.
+    lowered = [c.text.strip().lower() for c in concepts]
+    if len(set(lowered)) != len(lowered):
+        raise HTTPException(status_code=400, detail="Jeder Begriff darf nur einmal vorkommen")
+
+    resolved = [
+        {"text": c.text.strip(), "color": list(c.color or REGION_COLORS[i])}
+        for i, c in enumerate(concepts)
+    ]
+
+    budget = plan_frames(
+        source.frame_count or 0, source.fps, body.seconds, body.stride, body.start,
+    )
+    if budget.kept < 1:
+        raise HTTPException(
+            status_code=400,
+            detail="Mit diesen Einstellungen bleibt kein einziges Bild übrig",
+        )
+
+    job_id = uuid.uuid4()
+    _set_progress(str(job_id), "generating", "Segmentierung wird eingereiht…", 2)
+    safe_create_task(
+        _run_segmentation(job_id, source.id, resolved, budget,
+                          body.score_threshold, body.title),
+        name=f"segment:{job_id}",
+    )
+    logger.info(
+        "Queued segmentation %s on track %s — %s, %d frames",
+        job_id, track_id, ", ".join(c["text"] for c in resolved), budget.kept,
+    )
+    return {
+        "job_id": str(job_id),
+        "status": "generating",
+        "frames": budget.kept,
+        "concepts": resolved,
+    }
+
+
+async def _run_segmentation(
+    job_id: uuid.UUID,
+    source_id: uuid.UUID,
+    concepts: list[dict],
+    budget,
+    score_threshold: Optional[float],
+    title: Optional[str],
+) -> None:
+    """Segment in the background, then register the mask — and, when the clip
+    was trimmed, the trimmed footage it belongs to.
+
+    **The trim happens once and both tracks come out of it.** A mask is keyed
+    frame by frame against particular pixels, so it is only meaningful beside
+    the exact footage it was cut from: segmenting a thinned version of a track
+    the user then renders at full length would slide every region off its
+    object. Producing the pair together is what makes that unrepresentable.
+    """
+    key = str(job_id)
+    control_dir = settings.control_dir
+    control_dir.mkdir(parents=True, exist_ok=True)
+
+    mask_rel = _track_rel(job_id, ".mp4")
+    mask_path = settings.storage_dir / mask_rel
+    preview_rel = _track_rel(job_id, "_preview.mp4")
+
+    trimmed_id: uuid.UUID | None = None
+    trimmed_path: Path | None = None
+
+    try:
+        async with AsyncSessionLocal() as db:
+            source = await db.get(ControlTrack, source_id)
+            if source is None:
+                raise SegmentError("Die Vorlage ist verschwunden")
+            source_path = settings.storage_dir / source.filepath
+            source_name, source_title = source.filename, source.title
+            source_kind = source.kind
+
+        # A trim means the render must use the trimmed copy, so it becomes a
+        # track of its own rather than a temporary file. `capped` counts as a
+        # trim: without it a track longer than the ceiling would be segmented
+        # in full, which is exactly the runaway the ceiling exists to stop.
+        trims = bool(
+            budget.stride > 1 or budget.seconds or budget.start or budget.capped
+        )
+        segment_source = source_path
+        if trims:
+            _set_progress(key, "generating", "Material wird zugeschnitten…", 4)
+            trimmed_id = uuid.uuid4()
+            trimmed_rel = _track_rel(trimmed_id, ".mp4")
+            trimmed_path = settings.storage_dir / trimmed_rel
+            await _apply_budget(source_path, trimmed_path, budget)
+            segment_source = trimmed_path
+
+        # A term that matched nothing on the first frame is worth saying at
+        # once — it is nearly always a non-English word, and the fix is one
+        # edit. It has to *stick*, though: the next tracking tick lands
+        # milliseconds later, so a one-shot message would be overwritten before
+        # anyone read it. It rides along with every later line instead.
+        warning = ""
+
+        def on_event(event: dict) -> None:
+            nonlocal warning
+            kind = event.get("event")
+            if kind == "stage":
+                pct = {"decode": 6, "load": 10, "encode": 93}.get(event.get("stage"), 8)
+                _set_progress(key, "generating", event.get("message") or "…", pct)
+            elif kind == "unmatched":
+                names = ", ".join(event.get("concepts") or [])
+                warning = f" · nicht gefunden: {names} — englische Begriffe?"
+            elif kind == "progress":
+                done, total = event.get("done") or 0, event.get("total") or 1
+                _set_progress(
+                    key, "generating",
+                    f"Objekte werden verfolgt… {done}/{total}{warning}",
+                    12 + int(80 * done / max(1, total)),
+                )
+
+        spec = build_spec(
+            segment_source, mask_path, settings.storage_dir / preview_rel,
+            concepts,
+            # The clip handed to the worker is already trimmed, so it reads all
+            # of it — trimming twice would compound the stride.
+            budget=None,
+            score_threshold=score_threshold,
+        )
+        spec["fps"] = budget.fps
+        result = await run_segmentation(spec, on_progress=on_event)
+
+        report = result.get("report") or {}
+        regions = [
+            {
+                "color": c["color"],
+                "label": c["text"],
+                "frames": (report.get(c["text"]) or {}).get("frames", 0),
+                "coverage": (report.get(c["text"]) or {}).get("coverage", 0.0),
+            }
+            for c in concepts
+        ]
+        missing = [r["label"] for r in regions if not r["frames"]]
+
+        _set_progress(key, "finalizing", "Maske wird gespeichert…", 96)
+        async with AsyncSessionLocal() as db:
+            if trimmed_id and trimmed_path:
+                await _register_track(
+                    db, trimmed_id, trimmed_path,
+                    _track_rel(trimmed_id, ".mp4"), source_kind,
+                    f"{Path(source_name).stem}_cut.mp4",
+                    f"{source_title or source_name} · {budget.kept}f",
+                    source_track_id=source_id,
+                )
+            await _register_track(
+                db, job_id, mask_path, mask_rel, "mask",
+                f"{Path(source_name).stem}_mask.mp4",
+                title or f"Maske · {', '.join(c['text'] for c in concepts)}",
+                source_track_id=trimmed_id or source_id,
+                regions=regions,
+            )
+
+        note = "Fertig"
+        if missing:
+            # Worth saying plainly: a concept nobody could find is the single
+            # most likely disappointment here, and it comes back as an empty
+            # colour layer that otherwise looks like a bug.
+            note = "Nicht gefunden: " + ", ".join(missing)
+        _set_progress(key, "done", note, 100)
+        logger.info("Segmentation %s done — %s", job_id, regions)
+
+    except Exception as exc:
+        logger.exception("Segmentation %s failed", job_id)
+        for path in filter(None, (mask_path, trimmed_path,
+                                  settings.storage_dir / preview_rel)):
+            Path(path).unlink(missing_ok=True)
+        _set_progress(key, "failed", f"{exc}", 0)
+    finally:
+        await asyncio.sleep(120)
+        if _progress.get(key, {}).get("phase") in ("done", "failed"):
+            _progress.pop(key, None)
+
+
+@router.get("/jobs/open")
+async def open_jobs(db: AsyncSession = Depends(get_db)):
+    """Structure jobs that are still waiting on something.
+
+    The two-stage render parks after its base pass in status `review` and waits
+    for a verdict — finish it, keep the preview, or discard it. That verdict is
+    the point of the whole two-stage design, and until now the only thing that
+    remembered which job was waiting was a variable in the browser tab. Closing
+    the tab lost it: the job stayed parked in the database with a preview on
+    disk and no way left in the UI to reach it.
+
+    So the browser asks the server on load instead of remembering. `review`
+    first — that is the one a person is being kept from — then anything still
+    rendering, which the page can simply resume polling.
+    """
+    stmt = (
+        select(Video)
+        .where(Video.workflow == WORKFLOW_NAME,
+               Video.status.in_(("review", "generating")))
+        .order_by(desc(Video.created_at))
+    )
+    jobs = (await db.execute(stmt)).scalars().all()
+    return [
+        {
+            "id": str(v.id),
+            "status": v.status,
+            "prompt": v.prompt,
+            "width": v.width,
+            "height": v.height,
+            "frame_count": v.frame_count,
+            "created_at": v.created_at.isoformat(),
+            # What the poller would have shown, when the job that owns it is
+            # still running in this server process. A job left over from an
+            # earlier process has no live entry, which is itself the answer:
+            # nothing is working on it any more.
+            "live": _progress.get(str(v.id)) or None,
+        }
+        for v in jobs
+    ]
+
+
+@router.get("/segment/{job_id}/progress")
+async def segment_progress(job_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Where a segmentation job has got to.
+
+    Its own endpoint rather than routers/video.py's: that one resolves the id
+    against the `videos` table first, and a segmentation has no video row — it
+    produces a control track. The shape of the answer is the same, so the
+    frontend's poller does not have to learn a second one.
+    """
+    live = dict(_progress.get(str(job_id), {}))
+    if live:
+        return {
+            "phase": live.get("phase", "generating"),
+            "message": live.get("message", ""),
+            "pct": live.get("pct", 0),
+        }
+    # The entry is dropped a couple of minutes after finishing, so a poller
+    # that reconnects late is told the outcome by the track's existence.
+    track = await db.get(ControlTrack, job_id)
+    if track:
+        return {"phase": "done", "message": "Fertig", "pct": 100,
+                "track": _serialize_track(track)}
+    raise HTTPException(status_code=404, detail="Segmentation job not found")
+
+
+@router.get("/tracks/{track_id}/preview")
+async def get_track_preview(track_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """The footage with its regions tinted over it.
+
+    A flat colour-ID video is close to unreadable on its own — three silhouettes
+    on black say nothing about whether the right things were caught — so the
+    segmenter writes this alongside it, and this is what the library shows.
+    """
+    await _get_track(track_id, db)
+    path = settings.storage_dir / _track_rel(track_id, "_preview.mp4")
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="No preview for this track")
+    return FileResponse(path, media_type="video/mp4")
 
 
 # ── Options ──────────────────────────────────────────────────────────────────
@@ -372,7 +896,25 @@ async def vace_options():
         "recommended_max": SWEET_MAX,
         "bands": strength_bands(),
         "fps": FPS,
-        "max_regions": 3,
+        "max_regions": MAX_REGIONS,
+        # Automatic colour-ID masks. The palette is not a preference: ColorToMask
+        # measures euclidean RGB distance, and pure primaries are the furthest
+        # apart three keys can be, which is what buys tolerance for codec and
+        # resampling error.
+        "segment": {
+            "colors": [list(c) for c in REGION_COLORS],
+            "labels": list(REGION_LABELS),
+            "max_regions": MAX_REGIONS,
+            "durations": list(SEGMENT_DURATIONS),
+            "strides": list(SEGMENT_STRIDES),
+            "frame_ceiling": FRAME_CEILING,
+            "hint": "Benenne auf Englisch, was im Bild zu sehen ist — je ein "
+                    "kurzer Begriff pro Farbe. SAM 3 findet jedes Vorkommen "
+                    "und verfolgt es durch den Clip; danach bekommt jede Farbe "
+                    "ihr eigenes Referenzbild. Deutsche Wörter findet das "
+                    "Modell nicht: „tomato\" deckt den halben Frame ab, "
+                    "„Tomate\" gar nichts.",
+        },
         # The two engines, and what each one is actually good at. Written here
         # because both sentences are measurements, not opinions.
         "engines": [
@@ -457,6 +999,73 @@ async def _reference_for(image_id: uuid.UUID, db: AsyncSession) -> Path:
     return path
 
 
+# A mask is only valid against the exact frames it was keyed out of. The
+# segmentation path produces a matched PAIR — a decimated copy of the footage
+# and the mask keyed from it — and `source_track_id` records which is which.
+# Nothing used to check it at render time, and the failure is silent and
+# expensive: measured 2026-09-04, a 30-frame 5 fps mask was rendered against
+# the 80-frame 10 fps original it had been decimated from, so the masks ran at
+# half the picture's rate and stopped entirely after frame 30. The references
+# then land wherever the arithmetic puts them, which is nowhere in particular.
+#
+# Refused rather than quietly corrected: substituting a different control track
+# changes what gets rendered, and that is the user's call, not this function's.
+FRAME_RATE_TOLERANCE = 0.02
+
+
+def _validate_mask_pairing(control: ControlTrack, mask: ControlTrack) -> None:
+    """Refuse a mask that was not keyed out of this control track.
+
+    Names the track that would work, because "wrong mask" is not actionable on
+    its own and the right answer is always already in the database.
+    """
+    if mask.kind != "mask":
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{mask.title or mask.id}' ist keine Maske, sondern "
+                   f"{mask.kind}-Material.",
+        )
+
+    if mask.source_track_id:
+        if mask.source_track_id != control.id:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Diese Maske wurde aus einer anderen Spur gekeyt. Sie gehört "
+                    f"zu {mask.source_track_id} — wähle die als Controlvideo, dann "
+                    f"sitzen die Regionen auf den Bildern, für die sie berechnet "
+                    f"wurden. (Aktuell gewählt: {control.id})"
+                ),
+            )
+        # Lineage settles it. The frame and rate checks below exist to catch a
+        # mismatch this one cannot see, and running them anyway would reject a
+        # correct pair whose stored fps is stale — several rows in this library
+        # carry 1000 and 2000 from the old r_frame_rate probe.
+        return
+
+    # A hand-authored mask carries no lineage, so the only thing left to check
+    # is whether it can physically line up: same number of frames, same rate.
+    if mask.frame_count and control.frame_count and mask.frame_count < control.frame_count:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Die Maske hat {mask.frame_count} Frames, das Controlvideo "
+                f"{control.frame_count}. Ab Frame {mask.frame_count + 1} gäbe es "
+                f"keine Maske mehr — kürze das Controlvideo oder segmentiere neu."
+            ),
+        )
+    if mask.fps and control.fps:
+        drift = abs(mask.fps - control.fps) / max(control.fps, 1e-6)
+        if drift > FRAME_RATE_TOLERANCE:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Die Maske läuft mit {mask.fps:g} fps, das Controlvideo mit "
+                    f"{control.fps:g}. Die Masken würden dem Bild davonlaufen."
+                ),
+            )
+
+
 @router.post("/generate", status_code=202)
 async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
     """Queue a structure-video job. Returns immediately; poll
@@ -494,6 +1103,7 @@ async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
         mask = await _get_track(body.mask_track_id, db)
         if not (settings.storage_dir / mask.filepath).is_file():
             raise HTTPException(status_code=404, detail="Mask track missing on disk")
+        _validate_mask_pairing(control, mask)
 
     # Never ask for frames the track cannot guide — VACE pads the surplus with
     # flat grey and the tail of the clip drifts with nothing steering it.
@@ -507,6 +1117,11 @@ async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
     if body.regions:
         references = [await _reference_for(r.image_id, db) for r in body.regions]
         image_ids = [r.image_id for r in body.regions]
+        # Appended, never inserted: `_lcm_request` reads the regions off the
+        # front of this list by index, so the base has to be the tail.
+        if body.base_image_id:
+            references.append(await _reference_for(body.base_image_id, db))
+            image_ids.append(body.base_image_id)
     else:
         references = [await _reference_for(body.image_id, db)]
         image_ids = [body.image_id]
@@ -597,6 +1212,18 @@ async def _submit_outputs(
     sampler_node = next(
         (nid for nid, node in wf.items() if node["class_type"] == "KSampler"), None
     )
+    # Check the card — and that ComfyUI is there at all — before posting.
+    # Without this the two ways a submission fails both surface as
+    # `httpx.ConnectError: All connection attempts failed`, which says nothing
+    # about ComfyUI being down; and the worse one does not even fail here — a
+    # CUDA OOM kills ComfyUI's prompt-worker *thread* while its HTTP server
+    # keeps handing out prompt ids, so the job sits "generating" until the poll
+    # times out two hours later. `free_vram_for` names both.
+    #
+    # This path had no pre-flight at all while it was the only GPU consumer in
+    # the tool. Segmentation made it a second one, so it needs the same manners
+    # as routers/video.py.
+    await free_vram_for(_LCM_MIN_FREE_VRAM, "AnimateLCM/VACE")
     async with httpx.AsyncClient(timeout=240) as client:
         prompt_id = await post_workflow(client, wf)
         listener = get_listener()
@@ -728,11 +1355,20 @@ def _lcm_request(
         derive_depth=derive,
         invert_depth=not derive,
         filename_prefix=f"artrium_lcm_{video_id.hex[:8]}",
+        # Per-region weight when one was sent, the job's global one otherwise.
+        # Never `r.strength`: that is VACE's denoise and means nothing here.
         regions=[
-            LcmRegion(color=tuple(r.color), reference=staged[i],
-                      weight=req.ip_weight, threshold=r.threshold)
+            LcmRegion(
+                color=tuple(r.color), reference=staged[i], threshold=r.threshold,
+                weight=(r.ip_weight if r.ip_weight is not None else req.ip_weight),
+            )
             for i, r in enumerate(req.regions)
         ],
+        # The staged list is [region refs…, base?] — see `generate`. Anything
+        # past the regions is the base picture.
+        base_reference=(staged[len(req.regions)]
+                        if len(staged) > len(req.regions) else None),
+        base_weight=req.base_weight,
     )
     if req.negative:
         lcm.negative = req.negative

@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     # code change. See routers/video.py::_attention_backend for the numbers.
     wan_sage_attention: bool = True
 
+    # ── Segmentation (SAM 3) ─────────────────────────────────────────────────
+    # The segmenter runs in ComfyUI's interpreter, not art-rium's. That venv
+    # already carries torch+cu128 and a transformers new enough to ship SAM 3
+    # natively, so nothing has to be installed and no custom node has to be
+    # added to a render stack whose behaviour is measured. art-rium stays
+    # torch-free; see scripts/sam3_segment.py.
+    sam3_python: Path = Path("E:/00_comfy/venv/Scripts/python.exe")
+    sam3_model_dir: Path = Path("E:/00_comfy/models/sam3/sam3-hf")
+    sam3_device: str = "cuda"
+
     # ── Storage (managed, ingested files) ────────────────────────────────────
     storage_dir: Path = Path(__file__).parent.parent / "storage"
 
@@ -173,6 +183,12 @@ class Settings(BaseSettings):
         and referenced by id.
         """
         return self.storage_dir / "control"
+
+    @property
+    def sam3_script(self) -> Path:
+        """The segmentation worker. Not a setting: it is part of this repo and
+        travels with it, unlike the interpreter that runs it."""
+        return Path(__file__).parent.parent / "scripts" / "sam3_segment.py"
 
 
 settings = Settings()

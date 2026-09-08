@@ -44,6 +44,9 @@ workaround rather than a choice.
   IP-Adapter       weight 1.0, "K+V w/ C penalty", end_at 0.8. Not "V only":
                    K+V carries composition as well as colour, and at end_at 0.8
                    it lets go before the last fifth so the sampler can settle.
+                   With regions, an unmasked base adapter goes underneath the
+                   chain — see BASE_IP_DEFAULT for the measurements that made
+                   it necessary.
   depth ControlNet 0.45, end_percent 0.7
   hires            denoise 0.4, 11 steps; lineart CN 0.3/end 0.5, depth CN
                    0.5/end 0.6
@@ -125,6 +128,25 @@ IP_MIN, IP_MAX = 0.10, 1.50
 IP_DEFAULT = 1.00
 IP_END_DEFAULT = 0.80
 
+# ── The base layer ───────────────────────────────────────────────────────────
+# Masked IP-Adapters only condition what their mask covers. Everything else
+# runs on the text prompt alone — and at cfg 1.0 there is no unconditional pass
+# to temper it, so the checkpoint's own palette takes over completely.
+#
+# Measured 2026-09-04 on the renders that prompted this: three SAM 3 masks
+# covered 17.6-18.5% of the frame, so **82% of every frame had no reference at
+# all**. Saturation inside a mask read 89.5 against 175.9 outside it (PIL HSV
+# S), and the finished clips came out 1.6-2.8x more saturated than the pictures
+# they were supposed to be made of — where the single-reference path, which has
+# no masks and therefore covers everything, landed *below* its reference.
+#
+# So a region render also gets an unmasked adapter underneath the chain. It is
+# its own picture rather than a repeat of a region's: what it is for is the
+# ground the regions sit in, which is usually not what any of them shows.
+# Lower by default than a region's own weight — it sets the palette, it does
+# not compete with the material on top of it.
+BASE_IP_DEFAULT = 0.55
+
 # The hires denoise, and the one number in this file that was measured rather
 # than inherited. The original sat at 0.40; the sweep of 2026-08-19 found more
 # detail all the way to 0.60 with the composition untouched, and — against the
@@ -195,6 +217,11 @@ class AnimateLcmRequest:
     depth_end: float = DEPTH_END_DEFAULT
     ip_weight: float = IP_DEFAULT
     ip_end: float = IP_END_DEFAULT
+    # The unmasked layer under a region chain. None means the regions are the
+    # only conditioning there is, which is how this used to behave and is
+    # almost never what anyone wants — see BASE_IP_DEFAULT.
+    base_reference: str | None = None
+    base_weight: float = BASE_IP_DEFAULT
     ip_scaling: str = "K+V w/ C penalty"
     steps: int = DEFAULT_STEPS
     cfg: float = DEFAULT_CFG
@@ -433,6 +460,12 @@ def _model_stack(wf: dict, p: str, req: AnimateLcmRequest,
 
     adapters: list[tuple[str | None, str, float]] = []
     if req.regions:
+        # First and unmasked, so the regions apply on top of a frame that is
+        # already sitting on a reference rather than on the checkpoint's own
+        # idea of the colour. Without this, everything outside the masks is
+        # unconditioned — the failure this whole layer exists to prevent.
+        if req.base_reference:
+            adapters.append((None, req.base_reference, clamp_ip(req.base_weight)))
         for i, region in enumerate(req.regions):
             node = f"{p}mask{i}"
             wf[node] = {

@@ -4,7 +4,7 @@ MiniMax H3 costs close to linearly in pixels: the same clip renders in 6.2 min
 at 864×480 where 1344×768 needs 16.1 (measured, same seed and length). So the
 video workflow generates on a small canvas and this pass restores the pixels
 afterwards, on a finished clip, on demand — the same post-hoc shape as
-services/video/grain.py, except the work happens in ComfyUI rather than ffmpeg.
+services/video/look.py, except the work happens in ComfyUI rather than ffmpeg.
 
 SEEDVR2 is a diffusion *restorer*, not a resampler: it reconstructs detail
 rather than interpolating it, and it sees several frames at once so the
@@ -88,6 +88,19 @@ SAVE_NODE = "sv_save"
 RESOLUTION_MIN = 480
 RESOLUTION_MAX = 1440
 RESOLUTION_DEFAULT = 1080
+
+# The restoration is optional. RESOLUTION_KEEP leaves the picture at the size it
+# already is and runs the timing stages alone — interpolation, a target frame
+# rate, or both. Those two things were welded together only because the
+# restoration paid for the pass; they are independent renders, and wanting a
+# 16 fps clip played at 48 without also spending minutes per second of footage
+# on SEEDVR2 is the common case rather than the odd one.
+#
+# With it, `build_upscale_workflow` drops the DiT, the VAE and the upscaler node
+# entirely, so a RIFE-only pass loads no diffusion model at all; and when there
+# is no interpolation either, the whole thing is an ffmpeg conform that never
+# reaches ComfyUI — see `needs_comfy`.
+RESOLUTION_KEEP = 0
 
 # Cost model for the ETA shown before a user commits to the render, anchored
 # on the measurement above: 438 s for 56 frames of 1944×1080 output.
@@ -192,11 +205,33 @@ def clamp_rife(value: int | float | None) -> int:
 
 
 def clamp_resolution(value: int | float | None) -> int:
-    """Target short edge onto the supported range. None/garbage reads as the default."""
+    """Target short edge onto the supported range.
+
+    Zero (or anything below it) is RESOLUTION_KEEP: an explicit "leave the
+    picture alone", which is a choice rather than an absent one. None and
+    garbage still read as the default — a caller that sent nothing never made
+    a choice, and silently skipping the restoration for it would turn a typo
+    into a differently-shaped render.
+    """
     try:
-        return max(RESOLUTION_MIN, min(RESOLUTION_MAX, int(round(float(value)))))
+        px = int(round(float(value)))
     except (TypeError, ValueError):
         return RESOLUTION_DEFAULT
+    if px <= 0:
+        return RESOLUTION_KEEP
+    return max(RESOLUTION_MIN, min(RESOLUTION_MAX, px))
+
+
+def needs_comfy(resolution: int, rife_multiplier: int | None) -> bool:
+    """Whether this pass has anything for the GPU to do.
+
+    Both stages that need ComfyUI are optional now, so the combination that
+    needs neither — keep the resolution, no interpolation — has to be recognised
+    rather than submitted as an empty graph. What is left in that case is a
+    frame-rate conform, which is ffmpeg's job and takes seconds instead of
+    minutes.
+    """
+    return clamp_resolution(resolution) > RESOLUTION_KEEP or clamp_rife(rife_multiplier) > 1
 
 
 def output_dimensions(width: int, height: int, resolution: int) -> tuple[int, int]:
@@ -208,6 +243,8 @@ def output_dimensions(width: int, height: int, resolution: int) -> tuple[int, in
     *downscale*, which is never what this pass is for.
     """
     w, h = max(1, int(width)), max(1, int(height))
+    if resolution <= RESOLUTION_KEEP:
+        return w, h
     short = min(w, h)
     if short >= resolution:
         return w, h
@@ -224,6 +261,7 @@ def estimate_seconds(
     out_width: int,
     out_height: int,
     rife_multiplier: int = 1,
+    restore: bool = True,
 ) -> int:
     """Rough wall-clock estimate for the render, in seconds.
 
@@ -236,14 +274,22 @@ def estimate_seconds(
     restoration has to do, only what RIFE adds afterwards, so raising the
     multiplier barely moves this number — which is the whole point of running
     RIFE after the upscale instead of before it.
+
+    `restore` False drops the restoration term, leaving RIFE and the encode.
+    That is the whole difference a RESOLUTION_KEEP pass makes to the clock, and
+    it is a large one: 5 s of 1944×1080 at 3x estimates ~16 min with the
+    restoration and ~50 s without it.
     """
     if duration <= 0:
         return 0
     pixel_seconds = duration * out_width * out_height
-    cost = pixel_seconds * _SECONDS_PER_OUTPUT_PIXEL_SECOND
+    cost = pixel_seconds * _SECONDS_PER_OUTPUT_PIXEL_SECOND if restore else 0.0
     extra_steps = max(0, clamp_rife(rife_multiplier) - 1)
     cost += pixel_seconds * extra_steps * _RIFE_SECONDS_PER_OUTPUT_PIXEL_SECOND
-    return max(30, int(round(cost)))
+    # The floor covers model load and the h264 encode, neither of which the
+    # per-pixel rates carry. Without a restoration there is no 8 GB DiT to
+    # page in, so the same floor would be a fiction three times too large.
+    return max(30 if restore else 10, int(round(cost)))
 
 
 def build_upscale_workflow(
@@ -270,6 +316,12 @@ def build_upscale_workflow(
     `rife_multiplier` > 1 interpolates *after* the restoration, so SEEDVR2
     only ever sees the source's real frames.
 
+    `resolution` = RESOLUTION_KEEP builds the same graph without the
+    restoration in it: no DiT, no VAE, no upscaler node, and RIFE reads the
+    loader directly. Nothing else about the pass changes — same loader, same
+    muxer, same audio rule — so a retimed clip and an upscaled-and-retimed one
+    come out of one code path rather than two.
+
     `render_fps` decides what the interpolation is *for*. Left None, VHS keeps
     the source's rate and the picture comes out `rife_multiplier` times longer —
     slow motion, and the caller must then re-sync the audio with
@@ -279,6 +331,8 @@ def build_upscale_workflow(
     conform pass has to follow to hit an exact target.
     """
     p = "sv_"
+    resolution = clamp_resolution(resolution)
+    restore = resolution > RESOLUTION_KEEP
     wf: dict = {
         p+"load": {"class_type": "VHS_LoadVideoPath", "inputs": {
             "video":             str(src),
@@ -295,6 +349,14 @@ def build_upscale_workflow(
         p+"info": {"class_type": "VHS_VideoInfoSource", "inputs": {
             "video_info": [p+"load", 3],
         }},
+    }
+
+    # The restoration stage, present only when a target size was asked for.
+    # Skipping it is what makes an interpolation-only pass cheap: the three
+    # nodes below are the entire GPU cost of this workflow.
+    frames_node = [p+"load", 0]
+    if restore:
+        wf.update({
         p+"dit": {"class_type": "SeedVR2LoadDiTModel", "inputs": {
             "model":              _DIT_MODEL,
             "device":             "cuda:0",
@@ -321,7 +383,7 @@ def build_upscale_workflow(
             "dit":                [p+"dit", 0],
             "vae":                [p+"vae", 0],
             "seed":               _SEED,
-            "resolution":         clamp_resolution(resolution),
+            "resolution":         resolution,
             "max_resolution":     0,
             "batch_size":         _BATCH_SIZE,
             "uniform_batch_size": False,
@@ -329,12 +391,13 @@ def build_upscale_workflow(
             "temporal_overlap":   _TEMPORAL_OVERLAP,
             "offload_device":     "cpu",
         }},
-    }
+        })
+        frames_node = [p+"up", 0]
 
-    # Interpolate the *restored* frames. Same node settings as the generation
-    # path so a clip interpolated here is indistinguishable from one
-    # interpolated there — only the order and therefore the cost differ.
-    frames_node = [p+"up", 0]
+    # Interpolate the *restored* frames — or the source's own, when there is no
+    # restoration. Same node settings as the generation path so a clip
+    # interpolated here is indistinguishable from one interpolated there — only
+    # the order and therefore the cost differ.
     if clamp_rife(rife_multiplier) > 1:
         wf[p+"rife"] = {"class_type": "RIFE VFI", "inputs": {
             "ckpt_name":                  _RIFE_CKPT,
@@ -346,7 +409,7 @@ def build_upscale_workflow(
             "dtype":                      "float32",
             "torch_compile":              False,
             "batch_size":                 1,
-            "frames":                     [p+"up", 0],
+            "frames":                     frames_node,
         }}
         frames_node = [p+"rife", 0]
 

@@ -1,6 +1,6 @@
 """Film grain over a single image — the still-image sibling of the video pass.
 
-services/video/grain.py exists because Wan2.2 output is smooth to the point of
+services/video/look.py exists because Wan2.2 output is smooth to the point of
 looking plastic. Generated stills have the same problem, and the same cure:
 monochrome noise that puts texture back without touching colour, sharpness or
 geometry.

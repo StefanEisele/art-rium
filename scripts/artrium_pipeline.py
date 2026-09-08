@@ -55,7 +55,7 @@ from services.comfy.animatelcm import (  # noqa: E402
 )
 from services.comfy.client import free_memory, poll_history, post_workflow  # noqa: E402
 from services.comfy.vace import VaceRequest, build_vace_workflow, snap_length  # noqa: E402
-from services.video.grain import render_grain  # noqa: E402
+from services.video.look import Look, render_look  # noqa: E402
 from services.video.upscale import (  # noqa: E402
     build_upscale_workflow,
     clamp_resolution,
@@ -221,8 +221,8 @@ async def main() -> None:
         print(f"[G] film grain, strength {args.grain}", flush=True)
         grained = settings.comfyui_output_dir / f"{prefix}_final.mp4"
         started = time.monotonic()
-        await render_grain(current, grained, args.grain,
-                           ffmpeg_path=settings.ffmpeg_path)
+        await render_look(current, grained, Look(grain=args.grain),
+                          ffmpeg_path=settings.ffmpeg_path)
         print(f"   {grained}  ({time.monotonic() - started:.0f} s)\n", flush=True)
         current = grained
 

@@ -705,7 +705,20 @@
       overflow: hidden;
       background: #000;
       aspect-ratio: 1;
+      /* Same outline mechanism as .grid-img-wrap, so select mode looks the
+         same whichever kind of tile is under it. */
+      outline: 2.5px solid transparent;
+      transition: outline-color 0.15s;
     }
+    .video-grid-item.selected .video-thumb-wrap { outline-color: var(--accent); }
+    .video-grid-item.selected .sel-check {
+      opacity: 1;
+      background: rgba(0,0,0,0.35);
+    }
+    /* The play arrow sits over the whole frame and would fight the checkmark
+       for the middle of the tile. In select mode the tile is not a play
+       button, so it steps aside. */
+    .video-grid-item.selected .play-badge:not(.stack) { opacity: 0; }
     .video-thumb-wrap img {
       width: 100%; height: 100%;
       object-fit: cover;
@@ -721,7 +734,34 @@
       font-size: 18px;
       pointer-events: none;
     }
+    /* A stack that was never assembled. Sits in the corner rather than over the
+       whole frame: it is a label, not an invitation to press play. */
+    .video-thumb-wrap .play-badge.stack {
+      inset: auto 6px 6px auto;
+      background: rgba(0,0,0,0.72);
+      border-radius: 7px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
     .video-grid-item .grid-title { font-size: 12px; color: var(--text-dim); padding: 0 2px 4px; }
+
+    /* ── Clip strip in the video detail sheet ── */
+    .vd-clips { margin: 6px 0 2px; }
+    .vd-clips-note { font-size: 12px; color: var(--text-dim); margin-bottom: 7px; }
+    .vd-clips-row { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 4px; }
+    .vd-clips-row button {
+      position: relative; flex: none; width: 74px; padding: 0;
+      background: none; border: 2px solid transparent; border-radius: 8px;
+      cursor: pointer; overflow: hidden; line-height: 0;
+    }
+    .vd-clips-row button.active { border-color: var(--accent); }
+    .vd-clips-row button img { width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block; }
+    .vd-clips-row button span {
+      position: absolute; left: 4px; bottom: 4px;
+      background: rgba(0,0,0,0.72); color: #fff;
+      border-radius: 5px; padding: 1px 6px; font-size: 11px; line-height: 1.5;
+    }
     /* Placeholder when no thumb */
     .video-thumb-no-thumb {
       width: 100%; height: 100%;
@@ -1198,6 +1238,10 @@
       <button class="vd-close" onclick="closeVideoDetail()">✕</button>
     </div>
     <video class="vd-player" id="vd-player" controls playsinline preload="metadata"></video>
+    <!-- A job that was never assembled has no video of its own, only the
+         segments it rendered. This strip is what makes those reachable at all;
+         it stays hidden for an ordinary finished clip. -->
+    <div class="vd-clips" id="vd-clips" style="display:none"></div>
     <div class="vd-chips" id="vd-chips"></div>
     <input class="title-input" id="vd-title-input" placeholder="No title yet…" maxlength="255">
     <textarea class="notes-textarea" id="vd-notes-input" placeholder="Notes…" rows="3"></textarea>
@@ -1508,8 +1552,10 @@ const toggleSelectMode = () => {
   $('select-btn').textContent = state.selectMode ? 'Cancel' : 'Select';
   $('bulk-bar').classList.toggle('show', state.selectMode);
 
-  // Clear selected styling from all items
-  $('grid').querySelectorAll('.grid-item').forEach(el => el.classList.remove('selected'));
+  // Clear selected styling from all items — pictures and videos alike, since
+  // the same button drives both grids.
+  $('grid').querySelectorAll('.grid-item, .video-grid-item')
+    .forEach(el => el.classList.remove('selected'));
   updateBulkBar();
 };
 
@@ -1526,11 +1572,61 @@ const toggleSelect = (el, id) => {
 
 const updateBulkBar = () => {
   const n = state.selection.size;
-  $('bulk-count').textContent = n === 0 ? '0 selected' : `${n} selected`;
+  const noun = videoMode ? 'video' : 'image';
+  $('bulk-count').textContent = n === 0
+    ? `0 ${noun}s selected`
+    : `${n} ${noun}${n === 1 ? '' : 's'} selected`;
   $('bulk-delete-btn').disabled = n === 0;
 };
 
+const bulkDeleteVideosApi = async (ids) => {
+  const r = await apiFetch('/api/video', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  return r.json();
+};
+
+/** Bulk delete for the video grid.
+ *
+ *  Separate from the picture path rather than folded into it: the endpoint
+ *  answers with which rows actually went (a video still referenced by a
+ *  scheduled post refuses), so the grid is rebuilt from that answer instead of
+ *  from what was asked for. */
+const bulkDeleteVideos = async () => {
+  const ids = [...state.selection];
+  if (ids.length === 0) return;
+  if (!confirm(`Delete ${ids.length} video${ids.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
+
+  const btn = $('bulk-delete-btn');
+  btn.disabled = true;
+  try {
+    const res = await bulkDeleteVideosApi(ids);
+    const gone = new Set(res.deleted || []);
+    const refused = res.failed || [];
+    videos = videos.filter(v => !gone.has(v.id));
+    state.selection.clear();
+    renderVideoGrid();
+    updateBulkBar();
+
+    if (refused.length) {
+      // Named rather than counted: "one of these is still in use" is not
+      // actionable, and the reason is the whole point.
+      ArtRium.toast(
+        `${gone.size} gelöscht — ${refused.length} nicht: ${refused[0].reason}`, true);
+    } else {
+      ArtRium.toast(`Deleted ${gone.size} video${gone.size === 1 ? '' : 's'}`);
+    }
+    toggleSelectMode();
+  } catch (e) {
+    ArtRium.toast('Delete failed: ' + e.message, true);
+    btn.disabled = false;
+  }
+};
+
 const bulkDelete = async () => {
+  if (videoMode) return bulkDeleteVideos();
   const ids = [...state.selection];
   if (ids.length === 0) return;
   if (!confirm(`Delete ${ids.length} image${ids.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
@@ -2478,6 +2574,13 @@ let activeVideo = null;
 
 async function toggleVideoMode(btn) {
   videoMode = !videoMode;
+  // Pictures and videos are different id spaces, so a selection cannot survive
+  // the switch — carrying it over would delete whatever happened to share an
+  // id on the other side.
+  if (state.selectMode) {
+    state.selection.clear();
+    updateBulkBar();
+  }
   // De-activate all rating chips when entering video mode
   document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
   if (videoMode) {
@@ -2523,21 +2626,99 @@ function renderVideoGrid() {
   }
 }
 
+/** Load and show the segments of a job that was never assembled.
+ *
+ *  These rows are not junk — every one of them has real clips on disk. They
+ *  only look empty because the grid was built around a single finished file,
+ *  and a job parked after "generate" has none. */
+async function loadDetailClips(v) {
+  const strip = $('vd-clips');
+  strip.style.display = '';
+  strip.innerHTML = '<div class="vd-clips-note">Clips werden geladen…</div>';
+  let clips = [];
+  try {
+    const r = await apiFetch(`/api/video/clips?video_id=${v.id}`);
+    clips = await r.json();
+  } catch {
+    strip.innerHTML = '<div class="vd-clips-note">Clips konnten nicht geladen werden.</div>';
+    return;
+  }
+  if (!clips.length) {
+    strip.innerHTML = '<div class="vd-clips-note">Dieser Job hat keine Clips mehr.</div>';
+    return;
+  }
+
+  strip.innerHTML = `<div class="vd-clips-note">Nie zusammengefügt — ${clips.length} `
+    + `Clip${clips.length === 1 ? '' : 's'}. Im Video-Tool zusammenfügbar.</div>`;
+  const row = document.createElement('div');
+  row.className = 'vd-clips-row';
+
+  // Numbered by position in the stack, not by `idx`: a stack that lost a clip
+  // has gaps (0, 2, 5…), and the badge, the filename and the order on screen
+  // should agree with each other rather than with the database.
+  const play = (clip, btn, n) => {
+    const player = $('vd-player');
+    player.src = withAuth(clip.url);
+    player.load();
+    player.play().catch(() => {});
+    row.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const dl = $('vd-download');
+    dl.style.display = '';
+    dl.href = withAuth(clip.url);
+    dl.download = `clip_${n}.mp4`;
+  };
+
+  clips.forEach((clip, i) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.innerHTML = `<img src="${withAuth(clip.thumb_url)}" alt="" loading="lazy">`
+      + `<span>${i + 1}</span>`;
+    btn.onclick = () => play(clip, btn, i + 1);
+    row.appendChild(btn);
+    if (i === 0) setTimeout(() => play(clip, btn, 1), 0);
+  });
+  strip.appendChild(row);
+}
+
 function makeVideoGridItem(v) {
   const div = document.createElement('div');
   div.className = 'video-grid-item';
-  div.onclick = () => openVideoDetail(v);
+  div.dataset.id = v.id;
+  // Re-applied on every render: a grid rebuilt while select mode is on (a
+  // reload, a delete that left survivors) must not silently drop the marks.
+  if (state.selectMode && state.selection.has(v.id)) div.classList.add('selected');
+  div.onclick = () => {
+    if (state.selectMode) toggleSelect(div, v.id);
+    else openVideoDetail(v);
+  };
 
   const wrap = document.createElement('div');
   wrap.className = 'video-thumb-wrap';
 
+  // An unassembled stack gets its clip count instead of a play arrow: the
+  // arrow promised a single video that does not exist, which is what made
+  // these look broken rather than unfinished.
+  // A parked AnimateLCM preview is watchable but not finished — it is still
+  // waiting on a verdict in the Struktur tool. Showing it with a plain play
+  // arrow would claim it is done.
+  const badge = v.status === 'review'
+    ? '<div class="play-badge stack">Vorschau</div>'
+    : (v.assembled === false && v.clip_count
+        ? `<div class="play-badge stack">${v.clip_count} ⧉</div>`
+        : '<div class="play-badge">▶</div>');
   if (v.thumb_url) {
     wrap.innerHTML = `
       <img src="${withAuth(v.thumb_url)}" alt="" loading="lazy">
-      <div class="play-badge">▶</div>`;
+      ${badge}`;
   } else {
-    wrap.innerHTML = `<div class="video-thumb-no-thumb">🎬</div><div class="play-badge">▶</div>`;
+    wrap.innerHTML = `<div class="video-thumb-no-thumb">🎬</div>${badge}`;
   }
+
+  const selCheck = document.createElement('div');
+  selCheck.className = 'sel-check';
+  selCheck.textContent = '✓';
+  wrap.appendChild(selCheck);
 
   const titleEl = document.createElement('div');
   titleEl.className = 'grid-title' + (v.title ? '' : ' placeholder');
@@ -2554,8 +2735,17 @@ function openVideoDetail(v) {
   activeVideo = v;
   vdDirty = false;
   const player = $('vd-player');
-  player.src = withAuth(v.url);
-  player.load();
+  // A stack that was never assembled has no `url`. Feeding the player null
+  // gave the empty, unplayable tile — its clips are loaded instead.
+  if (v.url) {
+    player.src = withAuth(v.url);
+    player.load();
+    $('vd-clips').style.display = 'none';
+  } else {
+    player.removeAttribute('src');
+    player.load();
+    loadDetailClips(v);
+  }
 
   $('vd-title').textContent = v.title || 'Video';
 
@@ -2584,8 +2774,11 @@ function openVideoDetail(v) {
     day: '2-digit', month: '2-digit', year: '2-digit',
     hour: '2-digit', minute: '2-digit',
   });
-  $('vd-download').href = withAuth(v.url);
+  // An unassembled stack has nothing to download as one file; the strip's
+  // buttons repoint this at whichever clip is playing.
+  $('vd-download').href = v.url ? withAuth(v.url) : '#';
   $('vd-download').download = v.filename || 'video.mp4';
+  $('vd-download').style.display = v.url ? '' : 'none';
 
   $('video-detail-modal').classList.add('show');
   document.body.style.overflow = 'hidden';

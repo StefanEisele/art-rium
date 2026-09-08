@@ -115,23 +115,30 @@ from services.comfy.wan_moe import I2V_BOUNDARY, moe_split_step
 from services.comfy.wan_moe import SCHEDULER as WAN_SCHEDULER
 from services.comfy.wan_transition_loras import offered as offered_transition_loras
 from services.comfy.wan_transition_loras import with_lora_trigger
+from services.comfy.vram import free_vram_for
 from services.comfy.zimage import ZIMAGE_SAVE_NODE, build_zimage_workflow
 from workers.comfy_listener import get_listener
 from services.ollama.analysis import (
-    cancel_titler_warmup,
     generate_i2v_motion_prompts,
     generate_minimax_motion_prompts,
     generate_minimax_transition_prompts,
     generate_transition_prompts,
 )
-from services.ollama.chat import unload_model, wait_until_unloaded
 from services.ollama.story_frames import (
     describe_image_for_story,
     generate_story_frame_prompts,
 )
 from services.ollama.zimage_enhance import get_zimage_style_block
 from services.video.audio_stretch import stretch_audio_to_video, stretch_native_audio
-from services.video.grain import render_grain, render_grain_preview
+from services.video.look import (
+    DEFAULT_PRESET,
+    PRESET_BY_KEY,
+    Look,
+    clamp_strength as clamp_look_strength,
+    preset_options,
+    render_look,
+    render_look_preview,
+)
 from services.video.merge import MergeInput, merge_clips
 from services.video.audio_bed import BED_VOLUME_DEFAULT, clamp_bed_volume
 from services.video.soundtrack import mux_soundtrack
@@ -139,6 +146,8 @@ from services.video.upscale import (
     FPS_PRESETS,
     clamp_fps,
     plan_frame_rate,
+    RESOLUTION_DEFAULT,
+    RESOLUTION_KEEP,
     RESOLUTION_MAX,
     RESOLUTION_MIN,
     RIFE_MULTIPLIERS,
@@ -146,6 +155,7 @@ from services.video.upscale import (
     clamp_resolution,
     clamp_rife,
     estimate_seconds,
+    needs_comfy,
     output_dimensions,
 )
 
@@ -1612,50 +1622,6 @@ async def _finalize_video_done(
         _progress.pop(vid_key, None)
 
 
-async def _evict_ollama() -> None:
-    """Ask Ollama to give the card back, and wait for it to confirm.
-
-    Three steps, each because the previous one is not enough:
-
-    1. Call off any in-flight startup warm-up. Evicting first does nothing
-       against it — during a cold load the model is not resident yet, so the
-       eviction finds an empty server and the warm-up then loads 5.3 GB *into*
-       the render. See services/ollama/analysis.py::cancel_titler_warmup.
-    2. Evict whatever is resident. The "✨ Suggest prompts" step just before a
-       generation leaves the titler VLM in VRAM on a 30 min keep-alive, and
-       Ollama sizes its KV cache from total VRAM, so even a 3B model holds
-       gigabytes of a 16 GB card.
-    3. Wait for confirmation — `unload_model` returns once Ollama accepts the
-       request (~250 ms measured) while the runner keeps its VRAM longer.
-
-    Still not a guarantee: none of this can stop an Ollama cold load that is
-    already under way, which is why the caller checks free VRAM afterwards
-    rather than trusting this to have worked.
-    """
-    await cancel_titler_warmup()
-    for model in (
-        settings.ollama_titler_model,
-        settings.ollama_vlm_model,
-        settings.ollama_prompt_model,
-    ):
-        if model:
-            await unload_model(model)
-    await wait_until_unloaded()
-
-
-async def _free_ollama_vram(workflow: str | None = None) -> None:
-    """Make the GPU ready for a ComfyUI render, or fail loudly trying.
-
-    Video diffusion gets whatever Ollama leaves behind: MiniMax H3 pairs a 32B
-    text encoder with the DiT and needs essentially the whole card, and
-    ComfyUI's dynamic-VRAM loader does not fall back to a slower path — it
-    dies with a CUDA OOM that takes its prompt worker thread with it. So evict
-    first, then verify the card is actually free before submitting.
-    """
-    await _evict_ollama()
-    await _preflight_comfyui(workflow)
-
-
 # How much of the card each workflow needs free before it is safe to start.
 # MiniMax stages ~15 GB for its text encoder alone ("14956MB Staged" in the
 # ComfyUI log), so it needs essentially the whole 16 GB card; the Wan
@@ -1667,124 +1633,13 @@ _MIN_FREE_VRAM = {
 }
 _MIN_FREE_VRAM_DEFAULT = 9.0 * 1024**3
 
-# How long to wait for someone else to let go of the card. Sized for the
-# thing that actually holds it: an Ollama cold load of the titler VLM, which
-# takes ~150 s and cannot be aborted once it has started.
-_VRAM_WAIT_TIMEOUT = 210.0
-_VRAM_WAIT_POLL = 5.0
 
-# ComfyUI's /free returns as soon as it has dropped its references; CUDA hands
-# the memory back a moment later. Re-measuring immediately reads the old
-# number — the same reason the per-segment loop sleeps after free_memory.
-_COMFY_FREE_SETTLE = 3.0
-
-
-async def _release_comfy_models() -> None:
-    """Ask ComfyUI to unload its resident models. Best-effort, never raises."""
-    async with httpx.AsyncClient(timeout=15) as client:
-        await free_memory(client)
-
-
-async def _comfy_devices() -> list[dict]:
-    """ComfyUI's device list, or a clear error explaining why there isn't one."""
-    try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            r = await client.get(f"http://{settings.comfyui_host}/system_stats")
-    except Exception as exc:
-        raise RuntimeError(f"ComfyUI is unreachable at {settings.comfyui_host} ({exc})") from exc
-
-    # A CUDA OOM kills ComfyUI's `prompt_worker` *thread*, not its process: the
-    # HTTP server keeps answering and /prompt keeps handing out prompt_ids while
-    # nothing ever executes, so a job sits "generating" until the poll times out
-    # half an hour later. /system_stats returning 500 is the reliable tell.
-    if r.status_code != 200:
-        raise RuntimeError(
-            f"ComfyUI is up but not working (/system_stats → {r.status_code}). Its worker "
-            "thread most likely died on an earlier out-of-memory error; restart ComfyUI."
-        )
-    try:
-        return r.json().get("devices", []) or []
-    except Exception:
-        return []
-
-
-async def _preflight_comfyui(workflow: str | None = None) -> None:
-    """Refuse to submit until the GPU actually has room.
-
-    Evicting Ollama is not sufficient, and neither is cancelling its warm-up.
-    An Ollama *cold* load takes ~150 s, allocates VRAM progressively as it
-    goes, and cannot be stopped from the client side — `/api/ps` does not even
-    list the model until the load finishes, so both `wait_until_unloaded` and
-    `cancel_titler_warmup` see an idle server and wave the job through while
-    several GB are quietly being taken. Measured on a post-reboot start:
-    ComfyUI up at 14:51:18, job submitted 14:52:05, dead at 14:52:12.
-
-    So stop reasoning about *who* holds the card and check the only thing that
-    matters — how much is free — retrying the eviction while we wait. Failing
-    here with a number is strictly better than the alternative: a CUDA OOM
-    that kills ComfyUI's worker thread and needs a restart.
-
-    Ollama is not the only holder, though, and for a post-pass it is usually
-    not the holder at all: ComfyUI keeps the models from the render that just
-    finished, so an upscale queued straight after a MiniMax job finds ~3 GB
-    free and no amount of evicting Ollama changes that. On the first shortfall
-    we therefore ask ComfyUI to let go too, before starting to wait.
-    """
+async def _free_ollama_vram(workflow: str | None = None) -> None:
+    """Resolve how much VRAM `workflow` needs, then hand off to the shared
+    pre-flight (services/comfy/vram.py) — evict Ollama, then verify the card
+    is actually free before submitting."""
     required = _MIN_FREE_VRAM.get(workflow or "", _MIN_FREE_VRAM_DEFAULT)
-    deadline = asyncio.get_event_loop().time() + _VRAM_WAIT_TIMEOUT
-    warned = False
-    released = False
-
-    while True:
-        devices = await _comfy_devices()
-        if not devices:
-            logger.warning("ComfyUI reported no devices — skipping the VRAM pre-flight")
-            return
-        dev = devices[0]
-        free, total = dev.get("vram_free", 0), dev.get("vram_total", 0)
-
-        if free >= required:
-            logger.info(
-                "Pre-flight VRAM on %s: %.1f GB free of %.1f GB (need %.1f)",
-                dev.get("name"), free / 1e9, total / 1e9, required / 1e9,
-            )
-            return
-
-        # Before waiting on anyone, make ComfyUI drop what the previous render
-        # left resident. Waiting cannot fix that on its own — nothing else
-        # frees it — so a missing release here is a guaranteed timeout, not a
-        # slow start.
-        if not released:
-            released = True
-            logger.info(
-                "Only %.1f GB free on %s — asking ComfyUI to unload before waiting",
-                free / 1e9, dev.get("name"),
-            )
-            await _release_comfy_models()
-            await asyncio.sleep(_COMFY_FREE_SETTLE)
-            continue
-
-        if not warned:
-            logger.warning(
-                "Only %.1f GB free on %s, %s needs %.1f GB — waiting for the card",
-                free / 1e9, dev.get("name"), workflow or "this workflow", required / 1e9,
-            )
-            warned = True
-
-        if asyncio.get_event_loop().time() >= deadline:
-            raise RuntimeError(
-                f"GPU still busy after {_VRAM_WAIT_TIMEOUT:.0f}s: only "
-                f"{free / 1e9:.1f} GB free of {total / 1e9:.1f} GB, {workflow or 'this workflow'} "
-                f"needs {required / 1e9:.1f} GB. Something else is holding the card "
-                "(an Ollama model — check `ollama ps` — or a ComfyUI render that "
-                "will not unload; restarting ComfyUI clears the latter)."
-            )
-
-        # Whoever it is may only just have finished loading; try both holders
-        # again before the next check.
-        await _evict_ollama()
-        await _release_comfy_models()
-        await asyncio.sleep(_VRAM_WAIT_POLL)
+    await free_vram_for(required, workflow or "this workflow")
 
 
 async def _run_generation(video_id: uuid.UUID, req: GenerateVideoRequest) -> None:
@@ -1883,7 +1738,7 @@ def _video_owned_paths(video: Video) -> list[Path]:
     for name in (video.muxed_filename, video.upscale_filename, video.grain_filename):
         if name:
             paths.append(settings.videos_dir / name)
-    paths.append(settings.videos_dir / _grain_preview_name(video.id))
+    paths.append(settings.videos_dir / _look_preview_name(video.id))
     paths.append(settings.videos_dir / f"{video.id}_thumb.jpg")
     return paths
 
@@ -2723,6 +2578,7 @@ def _serialize_clip(c: VideoClip) -> dict:
         "wan_lora_high": c.wan_lora_high,
         "upscale_resolution": c.upscale_resolution,
         "upscale_rife":       c.upscale_rife,
+        "upscale_fps":        c.upscale_fps,
         "has_upscale":        bool(c.upscale_filename),
         "upscale_rendering":  _is_clip_upscaling(c),
         "created_at":  c.created_at.isoformat(),
@@ -2941,17 +2797,117 @@ async def update_video(
 
 
 @router.get("/thumb/{video_id}")
-async def video_thumbnail(video_id: uuid.UUID):
+async def video_thumbnail(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """The card image for a video — made on the spot if it is missing.
+
+    Every path that writes a video also writes one of these, but "every path"
+    has not always been true and will not stay true on its own: rows rendered
+    before that convention existed have a perfectly good video and no
+    thumbnail, and a workflow added later can forget again. The old behaviour
+    was a 404, which the grid drew as an empty tile — the picture was right
+    there in the file the whole time.
+
+    So a miss falls back to making it. It is written to the usual path, which
+    means each video pays for this exactly once, and a workflow that forgets
+    the thumbnail is now a slow first paint rather than a permanent hole.
+    """
     p = settings.videos_dir / f"{video_id}_thumb.jpg"
     if p.exists():
         return FileResponse(p, media_type="image/jpeg")
+
+    video = await db.get(Video, video_id)
+    name = _video_primary_name(video) if video else None
+    source = settings.videos_dir / name if name else None
+    if source and source.is_file():
+        try:
+            await make_video_thumbnail(source, p)
+        except Exception as exc:
+            logger.warning("On-demand thumbnail failed for %s: %s", video_id, exc)
+        if p.exists():
+            logger.info("Generated missing thumbnail for video %s", video_id)
+            return FileResponse(p, media_type="image/jpeg")
+
     raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
 @router.get("")
 async def list_videos(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Video).order_by(desc(Video.created_at)))
-    return [_serialize(v) for v in result.scalars().all()]
+    videos = (await db.execute(
+        select(Video).order_by(desc(Video.created_at))
+    )).scalars().all()
+
+    # One pass over the clips rather than a query per video: a job that was
+    # never assembled has no file of its own, and its stack is the only thing
+    # that can describe it in a grid. Ordered by idx so the first clip — the
+    # opening shot — is the one that becomes the thumbnail.
+    clips = (await db.execute(
+        select(VideoClip).order_by(VideoClip.video_id, VideoClip.idx)
+    )).scalars().all()
+    counts: dict[uuid.UUID, int] = {}
+    thumbs: dict[uuid.UUID, str] = {}
+    for c in clips:
+        counts[c.video_id] = counts.get(c.video_id, 0) + 1
+        if c.video_id not in thumbs and c.thumb:
+            thumbs[c.video_id] = f"/api/video/segments/{c.video_id}/{c.thumb}"
+
+    return [
+        _serialize(v, counts.get(v.id, 0), thumbs.get(v.id))
+        for v in videos
+    ]
+
+
+class BulkDeleteVideosRequest(BaseModel):
+    ids: list[uuid.UUID]
+
+
+@router.delete("")
+async def bulk_delete_videos(
+    body: BulkDeleteVideosRequest, db: AsyncSession = Depends(get_db),
+):
+    """Delete several videos in one request.
+
+    **Deliberately not one transaction.** A video can be referenced elsewhere —
+    a scheduled Instagram post, an improv session — and such a row refuses to
+    go. In a single transaction one refusal takes the whole batch down with it,
+    and since the files would already have been unlinked by then, the survivors
+    would come back as rows pointing at nothing. So each video is committed on
+    its own and a refusal is reported rather than raised.
+
+    **Row first, files after**, for the same reason `_delete_source_videos`
+    does it that way: if the delete is refused, the video has to stay intact
+    and playable instead of becoming a row whose files are gone.
+
+    A video that is already missing counts as deleted. The caller asked for it
+    not to exist, it does not exist, and the grid should drop the tile — an
+    error there would only make a stale gallery look broken.
+    """
+    deleted: list[str] = []
+    failed: list[dict] = []
+    # dict.fromkeys rather than set(): a duplicated id should be collapsed, but
+    # the order the caller sent still decides what the log reads like.
+    for vid in dict.fromkeys(body.ids):
+        video = await db.get(Video, vid)
+        if not video:
+            deleted.append(str(vid))
+            continue
+        paths, seg_dir = _video_owned_paths(video), _segments_dir(vid)
+        try:
+            await db.delete(video)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.warning("Bulk delete: video %s refused (still referenced?)", vid)
+            failed.append({"id": str(vid),
+                           "reason": "Wird noch von einem Beitrag verwendet"})
+            continue
+        _progress.pop(str(vid), None)
+        for path in paths:
+            path.unlink(missing_ok=True)
+        shutil.rmtree(seg_dir, ignore_errors=True)
+        deleted.append(str(vid))
+
+    logger.info("Bulk deleted %d video(s), %d refused", len(deleted), len(failed))
+    return {"deleted": deleted, "failed": failed}
 
 
 @router.delete("/{video_id}", status_code=204)
@@ -2959,11 +2915,16 @@ async def delete_video(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     video = await db.get(Video, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
-    for p in _video_owned_paths(video):
-        p.unlink(missing_ok=True)
-    shutil.rmtree(_segments_dir(video_id), ignore_errors=True)
+    paths, seg_dir = _video_owned_paths(video), _segments_dir(video_id)
+    # Row first, files after — see bulk_delete_videos above. This used to
+    # unlink first, which turned a refused delete into a playable-looking row
+    # with no files behind it.
     await db.delete(video)
     await db.commit()
+    _progress.pop(str(video_id), None)
+    for p in paths:
+        p.unlink(missing_ok=True)
+    shutil.rmtree(seg_dir, ignore_errors=True)
 
 
 # ── Soundtrack (mux a generated Song onto a generated Video) ──────────────────
@@ -3068,9 +3029,9 @@ async def attach_soundtrack(
     # The mirror of the guard in _validate_upscale_target, and it has to exist
     # here too: attaching a song rewrites the upscale's source, so the
     # re-render would run the interpolated path over the music and
-    # time-stretch it. A song and an interpolated upscale are mutually
-    # exclusive, in both directions.
-    if (video.upscale_rife or 1) > 1:
+    # time-stretch it. Only the slow-motion variant, though — a pass with a
+    # target rate kept the clip's length, so its re-render will too.
+    if (video.upscale_rife or 1) > 1 and not video.upscale_fps:
         raise HTTPException(
             status_code=409,
             detail=f"This video's upscale interpolates {video.upscale_rife}×, and re-rendering "
@@ -3140,11 +3101,19 @@ async def detach_soundtrack(video_id: uuid.UUID, db: AsyncSession = Depends(get_
 # for the model, the measured cost, and why it cannot run on the second GPU.
 
 class UpscaleApply(BaseModel):
-    resolution: int = 1080     # target SHORT edge in px; validated in the endpoint
-    rife_multiplier: int = 1   # 1 = no interpolation; 2/3/4 run RIFE after the restore
+    # Target SHORT edge in px, validated in the endpoint. 0 is RESOLUTION_KEEP:
+    # run the pass for its timing stages alone and leave the picture's size
+    # untouched, which is what makes interpolation and a frame rate reachable
+    # without paying for the restoration.
+    resolution: int = 1080
+    # 1 = no interpolation; 2/3/4 run RIFE after the restore. None (the
+    # default, and what an omitted field gives) means "work it out from `fps`" —
+    # nobody should have to divide 24 by 8 themselves. With no `fps` either,
+    # there is nothing to derive and it reads as off.
+    rife_multiplier: int | None = None
     # Target playback rate. None keeps the source's rate, which with RIFE means
     # slow motion — the clip gets `rife_multiplier` times longer. A number keeps
-    # the duration and raises the rate instead, deriving the multiplier from it.
+    # the duration and raises the rate instead.
     fps: int | None = None
 
 
@@ -3166,12 +3135,23 @@ def _upscale_name(video_id: uuid.UUID) -> str:
     return f"{video_id}_upscale.mp4"
 
 
+def _pass_verb(resolution: int) -> str:
+    """What to call this pass in front of the user.
+
+    The same endpoint now runs two visibly different jobs — a restoration that
+    takes minutes per second of footage, and a retime that takes seconds — and
+    a progress line saying "Upscaling" through the second one is a small lie
+    the user has no way to check.
+    """
+    return "Upscaling" if clamp_resolution(resolution) > RESOLUTION_KEEP else "Retiming"
+
+
 async def _upscale_plan_from_file(
     src: Path,
     resolution: int,
     fallback_w: int | None = None,
     fallback_h: int | None = None,
-    rife_multiplier: int = 1,
+    rife_multiplier: int | None = None,
     target_fps: int | None = None,
 ) -> dict:
     """Source facts the upscale needs: output size and a wall-clock estimate.
@@ -3180,19 +3160,23 @@ async def _upscale_plan_from_file(
     the *generation* canvas, which a merge or an attached soundtrack may have
     moved away from; the row's values are only the fallback for an unreadable
     file.
+
+    `resolution` = RESOLUTION_KEEP plans a pass with no restoration in it: the
+    output size is the source size and the estimate drops the term that
+    dominates it, leaving what interpolation and the encode actually cost.
     """
     duration = await probe_video_duration(src)
     _, source_fps = await probe_video_frames(src)
     w, h = await probe_video_dimensions(src)
-    w = w or fallback_w or resolution
-    h = h or fallback_h or resolution
+    w = w or fallback_w or resolution or RESOLUTION_DEFAULT
+    h = h or fallback_h or resolution or RESOLUTION_DEFAULT
     out_w, out_h = output_dimensions(w, h, resolution)
-    # With a target rate the multiplier is derived from it — asking for 24 fps
-    # out of an 8 fps clip means 3x, and nobody should have to work that out.
-    rate = plan_frame_rate(
-        source_fps, target_fps,
-        None if target_fps else rife_multiplier,
-    )
+    # A multiplier of None asks for it to be derived from the target rate —
+    # 24 fps out of an 8 fps clip means 3x, and nobody should have to work that
+    # out. An explicit number is honoured instead, so "2x, and write 24" stays
+    # sayable.
+    rate = plan_frame_rate(source_fps, target_fps, rife_multiplier)
+    restore = clamp_resolution(resolution) > RESOLUTION_KEEP
     return {
         "width": out_w,
         "height": out_h,
@@ -3202,7 +3186,14 @@ async def _upscale_plan_from_file(
         # this, so display precision is not good enough.
         "duration": duration,
         "rife_multiplier": rate["rife_multiplier"],
-        "seconds": estimate_seconds(duration, out_w, out_h, rate["rife_multiplier"]),
+        # What the pass will actually do, so the UI can label it and
+        # `_refine_render` can pick its route without re-deriving either.
+        "resolution": clamp_resolution(resolution),
+        "restore": restore,
+        "needs_comfy": needs_comfy(resolution, rate["rife_multiplier"]),
+        "seconds": estimate_seconds(
+            duration, out_w, out_h, rate["rife_multiplier"], restore,
+        ),
         # What the frame rate will actually do, so the UI can say it before the
         # user commits rather than after: the interpolation factor is derived
         # from the target, and an unreachable target is conformed afterwards.
@@ -3250,26 +3241,53 @@ async def _conform_frame_rate(
         )
 
 
-async def _seedvr2_render(
+async def _refine_render(
     src: Path,
     dest: Path,
     *,
     resolution: int,
-    rife: int,
     plan: dict,
     progress_key: str,
     prefix: str,
     log_subject: str,
 ) -> None:
-    """Restore `src` into `dest` with SEEDVR2, honouring the one-at-a-time gate.
+    """Render `src` into `dest`: restore it, retime it, or both.
 
     Shared by the video-level pass and the per-clip pass — they differ only in
     which row they read their source from and which row they write the result
     onto, so everything between those two ends lives here.
+
+    Three routes out, in order of what they cost:
+
+      * nothing for the GPU (keep the resolution, no interpolation) — the whole
+        pass is an ffmpeg frame-rate conform, seconds rather than minutes, and
+        it never queues behind the upscale gate or evicts anything from VRAM.
+      * interpolation only — a ComfyUI graph with no diffusion model in it.
+      * the full restoration, with or without interpolation on top.
+
+    The last two are the same submission; `build_upscale_workflow` decides
+    which nodes are in it.
     """
     # A silent source must leave the muxer's audio slot unconnected — VHS
     # raises rather than returning an empty track when it finds no stream.
     has_audio = await probe_has_audio(src)
+
+    if not plan.get("needs_comfy", True):
+        # A pure retime. `needs_conform` is false only when the target rate is
+        # the one the file already has, and then there is genuinely nothing to
+        # do but put the rendition where the row expects it.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if plan.get("needs_conform"):
+            _set_progress(progress_key, "upscaling",
+                          f"Conforming to {plan['target_fps']} fps…", 60)
+            await _conform_frame_rate(
+                src, dest, plan["target_fps"], has_audio=has_audio,
+            )
+        else:
+            await asyncio.to_thread(shutil.copy2, src, dest)
+        logger.info("Retime applied: %s → %s fps", log_subject, plan.get("target_fps"))
+        return
+
     wf, save_node = build_upscale_workflow(
         src,
         resolution=resolution,
@@ -3312,7 +3330,8 @@ async def _seedvr2_render(
                 prompt_id=prompt_id, band=(prior.get("pct", 30), 88),
             )
             logger.info(
-                "Upscale submitted: %s → %dx%d, ~%ds (prompt %s)",
+                "%s submitted: %s → %dx%d, ~%ds (prompt %s)",
+                "Upscale" if plan.get("restore", True) else "Interpolation",
                 log_subject, plan["width"], plan["height"], plan["seconds"], prompt_id,
             )
             outputs = await poll_history(
@@ -3347,16 +3366,19 @@ async def _seedvr2_render(
 
 
 async def _apply_upscale(
-    video_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+    video_id: uuid.UUID, resolution: int, rife_multiplier: int | None = None,
     target_fps: int | None = None,
 ) -> None:
-    """Run the SEEDVR2 pass from the un-upscaled source and persist it.
+    """Run the pass from the un-upscaled source and persist it.
 
     Raises on failure; each caller decides how to report. Also used to
     re-render after a soundtrack change, which swaps the source file
     underneath an existing upscale.
+
+    `rife_multiplier` None asks for the factor to be derived from `target_fps`,
+    so what lands on the row is `plan["rife_multiplier"]` — what actually ran —
+    rather than what was requested.
     """
-    rife = clamp_rife(rife_multiplier)
     async with AsyncSessionLocal() as db:
         video = await db.get(Video, video_id)
         if not video or not video.filepath:
@@ -3367,13 +3389,13 @@ async def _apply_upscale(
     if not src.exists():
         raise RuntimeError(f"Source file missing: {src.name}")
     plan = await _upscale_plan_from_file(
-        src, resolution, fallback_w, fallback_h, rife, target_fps,
+        src, resolution, fallback_w, fallback_h, rife_multiplier, target_fps,
     )
 
     out_name = _upscale_name(video_id)
-    await _seedvr2_render(
+    await _refine_render(
         src, settings.videos_dir / out_name,
-        resolution=resolution, rife=rife, plan=plan,
+        resolution=resolution, plan=plan,
         progress_key=str(video_id),
         prefix=f"artrium_up_{video_id.hex[:10]}",
         log_subject=f"video={video_id}",
@@ -3382,19 +3404,24 @@ async def _apply_upscale(
     async with AsyncSessionLocal() as db:
         video = await db.get(Video, video_id)
         if video:
-            video.upscale_resolution = resolution
-            video.upscale_rife = rife
+            video.upscale_resolution = plan["resolution"]
+            video.upscale_rife = plan["rife_multiplier"]
+            # Persisted so a re-render is faithful: without it a same-length
+            # 3x pass would come back as slow motion the next time its source
+            # changes, which is the opposite of what was asked for.
+            video.upscale_fps = plan["target_fps"]
             video.upscale_filename = out_name
             video.error = None
             await db.commit()
     logger.info(
-        "Upscale applied: video=%s resolution=%d rife=%dx → %s",
-        video_id, resolution, rife, out_name,
+        "Upscale applied: video=%s resolution=%s rife=%dx fps=%s → %s",
+        video_id, plan["resolution"] or "keep", plan["rife_multiplier"],
+        plan["target_fps"] or "source", out_name,
     )
 
 
 async def _run_upscale(
-    video_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+    video_id: uuid.UUID, resolution: int, rife_multiplier: int | None = None,
     target_fps: int | None = None,
 ) -> None:
     """Background task behind POST /jobs/{id}/upscale.
@@ -3405,7 +3432,11 @@ async def _run_upscale(
     lower-resolution file that _serialize keeps preferring.
     """
     video_key = str(video_id)
-    _progress[video_key] = {"phase": "upscaling", "message": "Upscaling…", "pct": 30}
+    _progress[video_key] = {
+        "phase": "upscaling",
+        "message": _pass_verb(resolution) + "…",
+        "pct": 30,
+    }
     try:
         await _apply_upscale(video_id, resolution, rife_multiplier, target_fps)
         await _reapply_grain_if_any(video_id, video_key)
@@ -3417,21 +3448,25 @@ async def _run_upscale(
 
 
 async def _reapply_grain_if_any(video_id: uuid.UUID, video_key: str) -> None:
-    """Re-render the grain pass when the file underneath it has changed.
+    """Re-render the look pass when the file underneath it has changed.
 
-    Grain is always the last pass, so anything that rewrites its source
-    invalidates it — an upscale most of all, since the grained file would
+    The look is always the last pass, so anything that rewrites its source
+    invalidates it — an upscale most of all, since the graded file would
     otherwise stay the older, smaller rendition that _serialize keeps
     preferring.
     """
     async with AsyncSessionLocal() as db:
         video = await db.get(Video, video_id)
-        strength = video.grain_strength if video else None
-    if strength:
+        look = _stored_look(video)
+        has_file = bool(video and video.grain_filename)
+    # Keyed on the file as well as the dials: a look can legitimately be all
+    # zeros on a row that never had one, and re-rendering that would write a
+    # graded file nobody asked for.
+    if has_file and not look.is_empty:
         _progress[video_key] = {
-            "phase": "graining", "message": "Re-applying grain…", "pct": 85,
+            "phase": "graining", "message": "Re-applying look…", "pct": 85,
         }
-        await _apply_grain(video_id, strength)
+        await _apply_look(video_id, look)
 
 
 async def _refresh_derived_renders(video_id: uuid.UUID, video_key: str) -> None:
@@ -3444,18 +3479,22 @@ async def _refresh_derived_renders(video_id: uuid.UUID, video_key: str) -> None:
     """
     async with AsyncSessionLocal() as db:
         video = await db.get(Video, video_id)
-        resolution = video.upscale_resolution if video else None
+        has_pass = bool(video and video.upscale_filename)
+        resolution = (video.upscale_resolution if video else None) or RESOLUTION_KEEP
         rife = (video.upscale_rife if video else None) or 1
+        target_fps = video.upscale_fps if video else None
 
-    if resolution:
+    # Keyed on the file rather than on the resolution: a retime-only pass has
+    # RESOLUTION_KEEP on the row, and testing the number would skip exactly the
+    # renditions that most need rebuilding.
+    if has_pass:
         _progress[video_key] = {
             "phase": "upscaling", "message": "Re-running upscale…", "pct": 40,
         }
-        # No target rate here: the row records the resolution and the RIFE
-        # factor but not the rate that was asked for, so a re-run keeps the
-        # file's own. Re-running is for putting grain back on top, not for
-        # redeciding the timing.
-        await _apply_upscale(video_id, resolution, rife)
+        # The stored target rate comes along, so a same-length interpolation
+        # stays same-length. Re-running is for putting grain back on top, not
+        # for redeciding the timing.
+        await _apply_upscale(video_id, resolution, rife, target_fps)
     await _reapply_grain_if_any(video_id, video_key)
 
 
@@ -3483,32 +3522,60 @@ async def _persist_post_pass_error(video_id: uuid.UUID, exc: Exception) -> None:
             await db.commit()
 
 
+def _validate_pass_settings(
+    resolution: int, rife_multiplier: int | None, target_fps: int | None = None,
+) -> None:
+    """The three dials, checked together — shared by the video and clip paths.
+
+    Each is optional on its own now, which makes one new way to be wrong: a
+    request that asks for no restoration, no interpolation and no rate is a
+    render with nothing in it. Saying so is better than producing a byte-copy
+    of the source and calling it an upscale.
+    """
+    if resolution != RESOLUTION_KEEP and not RESOLUTION_MIN <= resolution <= RESOLUTION_MAX:
+        raise HTTPException(
+            status_code=422,
+            detail=f"resolution must be {RESOLUTION_KEEP} (keep) or between "
+                   f"{RESOLUTION_MIN} and {RESOLUTION_MAX}",
+        )
+    if rife_multiplier is not None and rife_multiplier not in RIFE_MULTIPLIERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"rife_multiplier must be null (derive from fps) or one of "
+                   f"{list(RIFE_MULTIPLIERS)}",
+        )
+    if (resolution == RESOLUTION_KEEP
+            and (rife_multiplier or 1) <= 1
+            and target_fps is None):
+        raise HTTPException(
+            status_code=422,
+            detail="Nothing to do — pick a resolution, an interpolation factor "
+                   "or a frame rate",
+        )
+
+
 def _validate_upscale_target(
-    video: Video | None, resolution: int, rife_multiplier: int = 1,
+    video: Video | None, resolution: int, rife_multiplier: int | None = None,
+    target_fps: int | None = None,
 ) -> None:
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     if video.status != "done" or not video.filename:
         raise HTTPException(status_code=409, detail="Video is not ready (status must be 'done')")
-    if not RESOLUTION_MIN <= resolution <= RESOLUTION_MAX:
-        raise HTTPException(
-            status_code=422,
-            detail=f"resolution must be between {RESOLUTION_MIN} and {RESOLUTION_MAX}",
-        )
-    if rife_multiplier not in RIFE_MULTIPLIERS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"rife_multiplier must be one of {list(RIFE_MULTIPLIERS)}",
-        )
-    # Interpolation stretches whatever audio the file carries. That is exactly
-    # right for a model's own generated track, which was sampled against the
-    # pre-RIFE frame count — and exactly wrong for an attached song, where a
-    # 3x time-stretch destroys the music rather than re-syncing it.
-    if rife_multiplier > 1 and video.soundtrack_song_id:
+    _validate_pass_settings(resolution, rife_multiplier, target_fps)
+    # Interpolation *without a target rate* stretches whatever audio the file
+    # carries. That is exactly right for a model's own generated track, which
+    # was sampled against the pre-RIFE frame count — and exactly wrong for an
+    # attached song, where a 3x time-stretch destroys the music rather than
+    # re-syncing it. With a target rate the duration holds and the song is
+    # untouched, so that combination is allowed: the incompatibility is with
+    # slow motion, not with interpolation.
+    if (rife_multiplier or 1) > 1 and target_fps is None and video.soundtrack_song_id:
         raise HTTPException(
             status_code=409,
-            detail="Interpolation would time-stretch the attached soundtrack — "
-                   "remove the song first, or upscale without RIFE",
+            detail="Interpolation without a target frame rate would time-stretch "
+                   "the attached soundtrack — pick a frame rate so the length "
+                   "holds, or remove the song first",
         )
 
 
@@ -3516,23 +3583,24 @@ def _validate_upscale_target(
 async def estimate_upscale(
     video_id: uuid.UUID,
     resolution: int = 1080,
-    rife_multiplier: int = 1,
+    rife_multiplier: int | None = None,
     fps: int | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Target size and expected wall-clock for an upscale, before committing.
+    """Target size and expected wall-clock for a pass, before committing.
 
-    This pass runs for minutes per second of footage — long enough that
-    starting it blind is a real cost, and the number is cheap to produce
-    (two ffprobe calls).
+    With the restoration in it this runs for minutes per second of footage —
+    long enough that starting it blind is a real cost — and the number is cheap
+    to produce (two ffprobe calls). Without it, the estimate is what tells the
+    user a retime is a matter of seconds rather than minutes.
     """
     video = await db.get(Video, video_id)
-    _validate_upscale_target(video, resolution, rife_multiplier)
+    _validate_upscale_target(video, resolution, rife_multiplier, clamp_fps(fps))
     src = _upscale_source(video)
     if not src.exists():
         raise HTTPException(status_code=409, detail="Source video file is missing on disk")
     return await _upscale_plan_from_file(
-        src, resolution, video.width, video.height, rife_multiplier, fps,
+        src, resolution, video.width, video.height, rife_multiplier, clamp_fps(fps),
     )
 
 
@@ -3541,10 +3609,12 @@ async def apply_upscale(
     video_id: uuid.UUID, body: UpscaleApply, db: AsyncSession = Depends(get_db),
 ):
     video = await db.get(Video, video_id)
-    _validate_upscale_target(video, body.resolution, body.rife_multiplier)
-    resolution = clamp_resolution(body.resolution)
-    rife = clamp_rife(body.rife_multiplier)
     target_fps = clamp_fps(body.fps)
+    _validate_upscale_target(video, body.resolution, body.rife_multiplier, target_fps)
+    resolution = clamp_resolution(body.resolution)
+    # None survives clamping here on purpose: it is the request to derive the
+    # factor from the target rate, and clamp_rife would flatten it to 1.
+    rife = None if body.rife_multiplier is None else clamp_rife(body.rife_multiplier)
 
     # Clear a stale error from an earlier attempt so the frontend poller can't
     # read it as this attempt failing before the render has even started.
@@ -3552,7 +3622,9 @@ async def apply_upscale(
         video.error = None
         await db.commit()
 
-    _progress[str(video_id)] = {"phase": "upscaling", "message": "Upscaling…", "pct": 5}
+    _progress[str(video_id)] = {
+        "phase": "upscaling", "message": _pass_verb(resolution) + "…", "pct": 5,
+    }
     safe_create_task(_run_upscale(video_id, resolution, rife, target_fps),
                      name=f"upscale:{video_id}")
     return _serialize(video)
@@ -3568,17 +3640,19 @@ async def remove_upscale(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)
     video.upscale_filename = None
     video.upscale_resolution = None
     video.upscale_rife = None
+    video.upscale_fps = None
     await db.commit()
     await db.refresh(video)
 
-    # An existing grain was rendered from the upscaled file, which just went
+    # An existing look was rendered from the upscaled file, which just went
     # away — re-render it from the small source rather than keep serving a
-    # 1080p grained file the row no longer claims to have.
-    if video.grain_strength:
+    # 1080p graded file the row no longer claims to have.
+    look = _stored_look(video)
+    if video.grain_filename and not look.is_empty:
         _progress[str(video_id)] = {
-            "phase": "graining", "message": "Re-applying grain…", "pct": 10,
+            "phase": "graining", "message": "Re-applying look…", "pct": 10,
         }
-        safe_create_task(_run_grain(video_id, video.grain_strength), name=f"grain:{video_id}")
+        safe_create_task(_run_look(video_id, look), name=f"look:{video_id}")
     return _serialize(video)
 
 
@@ -3625,11 +3699,10 @@ def _is_clip_upscaling(clip: VideoClip) -> bool:
 
 
 async def _apply_clip_upscale(
-    clip_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+    clip_id: uuid.UUID, resolution: int, rife_multiplier: int | None = None,
     target_fps: int | None = None,
 ) -> None:
-    """Render the SEEDVR2 pass for one clip and persist it. Raises on failure."""
-    rife = clamp_rife(rife_multiplier)
+    """Render the pass for one clip and persist it. Raises on failure."""
     async with AsyncSessionLocal() as db:
         clip = await db.get(VideoClip, clip_id)
         if not clip:
@@ -3642,12 +3715,12 @@ async def _apply_clip_upscale(
     if not src.exists():
         raise RuntimeError(f"Clip file missing: {src.name}")
     plan = await _upscale_plan_from_file(
-        src, resolution, fallback_w, fallback_h, rife, target_fps,
+        src, resolution, fallback_w, fallback_h, rife_multiplier, target_fps,
     )
 
-    await _seedvr2_render(
+    await _refine_render(
         src, dest,
-        resolution=resolution, rife=rife, plan=plan,
+        resolution=resolution, plan=plan,
         progress_key=_clip_key(clip_id),
         prefix=f"artrium_clipup_{clip_id.hex[:10]}",
         log_subject=f"clip={clip_id}",
@@ -3656,20 +3729,22 @@ async def _apply_clip_upscale(
     async with AsyncSessionLocal() as db:
         clip = await db.get(VideoClip, clip_id)
         if clip:
-            clip.upscale_resolution = resolution
-            clip.upscale_rife = rife
+            clip.upscale_resolution = plan["resolution"]
+            clip.upscale_rife = plan["rife_multiplier"]
+            clip.upscale_fps = plan["target_fps"]
             clip.upscale_filename = out_name
             clip.upscale_width = plan["width"]
             clip.upscale_height = plan["height"]
             await db.commit()
     logger.info(
-        "Clip upscale applied: clip=%s → %dx%d rife=%dx",
-        clip_id, plan["width"], plan["height"], rife,
+        "Clip upscale applied: clip=%s → %dx%d rife=%dx fps=%s",
+        clip_id, plan["width"], plan["height"], plan["rife_multiplier"],
+        plan["target_fps"] or "source",
     )
 
 
 async def _run_clip_upscale(
-    clip_id: uuid.UUID, resolution: int, rife_multiplier: int = 1,
+    clip_id: uuid.UUID, resolution: int, rife_multiplier: int | None = None,
     target_fps: int | None = None,
 ) -> None:
     """Background task behind POST /clips/{id}/upscale."""
@@ -3690,37 +3765,30 @@ async def _run_clip_upscale(
 
 
 def _validate_clip_upscale(
-    clip: VideoClip | None, resolution: int, rife_multiplier: int,
+    clip: VideoClip | None, resolution: int, rife_multiplier: int | None,
+    target_fps: int | None = None,
 ) -> None:
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
-    if not RESOLUTION_MIN <= resolution <= RESOLUTION_MAX:
-        raise HTTPException(
-            status_code=422,
-            detail=f"resolution must be between {RESOLUTION_MIN} and {RESOLUTION_MAX}",
-        )
-    if rife_multiplier not in RIFE_MULTIPLIERS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"rife_multiplier must be one of {list(RIFE_MULTIPLIERS)}",
-        )
+    _validate_pass_settings(resolution, rife_multiplier, target_fps)
 
 
 @router.get("/clips/{clip_id}/upscale/estimate")
 async def estimate_clip_upscale(
     clip_id: uuid.UUID,
     resolution: int = 1080,
-    rife_multiplier: int = 1,
+    rife_multiplier: int | None = None,
+    fps: int | None = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """Target size and expected wall-clock for one clip's upscale."""
+    """Target size and expected wall-clock for one clip's pass."""
     clip = await db.get(VideoClip, clip_id)
-    _validate_clip_upscale(clip, resolution, rife_multiplier)
+    _validate_clip_upscale(clip, resolution, rife_multiplier, clamp_fps(fps))
     src = _clip_file(clip)
     if not src.exists():
         raise HTTPException(status_code=409, detail="Clip file is missing on disk")
     return await _upscale_plan_from_file(
-        src, resolution, clip.width, clip.height, rife_multiplier,
+        src, resolution, clip.width, clip.height, rife_multiplier, clamp_fps(fps),
     )
 
 
@@ -3734,10 +3802,10 @@ async def apply_clip_upscale(
     queueing a whole stack at once is safe and is the expected way to use this.
     """
     clip = await db.get(VideoClip, clip_id)
-    _validate_clip_upscale(clip, body.resolution, body.rife_multiplier)
-    resolution = clamp_resolution(body.resolution)
-    rife = clamp_rife(body.rife_multiplier)
     target_fps = clamp_fps(body.fps)
+    _validate_clip_upscale(clip, body.resolution, body.rife_multiplier, target_fps)
+    resolution = clamp_resolution(body.resolution)
+    rife = None if body.rife_multiplier is None else clamp_rife(body.rife_multiplier)
 
     if _is_clip_upscaling(clip):
         raise HTTPException(status_code=409, detail="This clip is already being upscaled")
@@ -3772,6 +3840,7 @@ async def remove_clip_upscale(clip_id: uuid.UUID, db: AsyncSession = Depends(get
     clip.upscale_filename = None
     clip.upscale_resolution = None
     clip.upscale_rife = None
+    clip.upscale_fps = None
     clip.upscale_width = None
     clip.upscale_height = None
     await db.commit()
@@ -3780,22 +3849,40 @@ async def remove_clip_upscale(clip_id: uuid.UUID, db: AsyncSession = Depends(get
     return _serialize_clip(clip)
 
 
-# ── Film grain (post-hoc pass over a finished video) ──────────────────────────
-# Wan2.2 output is clean to the point of looking plastic. The grain pass is a
-# derived sibling file like the soundtrack mux, never an overwrite: `filename`
-# stays pristine so any strength can be tried, undone, or re-tried. It runs
-# last, on top of any upscale, so grain sits at the delivery resolution.
+# ── Look pass (post-hoc grade over a finished video) ──────────────────────────
+# Wan2.2 and AnimateLCM come out clean to the point of looking plastic, and
+# this pass is what is between a render and delivery — so it carries the whole
+# correction, not just the grain it started as. Seven dials, one ffmpeg chain,
+# one derived sibling file: `filename` stays pristine, so any look can be
+# tried, undone, or re-tried. It runs last, on top of any upscale, so the grade
+# sits at the delivery resolution. See services/video/look.py for the order the
+# dials are applied in and the measurements behind the encoder settings.
 
-class GrainApply(BaseModel):
-    strength: int  # 1–100 UI scale; validated in the endpoint
+class LookApply(BaseModel):
+    # The seven dials, as services/video/look.py::Look reads them. Sent whole
+    # rather than as a patch: the frontend always knows the complete look it is
+    # showing, and a partial update would make "what will this render" depend
+    # on what the row happened to hold.
+    look: dict = {}
+    # A preset name fills in for `look` when the client just wants a starting
+    # point. `look` wins when both are given, so the sliders always beat the
+    # chip they were seeded from.
+    preset: str | None = None
+
+    def resolved(self) -> Look:
+        if self.look:
+            return Look.from_dict(self.look)
+        if self.preset and self.preset in PRESET_BY_KEY:
+            return PRESET_BY_KEY[self.preset]
+        return Look()
 
 
-def _grain_source(video: Video) -> Path:
-    """The ungrained file a grain pass should read.
+def _look_source(video: Video) -> Path:
+    """The ungraded file the look pass should read.
 
     Deliberately never `grain_filename` itself: re-grading always starts from
-    a clean source, so moving the slider replaces the grain instead of baking
-    a second pass on top of the first. Otherwise the most complete rendition
+    a clean source, so moving a slider replaces the look instead of baking a
+    second pass on top of the first. Otherwise the most complete rendition
     wins — the upscale when there is one, else the muxed (audio-bearing)
     variant so an attached soundtrack survives the re-encode.
     """
@@ -3806,73 +3893,105 @@ def _grain_source(video: Video) -> Path:
     return settings.storage_dir / video.filepath
 
 
-def _grain_name(video_id: uuid.UUID) -> str:
+# Both names predate the other six dials. They stay: renaming them would
+# orphan every file already on disk for the sake of a word.
+def _look_name(video_id: uuid.UUID) -> str:
     return f"{video_id}_grain.mp4"
 
 
-def _grain_preview_name(video_id: uuid.UUID) -> str:
+def _look_preview_name(video_id: uuid.UUID) -> str:
     return f"{video_id}_grainprev.mp4"
 
 
-async def _apply_grain(video_id: uuid.UUID, strength: int) -> None:
-    """Render the grain pass from the ungrained source and persist it.
+def _stored_look(video: Video | None) -> Look:
+    """The look a row is carrying.
+
+    Rows written before `look_params` existed have only `grain_strength`, which
+    is exactly a grain-only look — so they read back as one rather than as
+    nothing.
+    """
+    if not video:
+        return Look()
+    if video.look_params:
+        return Look.from_dict(video.look_params)
+    return Look(grain=clamp_look_strength(video.grain_strength))
+
+
+async def _apply_look(video_id: uuid.UUID, look: Look) -> None:
+    """Render the look pass from the ungraded source and persist it.
 
     Raises on failure; each caller decides how to report. Also used to
-    re-render after a soundtrack change, since that swaps the source file
-    underneath an existing grain.
+    re-render after a soundtrack or upscale change, since those swap the source
+    file underneath an existing look.
     """
     async with AsyncSessionLocal() as db:
         video = await db.get(Video, video_id)
         if not video or not video.filepath:
             raise RuntimeError("Video row gone or has no file")
-        src = _grain_source(video)
+        src = _look_source(video)
 
     if not src.exists():
         raise RuntimeError(f"Source file missing: {src.name}")
 
-    out_name = _grain_name(video_id)
-    await render_grain(
-        src, settings.videos_dir / out_name, strength,
+    out_name = _look_name(video_id)
+    await render_look(
+        src, settings.videos_dir / out_name, look,
         ffmpeg_path=settings.ffmpeg_path,
     )
 
     async with AsyncSessionLocal() as db:
         video = await db.get(Video, video_id)
         if video:
-            video.grain_strength = strength
+            video.look_params = look.to_dict()
+            # Mirrored, not derived-on-read: services/improv and the gallery
+            # ask "is this grained" of this column, and they should not have to
+            # learn about look_params to get an answer.
+            video.grain_strength = look.grain
             video.grain_filename = out_name
             video.error = None
             await db.commit()
-    logger.info("Grain applied: video=%s strength=%d → %s", video_id, strength, out_name)
+    logger.info("Look applied: video=%s %s → %s", video_id, look.to_dict(), out_name)
 
 
-async def _run_grain(video_id: uuid.UUID, strength: int) -> None:
-    """Background task behind POST /jobs/{id}/grain — a full re-encode of a
+async def _run_look(video_id: uuid.UUID, look: Look) -> None:
+    """Background task behind POST /jobs/{id}/look — a full re-encode of a
     16-30s clip runs well past a request's patience, so it is polled like the
     soundtrack mux rather than awaited inline."""
     video_key = str(video_id)
-    _progress[video_key] = {"phase": "graining", "message": "Adding grain…", "pct": 50}
+    _progress[video_key] = {"phase": "graining", "message": "Grading…", "pct": 50}
     try:
-        await _apply_grain(video_id, strength)
+        await _apply_look(video_id, look)
         _progress.pop(video_key, None)
     except Exception as exc:
-        logger.exception("Grain render failed for video=%s strength=%s", video_id, strength)
+        logger.exception("Look render failed for video=%s look=%s", video_id, look)
         _progress.pop(video_key, None)
         await _persist_post_pass_error(video_id, exc)
 
 
-def _validate_grain_target(video: Video | None, strength: int) -> None:
+def _validate_look_target(video: Video | None, look: Look) -> None:
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     if video.status != "done" or not video.filename:
         raise HTTPException(status_code=409, detail="Video is not ready (status must be 'done')")
-    if not 1 <= strength <= 100:
-        raise HTTPException(status_code=422, detail="strength must be between 1 and 100")
+    # Every dial clamps rather than rejecting, so the only unusable request is
+    # one that asks for nothing at all — which is a removal, not a render.
+    if look.is_empty:
+        raise HTTPException(
+            status_code=422,
+            detail="Nothing to apply — set at least one dial, or DELETE to remove the look",
+        )
 
 
-@router.post("/jobs/{video_id}/grain/preview")
-async def preview_grain(
-    video_id: uuid.UUID, body: GrainApply, db: AsyncSession = Depends(get_db),
+@router.get("/look/presets")
+async def look_presets():
+    """The presets, values included, so picking a chip fills the sliders
+    without a second round trip."""
+    return {"presets": preset_options(), "default": DEFAULT_PRESET}
+
+
+@router.post("/jobs/{video_id}/look/preview")
+async def preview_look(
+    video_id: uuid.UUID, body: LookApply, db: AsyncSession = Depends(get_db),
 ):
     """Grade a few seconds out of the middle of the clip and return its URL.
 
@@ -3881,35 +4000,37 @@ async def preview_grain(
     caller must cache-bust the URL it gets back.
     """
     video = await db.get(Video, video_id)
-    _validate_grain_target(video, body.strength)
+    look = body.resolved()
+    _validate_look_target(video, look)
 
-    src = _grain_source(video)
+    src = _look_source(video)
     if not src.exists():
         raise HTTPException(status_code=409, detail="Source video file is missing on disk")
 
-    out_name = _grain_preview_name(video_id)
+    out_name = _look_preview_name(video_id)
     try:
-        seconds = await render_grain_preview(
-            src, settings.videos_dir / out_name, body.strength,
+        seconds = await render_look_preview(
+            src, settings.videos_dir / out_name, look,
             ffmpeg_path=settings.ffmpeg_path,
         )
     except Exception as exc:
-        logger.exception("Grain preview failed for video=%s", video_id)
+        logger.exception("Look preview failed for video=%s", video_id)
         raise HTTPException(status_code=502, detail=f"Preview failed: {exc}")
 
     return {
         "url": f"/api/video/file/{out_name}",
-        "strength": body.strength,
+        "look": look.to_dict(),
         "seconds": round(seconds, 2),
     }
 
 
-@router.post("/jobs/{video_id}/grain", status_code=202)
-async def apply_grain(
-    video_id: uuid.UUID, body: GrainApply, db: AsyncSession = Depends(get_db),
+@router.post("/jobs/{video_id}/look", status_code=202)
+async def apply_look(
+    video_id: uuid.UUID, body: LookApply, db: AsyncSession = Depends(get_db),
 ):
     video = await db.get(Video, video_id)
-    _validate_grain_target(video, body.strength)
+    look = body.resolved()
+    _validate_look_target(video, look)
 
     # Clear a stale error from an earlier attempt so the frontend poller can't
     # read it as this attempt failing before the render has even started.
@@ -3917,21 +4038,22 @@ async def apply_grain(
         video.error = None
         await db.commit()
 
-    _progress[str(video_id)] = {"phase": "graining", "message": "Adding grain…", "pct": 10}
-    safe_create_task(_run_grain(video_id, body.strength), name=f"grain:{video_id}")
+    _progress[str(video_id)] = {"phase": "graining", "message": "Grading…", "pct": 10}
+    safe_create_task(_run_look(video_id, look), name=f"look:{video_id}")
     return _serialize(video)
 
 
-@router.delete("/jobs/{video_id}/grain")
-async def remove_grain(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+@router.delete("/jobs/{video_id}/look")
+async def remove_look(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     video = await db.get(Video, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
     if video.grain_filename:
         (settings.videos_dir / video.grain_filename).unlink(missing_ok=True)
-    (settings.videos_dir / _grain_preview_name(video_id)).unlink(missing_ok=True)
+    (settings.videos_dir / _look_preview_name(video_id)).unlink(missing_ok=True)
     video.grain_filename = None
     video.grain_strength = None
+    video.look_params = None
     await db.commit()
     await db.refresh(video)
     return _serialize(video)
@@ -4007,11 +4129,29 @@ def _cut_summary(plan: dict | None) -> dict | None:
         "style":  plan.get("style"),
         "seed":   plan.get("seed"),
         "bpm":    plan.get("bpm"),
-        "cuts":   len(plan.get("cuts") or []),
+        # A beat cut counts shots and a layer cut counts slots. One number on
+        # the card either way — the field is "how many pieces is this made of".
+        "cuts":   len(plan.get("cuts") or plan.get("slots") or []),
+        # Only a layer cut carries these, and the card uses their presence to
+        # tell the two apart without a second field to keep in step.
+        "tracks": plan.get("tracks"),
+        "transition": plan.get("transition"),
     }
 
 
-def _serialize(v: Video) -> dict:
+def _serialize(
+    v: Video, clip_count: int = 0, clip_thumb: str | None = None,
+) -> dict:
+    """One video row for the API.
+
+    `clip_count`/`clip_thumb` describe the job's segment stack, and they exist
+    because a job can legitimately be finished without ever producing a single
+    file: the review flow renders each segment as its own clip and only
+    assembles them into one video when asked to. Such a row has no `filename`,
+    so it used to serialise with no `url` and no `thumb_url` at all — and the
+    gallery drew it as an empty tile that could not be opened or played, even
+    though the clips behind it were real work sitting on disk.
+    """
     # Derived variants take precedence in the order they are produced (see
     # _video_primary_name); the clean original stays available via
     # `original_url`.
@@ -4035,12 +4175,29 @@ def _serialize(v: Video) -> dict:
         "cut_plan":          _cut_summary(v.cut_plan),
         "upscale_resolution": v.upscale_resolution,
         "upscale_rife":      v.upscale_rife,
+        "upscale_fps":       v.upscale_fps,
         "has_upscale":       bool(v.upscale_filename),
         "upscale_rendering": _is_upscaling(v),
         "grain_strength":    v.grain_strength,
-        "has_grain":         bool(v.grain_filename),
-        "grain_rendering":   _is_graining(v),
-        "thumb_url":         f"/api/video/thumb/{v.id}" if (v.status == "done" and v.filename) else None,
+        "has_grain":          bool(v.grain_filename),
+        "grain_rendering":    _is_graining(v),
+        # The whole look, so the chip can draw seven sliders where the row was
+        # written by an older version that only knew about grain.
+        "look":              _stored_look(v).to_dict(),
+        # Any row with a file of its own can show a picture, and the endpoint
+        # makes one on demand if it is missing. The gate used to also require
+        # status "done", which hid exactly the jobs a person most needs to
+        # see: an AnimateLCM render parked in `review` has a finished,
+        # watchable preview on disk and was drawn as an empty tile.
+        # Falls back to the stack's first clip, so a job that was never
+        # assembled still shows what it actually contains.
+        "thumb_url": (
+            f"/api/video/thumb/{v.id}" if primary_name else (clip_thumb or None)
+        ),
+        # >0 with no `url` means "a stack that was never assembled" — the
+        # gallery opens it as clips instead of as a video.
+        "clip_count":        clip_count,
+        "assembled":         bool(primary_name),
         "image_ids":         [str(i) for i in v.image_ids] if v.image_ids else [],
         "prompt":            v.prompt,
         "title":             v.title,

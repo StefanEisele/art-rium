@@ -21,14 +21,17 @@ from services.improv.mux import (
 )
 from services.improv.source import has_grain, source_filename, source_path
 from services.video.audio_stretch import build_rubberband_filter, build_stretch_cmd
-from services.video.grain import (
+from services.video.look import (
     NOISE_CEILING,
-    _encode_args,
-    _grain_cmd,
-    _grain_preview_cmd,
+    PRESET_BY_KEY,
+    PRESETS,
+    Look,
     clamp_strength,
-    grain_filter,
+    encode_args,
+    preset_options,
+    preview_command,
     preview_window,
+    render_command,
 )
 from services.video.soundtrack import _mux_cmd, _mux_cmd_with_bed
 from workers.video_generator import _scale_pad, _single_cmd, _slideshow_cmd
@@ -246,21 +249,22 @@ class TestSoundtrackMuxWithBed:
         assert "[0:a]volume=0.350[bed]" in improv_fc
 
 
-class TestGrainFilter:
+class TestGrainDial:
     def test_maps_ui_scale_onto_the_noise_ceiling(self):
-        assert grain_filter(100) == f"noise=c0s={NOISE_CEILING}:c0f=t"
-        assert grain_filter(50) == f"noise=c0s={round(NOISE_CEILING / 2)}:c0f=t"
+        assert Look(grain=100).filter_chain() == f"noise=c0s={NOISE_CEILING}:c0f=t"
+        assert Look(grain=50).filter_chain() == (
+            f"noise=c0s={round(NOISE_CEILING / 2)}:c0f=t")
 
     def test_luma_plane_only(self):
         # Noising chroma produces coloured speckle that reads as a compression
         # fault, not as grain.
-        f = grain_filter(30)
+        f = Look(grain=30).filter_chain()
         assert "c0s=" in f
         assert "c1s=" not in f and "c2s=" not in f and "alls=" not in f
 
     def test_grain_is_temporal(self):
         # Without the t flag the pattern freezes into a static dirt overlay.
-        assert grain_filter(30).endswith("c0f=t")
+        assert Look(grain=30).filter_chain().endswith("c0f=t")
 
     def test_strength_is_clamped_to_the_ui_range(self):
         assert clamp_strength(-5) == 0
@@ -270,10 +274,110 @@ class TestGrainFilter:
         assert clamp_strength(42.4) == 42
 
 
-class TestGrainPreviewWindow:
+class TestLookChain:
+    """Every dial is a no-op at 0 — that is what lets the chain be assembled by
+    concatenation, so it is worth testing rather than assuming."""
+
+    def test_an_empty_look_produces_no_filter_at_all(self):
+        # Not "null": the callers read an empty chain as "there is no look",
+        # and a null filter would have them encode a copy of the source.
+        assert Look().filter_chain() == ""
+        assert Look().is_empty
+
+    def test_each_dial_alone_contributes_exactly_one_stage(self):
+        for field, expect in [
+            ("sharpen", "unsharp="),
+            ("contrast", "eq=contrast="),
+            ("saturation", "eq=saturation="),
+            ("temperature", "colortemperature="),
+            ("vignette", "vignette="),
+            ("aberration", "rgbashift="),
+            ("grain", "noise="),
+        ]:
+            chain = Look(**{field: 50}).filter_chain()
+            assert chain.startswith(expect), (field, chain)
+            assert chain.count(",") == 0, (field, chain)
+
+    def test_contrast_and_saturation_share_one_eq(self):
+        # Two eq passes would cost two filter invocations for one correction.
+        chain = Look(contrast=20, saturation=-20).filter_chain()
+        assert chain.count("eq=") == 1
+        assert "contrast=" in chain and "saturation=" in chain
+
+    def test_the_order_is_correct_grade_optics_grain(self):
+        chain = Look(sharpen=40, contrast=20, temperature=30,
+                     vignette=40, aberration=30, grain=30).filter_chain()
+        order = [chain.index(x) for x in
+                 ("eq=", "colortemperature=", "unsharp=", "vignette=",
+                  "rgbashift=", "noise=")]
+        assert order == sorted(order), chain
+
+    def test_a_positive_temperature_dial_warms_the_picture(self):
+        # colortemperature corrects *for* a temperature, so warming means
+        # telling it a lower number than neutral. Easy to get backwards.
+        warm = Look(temperature=100).filter_chain()
+        cool = Look(temperature=-100).filter_chain()
+        kelvin = lambda c: float(c.split("temperature=")[2].split(":")[0])   # noqa: E731
+        assert kelvin(warm) < 6500 < kelvin(cool)
+
+    def test_sharpening_leaves_chroma_alone(self):
+        # On 4:2:0 a chroma sharpen amplifies the subsampling, not detail.
+        assert Look(sharpen=60).filter_chain().endswith(":5:5:0.0")
+
+    def test_saturation_bottoms_out_near_monochrome_not_at_zero(self):
+        chain = Look(saturation=-100).filter_chain()
+        assert "saturation=0.1500" in chain
+
+
+class TestHalationSplice:
+    """Halation is the one stage that needs the picture twice, so it is spliced
+    into the chain rather than appended to it."""
+
+    def test_it_stays_a_simple_graph(self):
+        # One open input and one open output, or -vf will not take it.
+        chain = Look(halation=50).filter_chain()
+        assert chain.count("split") == 1
+        assert "[hl_base][hl_glow]blend=" in chain
+        assert not chain.endswith(";")
+
+    def test_the_linear_runs_are_spliced_on_either_side(self):
+        chain = Look(contrast=20, halation=50, grain=30).filter_chain()
+        assert chain.index("eq=") < chain.index("split")
+        assert chain.index("blend=") < chain.index("noise=")
+
+    def test_only_highlights_bloom(self):
+        # A bloom lifted off the midtones is a veil over the whole frame.
+        assert "if(gt(val," in Look(halation=50).filter_chain()
+
+    def test_screen_not_add(self):
+        # add clips the very highlights the bloom is made of.
+        assert "all_mode=screen" in Look(halation=50).filter_chain()
+
+
+class TestLookPresets:
+    def test_every_preset_produces_a_chain(self):
+        for key, _label, _hint, look in PRESETS:
+            assert look.filter_chain(), key
+
+    def test_presets_ship_their_values_to_the_client(self):
+        # So picking a chip fills the sliders without a second round trip.
+        opts = preset_options()
+        assert {o["key"] for o in opts} == set(PRESET_BY_KEY)
+        assert all(isinstance(o["look"], dict) and o["look"] for o in opts)
+
+    def test_korn_is_the_old_grain_pass_and_nothing_else(self):
+        assert PRESET_BY_KEY["korn"].filter_chain().startswith("noise=")
+
+    def test_klar_does_not_grain(self):
+        # It exists to answer "just undo the softening", which grain undoes
+        # nothing of.
+        assert not PRESET_BY_KEY["klar"].has_grain
+
+
+class TestLookPreviewWindow:
     def test_takes_the_window_from_the_middle(self):
         # The opening frames of an i2v clip are the source still barely
-        # moving — the least representative place to judge grain on motion.
+        # moving — the least representative place to judge a look on motion.
         start, length = preview_window(20.0, 4.0)
         assert (start, length) == (8.0, 4.0)
 
@@ -285,18 +389,21 @@ class TestGrainPreviewWindow:
         assert preview_window(0.0, 4.0) == (0.0, 4.0)
 
 
-class TestGrainCmds:
+class TestLookCmds:
+    LOOK = Look(sharpen=30, contrast=15, grain=30)
+
     def test_full_render_copies_audio_through(self):
         # A soundtrack mux or a model's native track must survive the re-encode.
-        cmd = _grain_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), 30)
+        cmd = render_command("ffmpeg", Path("in.mp4"), Path("out.mp4"), self.LOOK)
         assert cmd[cmd.index("-c:a") + 1] == "copy"
         assert cmd[-1] == str(Path("out.mp4"))
 
     def test_preview_seeks_before_input(self):
         # -ss after -i decodes up to the mark instead of seeking by index,
         # which is the difference between a 2s preview and a 20s one.
-        cmd = _grain_preview_cmd(
-            "ffmpeg", Path("in.mp4"), Path("out.mp4"), 30, start=8.0, length=4.0,
+        cmd = preview_command(
+            "ffmpeg", Path("in.mp4"), Path("out.mp4"), self.LOOK,
+            start=8.0, length=4.0,
         )
         assert cmd.index("-ss") < cmd.index("-i")
         assert cmd[cmd.index("-ss") + 1] == "8.000"
@@ -304,25 +411,56 @@ class TestGrainCmds:
         assert "-an" in cmd
 
     def test_preview_and_full_render_encode_identically(self):
-        # If they diverged, the strength dialled in on the preview would not
-        # be the strength the full render produces.
-        full = _grain_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), 44)
-        prev = _grain_preview_cmd(
-            "ffmpeg", Path("in.mp4"), Path("p.mp4"), 44, start=1.0, length=4.0,
+        # If they diverged, the look dialled in on the preview would not be the
+        # look the full render produces.
+        full = render_command("ffmpeg", Path("in.mp4"), Path("out.mp4"), self.LOOK)
+        prev = preview_command(
+            "ffmpeg", Path("in.mp4"), Path("p.mp4"), self.LOOK,
+            start=1.0, length=4.0,
         )
-        shared = _encode_args(44)
+        shared = encode_args(self.LOOK)
         assert all(a in full for a in shared)
         assert all(a in prev for a in shared)
 
-    def test_tunes_the_encoder_for_grain(self):
-        # Without -tune grain the encoder spends its bits smoothing the noise
-        # straight back out.
-        cmd = _grain_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), 30)
-        assert cmd[cmd.index("-tune") + 1] == "grain"
+    def test_tunes_the_encoder_for_grain_only_when_there_is_grain(self):
+        # -tune grain tells the encoder to protect noise. With no noise to
+        # protect it just costs bits the picture could have had — measured at
+        # 0.9710 picture SSIM without the tune against 0.9585 with it.
+        assert "-tune" in encode_args(Look(grain=30))
+        assert "-tune" not in encode_args(Look(sharpen=40))
+
+    def test_a_clean_look_is_encoded_at_a_higher_quality(self):
+        # It can afford to be: there is no incompressible noise in it.
+        grainy = encode_args(Look(grain=30))
+        clean = encode_args(Look(sharpen=40))
+        assert int(clean[clean.index("-crf") + 1]) < int(grainy[grainy.index("-crf") + 1])
+
+    def test_the_crf_is_well_clear_of_the_old_default(self):
+        # 30 was measured softening the picture; the whole point of the change.
+        assert int(encode_args(Look(grain=30))[encode_args(Look(grain=30)).index("-crf") + 1]) <= 26
 
     def test_hevc_is_tagged_hvc1_for_browser_playback(self):
-        cmd = _grain_cmd("ffmpeg", Path("in.mp4"), Path("out.mp4"), 30)
+        cmd = render_command("ffmpeg", Path("in.mp4"), Path("out.mp4"), self.LOOK)
         assert cmd[cmd.index("-tag:v") + 1] == "hvc1"
+
+    def test_an_empty_look_still_produces_a_runnable_command(self):
+        # The endpoints refuse an empty look, but the builder must not emit
+        # `-vf ` with nothing after it if one ever reaches it.
+        cmd = render_command("ffmpeg", Path("in.mp4"), Path("out.mp4"), Look())
+        assert cmd[cmd.index("-vf") + 1] == "null"
+
+
+class TestLookFromDict:
+    def test_unknown_keys_are_dropped_and_missing_ones_default(self):
+        look = Look.from_dict({"grain": 40, "nonsense": 9})
+        assert look.grain == 40 and look.sharpen == 0
+
+    def test_out_of_range_values_clamp_rather_than_raise(self):
+        look = Look.from_dict({"grain": 500, "contrast": -900})
+        assert look.grain == 100 and look.contrast == -100
+
+    def test_none_reads_as_an_empty_look(self):
+        assert Look.from_dict(None).is_empty
 
 
 class TestAudioStretch:

@@ -411,21 +411,36 @@ class Video(Base):
     # after an upscale or a grain pass and would otherwise reset the offset and
     # slide the whole edit off its music.
     soundtrack_start_seconds: Mapped[float | None] = mapped_column(Float)
-    # Optional SEEDVR2 upscale pass (/tools/video detail modal). Runs before
-    # the grain pass — grain belongs at the delivery resolution, and feeding a
-    # grained picture to a restorer would have it reconstruct the noise.
-    upscale_resolution: Mapped[int | None] = mapped_column(SmallInteger)  # target SHORT edge in px; null = not upscaled
+    # Optional SEEDVR2 upscale / retime pass (/tools/video detail modal). Runs
+    # before the grain pass — grain belongs at the delivery resolution, and
+    # feeding a grained picture to a restorer would have it reconstruct the
+    # noise. All three dials below are independent: 0 resolution runs the
+    # timing stages alone, and no interpolation with a target rate is a plain
+    # conform.
+    upscale_resolution: Mapped[int | None] = mapped_column(SmallInteger)  # target SHORT edge in px; 0 = size kept; null = no pass
     upscale_filename: Mapped[str | None] = mapped_column(String(512))     # in storage/videos/, sibling of `filename`
     # RIFE interpolation applied *after* the restoration (1 = off). Ordered
     # there so the upscale's cost stays independent of the factor — SEEDVR2
     # only ever restores the source's real frames.
     upscale_rife: Mapped[int | None] = mapped_column(SmallInteger)
-    # Optional film-grain pass (/tools/video detail modal). Always re-rendered
-    # from the ungrained source (upscale_filename or muxed_filename or
-    # filename) so repeated strength changes replace the grain instead of
-    # stacking it.
-    grain_strength: Mapped[int | None] = mapped_column(SmallInteger)   # 1–100 UI scale; null = no grain
+    # Playback rate the pass was asked to write (null = keep the source's,
+    # which with interpolation means slow motion). Persisted because a
+    # re-render after a soundtrack change replays these settings, and without
+    # it a same-length interpolation would come back stretched.
+    upscale_fps: Mapped[int | None] = mapped_column(SmallInteger)
+    # Optional look pass (/tools/video detail modal) — correction, grade,
+    # optics and grain in one ffmpeg chain. Always re-rendered from the
+    # rendition *below* it (upscale_filename or muxed_filename or filename) so
+    # changing a dial replaces the look instead of stacking a second one on it.
+    #
+    # `grain_strength` predates the other six dials and is kept as the grain
+    # one, mirrored out of `look_params` on every render: services/improv and
+    # the gallery both read it, and a look is "grained" exactly when that dial
+    # is up. `grain_filename` is likewise still the output slot — the file the
+    # pass writes, whatever the pass has grown into.
+    grain_strength: Mapped[int | None] = mapped_column(SmallInteger)   # 0–100 UI scale; null = no look
     grain_filename: Mapped[str | None] = mapped_column(String(512))    # in storage/videos/, sibling of `filename`
+    look_params: Mapped[dict | None] = mapped_column(JSONB)            # services/video/look.py::Look.to_dict()
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     frame_count: Mapped[int | None] = mapped_column(Integer)  # representative/fallback frame count (flf2v: per-transition; i2v_multi/minimax_i2v: per-image)
@@ -503,6 +518,20 @@ class ControlTrack(Base):
     # otherwise pad with flat grey.
     frame_count: Mapped[int | None] = mapped_column(Integer)
     fps: Mapped[float | None] = mapped_column(Float)
+    # Where a derived track came from: a mask segmented out of some footage, or
+    # a trimmed copy of a longer take. Kept because the two must stay frame
+    # aligned — a mask keyed against frame 40 of its source is meaningless
+    # beside a differently-trimmed version of that source — so the UI offers a
+    # mask together with the exact track it was cut from and nothing else.
+    source_track_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("control_tracks.id", ondelete="SET NULL"),
+        index=True,
+    )
+    # For kind="mask": what each colour means, as
+    # [{"color": [255,0,0], "label": "Tomate", "coverage": 0.31, "frames": 81}].
+    # Without it a mask video is three anonymous silhouettes and the user has to
+    # remember which primary they asked for which thing.
+    regions: Mapped[list[dict] | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
@@ -549,8 +578,9 @@ class VideoClip(Base):
     # visible morphs — a clip has no cuts inside it, so this is the pass that
     # is safe to run. Sibling file in the same segments dir; the merge reads
     # it, and grain still belongs afterwards on the merged result.
-    upscale_resolution: Mapped[int | None] = mapped_column(SmallInteger)  # target SHORT edge in px; null = not upscaled
+    upscale_resolution: Mapped[int | None] = mapped_column(SmallInteger)  # target SHORT edge in px; 0 = size kept; null = no pass
     upscale_rife: Mapped[int | None] = mapped_column(SmallInteger)        # RIFE factor applied after the restore (1 = off)
+    upscale_fps: Mapped[int | None] = mapped_column(SmallInteger)         # playback rate written; null = the source's own
     upscale_filename: Mapped[str | None] = mapped_column(String(512))     # e.g. "seg_0_up.mp4", sibling of `filename`
     # Dimensions the pass actually produced. Persisted rather than derived so
     # the merge can size its canvas from the rendition it is really feeding in.

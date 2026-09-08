@@ -39,6 +39,7 @@ from core.db import AsyncSessionLocal, get_db
 from core.models import Song
 from core.tasks import safe_create_task
 from services.comfy.client import poll_history, post_workflow, queue_info
+from services.comfy.vram import free_vram_for
 from workers.comfy_listener import get_listener
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,14 @@ _SCHEDULER = "simple"
 SAVE_NODE_ID = "save"
 POLL_INTERVAL = 5            # ACE turbo is fast; tighter polling than video
 POLL_TIMEOUT = 600           # 10 minutes max
+
+# ACE-Step 1.5 stages its text/LM encoder and its DiT one at a time, ~9.1 GB
+# and ~9.5 GB respectively (measured in the ComfyUI log). Neither is close to
+# MiniMax's ~15 GB, but a resident Ollama model (titler VLM, article LLM) or a
+# leftover render can still take enough of a 16 GB card that ComfyUI's dynamic
+# loader streams weights from CPU instead of loading them once — not an error,
+# just several times slower than a render that actually fit.
+_MIN_FREE_VRAM = 10.0 * 1024**3
 
 # ── Pydantic ─────────────────────────────────────────────────────────────────
 
@@ -231,6 +240,9 @@ async def _run_generation(song_id: uuid.UUID, req: GenerateMusicRequest, seed: i
     save_prefix = f"audio/artrium_{song_id.hex[:10]}"
 
     try:
+        _set_progress(song_key, "submitting", "Freeing GPU memory…", 2)
+        await free_vram_for(_MIN_FREE_VRAM, _WORKFLOW_NAME)
+
         _set_progress(song_key, "submitting", "Submitting workflow to ComfyUI…", 5)
         wf = _build_ace_step_workflow(req, seed, save_prefix)
 

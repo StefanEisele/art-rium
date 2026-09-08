@@ -182,6 +182,23 @@ async def probe_video_dimensions(src: Path) -> tuple[int | None, int | None]:
         return None, None
 
 
+def _rate(value: str | None) -> float | None:
+    """An ffprobe rational ("30000/1001") as a float, or None.
+
+    None for 0/0 — which is what ffprobe writes when it has no answer — and
+    for anything past 240, since no source in this library is a real high-speed
+    camera and a number that large means the field was never a frame rate.
+    """
+    if not value or "/" not in value:
+        return None
+    num, den = value.split("/", 1)
+    try:
+        fps = float(num) / float(den)
+    except (ValueError, ZeroDivisionError):
+        return None
+    return fps if 0 < fps <= 240 else None
+
+
 async def probe_video_frames(src: Path) -> tuple[int | None, float | None]:
     """Return (frame_count, fps) of the first video stream, or (None, None).
 
@@ -196,7 +213,7 @@ async def probe_video_frames(src: Path) -> tuple[int | None, float | None]:
             _ffprobe_path(),
             "-v", "error",
             "-select_streams", "v:0",
-            "-show_entries", "stream=nb_frames,r_frame_rate,duration",
+            "-show_entries", "stream=nb_frames,avg_frame_rate,r_frame_rate,duration",
             "-of", "json",
             str(src),
             stdout=asyncio.subprocess.PIPE,
@@ -207,12 +224,13 @@ async def probe_video_frames(src: Path) -> tuple[int | None, float | None]:
             return None, None
         stream = (json.loads(out.decode("utf-8", errors="replace")).get("streams") or [{}])[0]
 
-        fps = None
-        rate = stream.get("r_frame_rate") or ""
-        if "/" in rate:
-            num, den = rate.split("/", 1)
-            if float(den):
-                fps = float(num) / float(den)
+        # `avg_frame_rate` first. `r_frame_rate` is the *highest* rate the
+        # stream could contain, and on variable-rate phone footage that is a
+        # tick resolution rather than a frame rate — real tracks in this
+        # library came back at 1000 and 2000 fps from it, which then silently
+        # mispaired a mask with the footage it was keyed from. The average is
+        # what the file actually plays at.
+        fps = _rate(stream.get("avg_frame_rate")) or _rate(stream.get("r_frame_rate"))
 
         frames = stream.get("nb_frames")
         if frames:

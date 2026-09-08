@@ -328,7 +328,9 @@ def test_build_cut_command_is_frame_exact_and_silent():
         want = segment_frames(cut.start, cut.end, 24)
         assert f"trim=start_frame=0:end_frame={want}" in graph
     assert graph.count("tpad=stop_mode=clone") == len(plan.cuts)
-    assert "fade=t=in:st=0" in graph and "fade=t=out" in graph
+    # The opening fade is opt-in (default off); the closing one always runs —
+    # see TestFadeIn below for both states.
+    assert "fade=t=in:st=0" not in graph and "fade=t=out" in graph
 
 
 def test_build_cut_command_carries_the_speed_change():
@@ -348,3 +350,32 @@ def test_build_cut_command_rejects_an_empty_plan():
     plan.cuts = []
     with pytest.raises(ValueError):
         build_cut_command("ffmpeg", plan, [], Path("/tmp/o.mp4"), 640, 640, 24)
+
+
+class TestFadeIn:
+    """A picture edit starting on a black frame is a choice. It used to be
+    made unconditionally for every render; now it is off unless asked for."""
+
+    def _cmd(self, **kw):
+        plan = plan_cut(beatmap(bars=12), sources(3), style="welle", seed=1)
+        srcs = [RenderSource(Path(f"/tmp/c{i}.mp4"), 4.0) for i in range(3)]
+        return build_cut_command("ffmpeg", plan, srcs, Path("/tmp/out.mp4"),
+                                 864, 480, 24, **kw)
+
+    def test_default_is_no_opening_fade(self):
+        cmd = self._cmd()
+        graph = cmd[cmd.index("-filter_complex") + 1]
+        assert "fade=t=in:st=0" not in graph
+
+    def test_the_closing_fade_runs_regardless(self):
+        # Ending on a hard cut to nothing reads as a mistake in a way an
+        # unfaded opening does not — this one stays unconditional.
+        for kw in ({}, {"fade_in": True}):
+            graph = self._cmd(**kw)
+            graph = graph[graph.index("-filter_complex") + 1]
+            assert "fade=t=out" in graph
+
+    def test_fade_in_true_adds_the_opening_fade(self):
+        graph = self._cmd(fade_in=True)
+        graph = graph[graph.index("-filter_complex") + 1]
+        assert "fade=t=in:st=0" in graph

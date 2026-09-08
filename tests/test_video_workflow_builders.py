@@ -9,11 +9,12 @@ import uuid
 import pytest
 
 from routers import video as video_module
+from services.comfy import vram as vram_module
 from routers.video import (
     _build_flf2v_single_workflow,
     _build_i2v_single_workflow,
     _build_minimax_single_workflow,
-    _grain_source,
+    _look_source,
     _is_graining,
     _is_upscaling,
     _render_version,
@@ -48,11 +49,14 @@ from services.comfy.wan_transition_loras import (
 )
 from services.comfy.wan_transition_loras import trigger_for, with_lora_trigger
 from services.video.upscale import (
+    RESOLUTION_KEEP,
     build_upscale_workflow,
     clamp_resolution,
     clamp_rife,
     estimate_seconds,
+    needs_comfy,
     output_dimensions,
+    plan_frame_rate,
 )
 from services.ollama import analysis as analysis_module
 from services.ollama.analysis import (
@@ -789,7 +793,7 @@ class TestGenerateMinimaxMotionPrompts:
         assert seen[0]["num_predict"] >= 180
 
 
-class TestGrainSource:
+class TestLookSource:
     """The grain pass must never read its own output — otherwise moving the
     strength slider bakes a second pass on top of the first and the picture
     silts up a little more with every adjustment."""
@@ -800,18 +804,18 @@ class TestGrainSource:
 
     def test_ignores_its_own_output(self):
         v = self._video(grain_filename="x_grain.mp4", grain_strength=40)
-        assert _grain_source(v).name == "clean.mp4"
+        assert _look_source(v).name == "clean.mp4"
 
     def test_prefers_the_muxed_variant_so_a_soundtrack_survives(self):
         v = self._video(muxed_filename="x_muxed.mp4")
-        assert _grain_source(v).name == "x_muxed.mp4"
+        assert _look_source(v).name == "x_muxed.mp4"
 
     def test_regrading_still_reads_the_muxed_variant_not_the_grain(self):
         v = self._video(muxed_filename="x_muxed.mp4", grain_filename="x_grain.mp4")
-        assert _grain_source(v).name == "x_muxed.mp4"
+        assert _look_source(v).name == "x_muxed.mp4"
 
     def test_falls_back_to_the_original(self):
-        assert _grain_source(self._video()).name == "clean.mp4"
+        assert _look_source(self._video()).name == "clean.mp4"
 
 
 class TestRenderVersion:
@@ -919,11 +923,11 @@ class TestGrainSourcePrefersTheUpscale:
 
     def test_upscale_wins_over_the_muxed_variant(self):
         v = self._video(muxed_filename="x_muxed.mp4", upscale_filename="x_upscale.mp4")
-        assert _grain_source(v).name == "x_upscale.mp4"
+        assert _look_source(v).name == "x_upscale.mp4"
 
     def test_upscale_wins_over_the_original(self):
         v = self._video(upscale_filename="x_upscale.mp4")
-        assert _grain_source(v).name == "x_upscale.mp4"
+        assert _look_source(v).name == "x_upscale.mp4"
 
 
 class TestUpscaleRenderingFlag:
@@ -953,7 +957,12 @@ class TestPreflightVram:
     """Evicting Ollama is not proof the card came free: a cold load already
     under way cannot be aborted, allocates VRAM progressively, and is not even
     listed by /api/ps until it finishes. So the submission gate checks the one
-    fact that matters — how much is actually free."""
+    fact that matters — how much is actually free.
+
+    `preflight_vram` itself (services/comfy/vram.py, shared by video and music
+    generation) only knows a required byte count and a label; resolving a
+    workflow name to that many bytes is each caller's own policy, tested
+    separately below for video's `_free_ollama_vram`."""
 
     GB = 1024 ** 3
 
@@ -966,27 +975,27 @@ class TestPreflightVram:
 
     def _no_waiting(self, monkeypatch, released: list | None = None):
         """Stub both holders and collapse the wait, so a shortfall fails fast."""
-        monkeypatch.setattr(video_module, "_evict_ollama", lambda: _async_value(None))
+        monkeypatch.setattr(vram_module, "evict_ollama", lambda: _async_value(None))
         monkeypatch.setattr(
-            video_module, "_release_comfy_models",
+            vram_module, "release_comfy_models",
             lambda: _async_value(released.append(1) if released is not None else None),
         )
-        monkeypatch.setattr(video_module, "_VRAM_WAIT_TIMEOUT", 0.0)
-        monkeypatch.setattr(video_module, "_VRAM_WAIT_POLL", 0.0)
-        monkeypatch.setattr(video_module, "_COMFY_FREE_SETTLE", 0.0)
+        monkeypatch.setattr(vram_module, "_VRAM_WAIT_TIMEOUT", 0.0)
+        monkeypatch.setattr(vram_module, "_VRAM_WAIT_POLL", 0.0)
+        monkeypatch.setattr(vram_module, "_COMFY_FREE_SETTLE", 0.0)
 
     async def test_passes_when_the_card_is_free(self, monkeypatch):
-        monkeypatch.setattr(video_module, "_comfy_devices",
+        monkeypatch.setattr(vram_module, "comfy_devices",
                             lambda: _async_value(self._devices(15.5)))
-        await video_module._preflight_comfyui("minimax_i2v")  # must not raise
+        await vram_module.preflight_vram(13.5 * self.GB, "minimax_i2v")  # must not raise
 
     async def test_a_free_card_is_not_disturbed(self, monkeypatch):
         """Unloading costs a cold reload, so it must only happen on a shortfall."""
         released = []
-        monkeypatch.setattr(video_module, "_comfy_devices",
+        monkeypatch.setattr(vram_module, "comfy_devices",
                             lambda: _async_value(self._devices(15.5)))
         self._no_waiting(monkeypatch, released)
-        await video_module._preflight_comfyui("minimax_i2v")
+        await vram_module.preflight_vram(13.5 * self.GB, "minimax_i2v")
         assert released == []
 
     async def test_a_shortfall_unloads_comfyui_before_waiting(self, monkeypatch):
@@ -994,42 +1003,61 @@ class TestPreflightVram:
         render found ~3 GB free, and ComfyUI — not Ollama — was holding it, so
         the old loop re-evicted Ollama for 210 s and then gave up."""
         released = []
-        monkeypatch.setattr(video_module, "_comfy_devices",
+        monkeypatch.setattr(vram_module, "comfy_devices",
                             lambda: _async_value(self._devices(3.4)))
         self._no_waiting(monkeypatch, released)
         with pytest.raises(RuntimeError, match="still busy"):
-            await video_module._preflight_comfyui("upscale")
+            await vram_module.preflight_vram(9.0 * self.GB, "upscale")
         assert released, "ComfyUI was never asked to unload"
 
     async def test_refuses_a_minimax_run_on_a_half_full_card(self, monkeypatch):
         # 14956 MB staged for the text encoder alone — half a card is not a
         # slow run, it is a CUDA OOM that kills ComfyUI's worker thread.
-        monkeypatch.setattr(video_module, "_comfy_devices",
+        monkeypatch.setattr(vram_module, "comfy_devices",
                             lambda: _async_value(self._devices(8.0)))
         self._no_waiting(monkeypatch)
         with pytest.raises(RuntimeError, match="still busy"):
-            await video_module._preflight_comfyui("minimax_i2v")
+            await vram_module.preflight_vram(13.5 * self.GB, "minimax_i2v")
 
     async def test_the_same_card_is_fine_for_a_lighter_workflow(self, monkeypatch):
         # Wan and the 3B upscaler do not need the whole card.
-        monkeypatch.setattr(video_module, "_comfy_devices",
+        monkeypatch.setattr(vram_module, "comfy_devices",
                             lambda: _async_value(self._devices(10.0)))
-        await video_module._preflight_comfyui("i2v_multi")
+        await vram_module.preflight_vram(9.0 * self.GB, "i2v_multi")
 
     async def test_the_error_names_the_numbers(self, monkeypatch):
-        monkeypatch.setattr(video_module, "_comfy_devices",
+        monkeypatch.setattr(vram_module, "comfy_devices",
                             lambda: _async_value(self._devices(2.0)))
         self._no_waiting(monkeypatch)
         with pytest.raises(RuntimeError) as exc:
-            await video_module._preflight_comfyui("minimax_i2v")
+            await vram_module.preflight_vram(13.5 * self.GB, "minimax_i2v")
         msg = str(exc.value)
         assert "2.1 GB free" in msg and "ollama ps" in msg
 
     async def test_no_devices_does_not_block_the_job(self, monkeypatch):
         # A ComfyUI build that reports no devices should not make video
         # generation impossible — the gate is a safety net, not a gatekeeper.
-        monkeypatch.setattr(video_module, "_comfy_devices", lambda: _async_value([]))
-        await video_module._preflight_comfyui("minimax_i2v")
+        monkeypatch.setattr(vram_module, "comfy_devices", lambda: _async_value([]))
+        await vram_module.preflight_vram(13.5 * self.GB, "minimax_i2v")
+
+    async def test_free_ollama_vram_resolves_minimax_requirement(self, monkeypatch):
+        """Video's own wrapper picks MiniMax's higher floor by workflow name."""
+        calls = []
+        monkeypatch.setattr(
+            video_module, "free_vram_for",
+            lambda required, label: _async_value(calls.append((required, label))),
+        )
+        await video_module._free_ollama_vram("minimax_i2v")
+        assert calls == [(13.5 * self.GB, "minimax_i2v")]
+
+    async def test_free_ollama_vram_falls_back_to_default(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            video_module, "free_vram_for",
+            lambda required, label: _async_value(calls.append((required, label))),
+        )
+        await video_module._free_ollama_vram("upscale")
+        assert calls == [(9.0 * self.GB, "upscale")]
 
 
 async def _async_value(value):
@@ -1104,6 +1132,13 @@ class TestSongAndInterpolationAreMutuallyExclusive:
         with pytest.raises(HTTPException) as exc:
             _validate_upscale_target(v, 1080, 3)
         assert exc.value.status_code == 409
+
+    def test_a_target_rate_makes_interpolation_safe_for_a_song(self):
+        # What the guard is really about is the *stretch*, not the
+        # interpolation: a target rate holds the clip's length, so the music
+        # stays exactly where it was.
+        v = self._video(soundtrack_song_id=uuid.uuid4())
+        _validate_upscale_target(v, 1080, 3, 24)  # must not raise
 
     def test_a_plain_upscale_is_still_fine_with_a_song(self):
         v = self._video(soundtrack_song_id=uuid.uuid4())
@@ -1942,3 +1977,231 @@ class TestSuggestedMinimaxPromptCarriesAudio:
         out = ensure_sound_only_audio(written)
         assert "grains hissing in a wide echo" in out
         assert out.count("Audio:") == 1
+
+
+class TestResolutionKeep:
+    """The restoration became optional, so "no upscale" had to become a value
+    the whole path can carry rather than the absence of a request."""
+
+    def test_zero_is_an_explicit_keep(self):
+        assert clamp_resolution(0) == RESOLUTION_KEEP
+
+    def test_a_missing_value_still_reads_as_the_default(self):
+        # An absent choice is not the same as choosing to keep the size, and
+        # reading a typo as "skip the expensive stage" would silently produce a
+        # differently-shaped render.
+        assert clamp_resolution(None) == 1080
+        assert clamp_resolution("nonsense") == 1080
+
+    def test_keeping_the_resolution_leaves_the_dimensions_alone(self):
+        assert output_dimensions(864, 480, RESOLUTION_KEEP) == (864, 480)
+
+    def test_a_real_target_still_resizes(self):
+        assert output_dimensions(864, 480, 1080) == (1944, 1080)
+
+
+class TestNeedsComfy:
+    """Three routes out of the pass, and this is what picks between them."""
+
+    def test_a_restoration_needs_the_gpu(self):
+        assert needs_comfy(1080, 1) is True
+
+    def test_interpolation_alone_still_needs_the_gpu(self):
+        # RIFE is a ComfyUI node too — cheap, but not ffmpeg.
+        assert needs_comfy(RESOLUTION_KEEP, 3) is True
+
+    def test_a_plain_retime_never_reaches_comfyui(self):
+        # Keep the size, no interpolation: whatever is left is a frame-rate
+        # conform, which is ffmpeg's job and takes seconds.
+        assert needs_comfy(RESOLUTION_KEEP, 1) is False
+        assert needs_comfy(RESOLUTION_KEEP, None) is False
+
+
+class TestBuildRetimeOnlyWorkflow:
+    """A RESOLUTION_KEEP pass must not load a diffusion model it has no use
+    for — that is the entire saving."""
+
+    def _build(self, **kw):
+        from pathlib import Path
+        kw.setdefault("resolution", RESOLUTION_KEEP)
+        kw.setdefault("filename_prefix", "artrium_up_test")
+        kw.setdefault("has_audio", True)
+        return build_upscale_workflow(Path("D:/storage/videos/clip.mp4"), **kw)
+
+    def test_no_restoration_nodes_at_all(self):
+        wf, _ = self._build(rife_multiplier=3)
+        assert "sv_dit" not in wf
+        assert "sv_vae" not in wf
+        assert "sv_up" not in wf
+
+    def test_rife_reads_the_loader_directly(self):
+        wf, save = self._build(rife_multiplier=3)
+        assert wf["sv_rife"]["inputs"]["frames"] == ["sv_load", 0]
+        assert wf[save]["inputs"]["images"] == ["sv_rife", 0]
+
+    def test_without_interpolation_the_muxer_reads_the_loader(self):
+        wf, save = self._build(rife_multiplier=1)
+        assert wf[save]["inputs"]["images"] == ["sv_load", 0]
+
+    def test_every_link_still_points_at_a_node_that_exists(self):
+        for mult in (1, 2, 3, 4):
+            wf, _ = self._build(rife_multiplier=mult)
+            for node in wf.values():
+                for value in node["inputs"].values():
+                    if isinstance(value, list) and value and isinstance(value[0], str):
+                        assert value[0] in wf, f"dangling link to {value[0]}"
+
+    def test_the_audio_rule_is_unchanged(self):
+        wf, save = self._build(has_audio=False, rife_multiplier=2)
+        assert "audio" not in wf[save]["inputs"]
+
+    def test_a_target_rate_still_reaches_the_muxer(self):
+        wf, save = self._build(rife_multiplier=2, render_fps=32.0)
+        assert wf[save]["inputs"]["frame_rate"] == 32.0
+
+
+class TestEstimateWithoutRestoration:
+    def test_dropping_the_restoration_dominates_the_estimate(self):
+        full = estimate_seconds(5.0, 1944, 1080, 3, True)
+        retime = estimate_seconds(5.0, 1944, 1080, 3, False)
+        # The restoration is ~40x the interpolation per pixel-frame, so this is
+        # the difference between minutes and under a minute.
+        assert retime < full / 5
+
+    def test_a_pure_conform_falls_to_the_floor(self):
+        assert estimate_seconds(5.0, 864, 480, 1, False) == 10
+
+    def test_unknown_duration_still_yields_no_estimate(self):
+        assert estimate_seconds(0.0, 864, 480, 1, False) == 0
+
+
+class TestPassSettingsValidation:
+    """Every dial is optional on its own, which makes exactly one new way to be
+    wrong: asking for a render with nothing in it."""
+
+    def _video(self, **kw):
+        from core.models import Video
+        return Video(
+            id=uuid.uuid4(), status="done", filename="clip.mp4",
+            filepath="videos/clip.mp4", **kw,
+        )
+
+    def test_all_three_dials_off_is_refused(self):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            _validate_upscale_target(self._video(), RESOLUTION_KEEP, 1, None)
+        assert exc.value.status_code == 422
+
+    def test_interpolation_alone_is_a_valid_pass(self):
+        _validate_upscale_target(self._video(), RESOLUTION_KEEP, 3, None)
+
+    def test_a_frame_rate_alone_is_a_valid_pass(self):
+        _validate_upscale_target(self._video(), RESOLUTION_KEEP, 1, 30)
+
+    def test_an_auto_multiplier_is_accepted(self):
+        _validate_upscale_target(self._video(), RESOLUTION_KEEP, None, 24)
+
+    def test_a_resolution_between_zero_and_the_minimum_is_still_rejected(self):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            _validate_upscale_target(self._video(), 200, 1, None)
+        assert exc.value.status_code == 422
+
+
+class TestExplicitMultiplierBeatsDerivation:
+    """`None` asks the planner to work the factor out from the target rate; a
+    number says what to do. The router used to force the first, which made the
+    interpolation chips decorative the moment a rate was picked."""
+
+    def test_none_derives_from_the_target(self):
+        plan = plan_frame_rate(16.0, 60, None)
+        assert plan["rife_multiplier"] == 4       # ceil(60/16)
+        assert plan["needs_conform"] is True      # 64 -> 60
+
+    def test_a_number_is_honoured(self):
+        plan = plan_frame_rate(16.0, 60, 2)
+        assert plan["rife_multiplier"] == 2
+        assert plan["render_fps"] == 32.0
+        assert plan["needs_conform"] is True
+
+    def test_no_interpolation_with_a_target_is_a_plain_conform(self):
+        plan = plan_frame_rate(48.0, 24, 1)
+        assert plan["rife_multiplier"] == 1
+        assert plan["needs_conform"] is True
+        assert plan["duration_factor"] == 1.0
+
+
+class TestRefineRenderRoutes:
+    """`_refine_render` now has three ways out, and the cheapest one is the
+    point of the change: a pass with nothing for the GPU to do must not submit
+    an empty graph, evict VRAM, or queue behind somebody's restoration."""
+
+    async def _run(self, monkeypatch, plan, tmp_path):
+        submitted = []
+        conformed = []
+        copied = []
+
+        monkeypatch.setattr(
+            video_module, "probe_has_audio", lambda src: _async_value(True))
+        monkeypatch.setattr(
+            video_module, "build_upscale_workflow",
+            lambda *a, **kw: submitted.append(kw) or ({}, "sv_save"))
+
+        async def _conform(src, dest, fps, *, has_audio):
+            conformed.append(fps)
+            dest.write_bytes(b"conformed")
+
+        monkeypatch.setattr(video_module, "_conform_frame_rate", _conform)
+        monkeypatch.setattr(
+            video_module.shutil, "copy2",
+            lambda src, dest: copied.append(dest))
+
+        src = tmp_path / "clip.mp4"
+        src.write_bytes(b"source")
+        await video_module._refine_render(
+            src, tmp_path / "out.mp4",
+            resolution=plan["resolution"], plan=plan,
+            progress_key="test", prefix="artrium_test", log_subject="test",
+        )
+        return submitted, conformed, copied
+
+    def _plan(self, **kw):
+        base = {
+            "resolution": 0, "restore": False, "needs_comfy": False,
+            "rife_multiplier": 1, "render_fps": None, "target_fps": None,
+            "needs_conform": False, "duration_factor": 1.0, "duration": 4.0,
+            "width": 864, "height": 480, "seconds": 10,
+        }
+        base.update(kw)
+        return base
+
+    async def test_a_plain_retime_never_builds_a_workflow(self, monkeypatch, tmp_path):
+        submitted, conformed, _ = await self._run(
+            monkeypatch,
+            self._plan(target_fps=30, needs_conform=True),
+            tmp_path,
+        )
+        assert submitted == []          # ComfyUI never heard about it
+        assert conformed == [30]
+
+    async def test_nothing_to_change_just_places_the_rendition(self, monkeypatch, tmp_path):
+        # The target rate is the one the file already has: no conform, no
+        # render, but the row still expects a file where it points.
+        submitted, conformed, copied = await self._run(
+            monkeypatch, self._plan(target_fps=24), tmp_path)
+        assert submitted == [] and conformed == []
+        assert len(copied) == 1
+
+    async def test_interpolation_alone_still_goes_through_comfyui(
+        self, monkeypatch, tmp_path,
+    ):
+        # RIFE is a ComfyUI node, so this route is taken — it just carries no
+        # diffusion model, which build_upscale_workflow decides, not this.
+        # A sentinel at the VRAM gate proves the route without a live server.
+        async def _boom(_workflow):
+            raise RuntimeError("reached comfy")
+
+        monkeypatch.setattr(video_module, "_free_ollama_vram", _boom)
+        plan = self._plan(needs_comfy=True, rife_multiplier=3)
+        with pytest.raises(RuntimeError, match="reached comfy"):
+            await self._run(monkeypatch, plan, tmp_path)

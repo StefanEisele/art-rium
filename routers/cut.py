@@ -74,13 +74,59 @@ from services.video.cut import (
     plan_cut,
     style_options,
 )
-from services.video.cut_render import RenderSource, plan_duration, render_cut
+from services.video.cut_render import (
+    DEFAULT_MOTION,
+    RenderSource,
+    clamp_motion,
+    motion_options,
+    plan_duration,
+    render_cut,
+)
+from services.video.layer_render import (
+    LayerSource,
+    render_layers,
+)
+from services.video.layer_render import plan_duration as layer_duration
+from services.video.layers import DEFAULT_STYLE as LAYER_DEFAULT_STYLE
+from services.video.layers import STYLE_BY_KEY as LAYER_STYLE_BY_KEY
+from services.video.layers import (
+    ACCENT_SECONDS,
+    DEFAULT_TRANSITION,
+    PULSE_DEFAULT,
+    PULSE_MAX,
+    SPEED_HIGH_DEFAULT,
+    SPEED_LOW_DEFAULT,
+    SPEED_MAX,
+    SPEED_MIN,
+    SWELL_DEFAULT,
+    LayerPlan,
+    plan_layers,
+    transition_options,
+)
+from services.video.layers import style_options as layer_style_options
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/cut", dependencies=[Depends(require_auth)])
 
 WORKFLOW_NAME = "beatcut"
+LAYER_WORKFLOW_NAME = "layercut"
 MAX_SOURCES = 50
+
+# More than this and the stack stops being readable as one form with changing
+# material and starts being a slideshow nobody can follow.
+MAX_LAYERS = 12
+
+# Below this the transitions are two or three frames long and the speed shifts
+# judder. The sources are meant to be finalised through the retime pass first
+# (POST /api/video/jobs/{id}/upscale with resolution 0), and the planner says so
+# rather than silently producing something that looks broken.
+SMOOTH_FPS = 16
+
+# Tracks are supposed to be the same length — they come out of one control
+# video. A spread wider than this means something else got into the selection,
+# which is worth saying out loud because the shared loop becomes the shortest
+# of them and the rest are simply never seen to the end.
+LOOP_SPREAD_TOLERANCE = 0.25
 
 # A cut point can only land on a rendered frame, so half a frame is the floor on
 # how early a cut can be pulled. 200 ms is roughly a sixteenth at 75 BPM — past
@@ -104,6 +150,10 @@ class PlanRequest(BaseModel):
     # services/video/grade.py::HARMONIES, never a raw number: the useful range
     # is narrow and its top end is a place nobody wants to be.
     harmonize: str = grade.DEFAULT_HARMONY
+    # How a retimed shot is put back on the frame grid. Not a planning
+    # parameter — the plan is identical whatever this says — but it rides on
+    # the plan request so the client can carry one body to both endpoints.
+    motion: str = DEFAULT_MOTION
 
 
 class RenderRequest(PlanRequest):
@@ -113,6 +163,9 @@ class RenderRequest(PlanRequest):
     include_bed: bool = False
     bed_volume: float = BED_VOLUME_DEFAULT
     title: Optional[str] = None
+    # Off by default: a picture edit that opens on a black frame is a choice,
+    # and it used to be made unconditionally for every render.
+    fade_in: bool = False
 
 
 # ── Colour measurement ───────────────────────────────────────────────────────
@@ -253,6 +306,8 @@ async def cut_styles():
         "default_style": DEFAULT_STYLE,
         "harmonies": grade.harmony_options(),
         "default_harmony": grade.DEFAULT_HARMONY,
+        "motions": motion_options(),
+        "default_motion": DEFAULT_MOTION,
         "ladder": list(LADDER),
         "max_stretch_default": MAX_STRETCH_DEFAULT,
         "max_stretch_ceiling": MAX_STRETCH_CEILING,
@@ -356,7 +411,8 @@ async def render(body: RenderRequest, db: AsyncSession = Depends(get_db)):
     bed = clamp_bed_volume(body.bed_volume) if body.include_bed else None
     safe_create_task(
         _run_beat_cut(video.id, plan, body.song_id, bed, [(i.kind, i.id) for i in body.items],
-                      width, height, fps, _harmony_strength(body.harmonize)),
+                      width, height, fps, _harmony_strength(body.harmonize),
+                      fade_in=body.fade_in, motion=clamp_motion(body.motion)),
         name=f"beatcut:{video.id}",
     )
     logger.info(
@@ -384,6 +440,9 @@ async def _run_beat_cut(
     height: int,
     fps: int,
     harmony: float = 0.0,
+    *,
+    fade_in: bool = False,
+    motion: str = DEFAULT_MOTION,
 ) -> None:
     """Render the picture, mux the song onto it, and only then call it done.
 
@@ -423,6 +482,7 @@ async def _run_beat_cut(
         dest = settings.videos_dir / f"{video_id}_artrium.mp4"
         await render_cut(
             plan, renderer, dest, width, height, fps, ffmpeg_path=settings.ffmpeg_path,
+            fade_in=fade_in, motion=motion,
         )
 
         # The file lands and the thumbnail is written, but the row stays
@@ -464,3 +524,345 @@ async def _finish_beat_cut(video_id: uuid.UUID, key: str) -> None:
         logger.info("Beat cut %s finished with its soundtrack", video_id)
     else:
         logger.warning("Beat cut %s finished WITHOUT its soundtrack", video_id)
+
+
+# ── Schichtenschnitt ─────────────────────────────────────────────────────────
+# The same beat map, read a different way: N renders of ONE control video,
+# stacked rather than sequenced, cross-dissolved at a shared source position so
+# the form stands still while the material changes. See services/video/layers.py
+# for why that shared position is the whole feature.
+#
+# Everything downstream is deliberately identical to the beat cut — same source
+# resolution, same colour harmonisation, same silent render with the song muxed
+# on afterwards — so a layer cut is an ordinary finished video from the moment
+# it lands, and upscale, look, Instagram and YouTube already know what to do
+# with it.
+
+
+class LayerPlanRequest(BaseModel):
+    song_id: uuid.UUID
+    items: list[MergeItem] = Field(default_factory=list)
+    style: str = LAYER_DEFAULT_STYLE
+    transition: str = DEFAULT_TRANSITION
+    seed: Optional[int] = None
+    start_bar: int = 0
+    end_bar: Optional[int] = None
+    beats_per_bar: Literal[2, 3, 4, 6] = 4
+    speed_low: float = SPEED_LOW_DEFAULT
+    speed_high: float = SPEED_HIGH_DEFAULT
+    # The two halves of the speed curve. `swell` is how far the bar energy
+    # moves the tempo, `pulse` how hard the picture brakes into a change of
+    # material and pushes through it. Either at 0 removes that half.
+    swell: float = SWELL_DEFAULT
+    pulse: float = PULSE_DEFAULT
+    harmonize: str = grade.DEFAULT_HARMONY
+    # See PlanRequest.motion. It matters more here than in a beat cut: the
+    # whole stack is retimed by the energy curve, so nearly every slot in a
+    # layer edit is being resampled.
+    motion: str = DEFAULT_MOTION
+
+
+class LayerRenderRequest(LayerPlanRequest):
+    include_bed: bool = False
+    bed_volume: float = BED_VOLUME_DEFAULT
+    title: Optional[str] = None
+    # Off by default — see RenderRequest.fade_in.
+    fade_in: bool = False
+
+
+def _bar_span(beatmap: beats.BeatMap, start_bar: int, end_bar: int | None):
+    """Bar numbers → seconds on the song's timeline.
+
+    Bar 0 starts at 0.0 rather than at the first tracked downbeat: a grid
+    begins where the tracker could first justify one, which on a 4/4 track can
+    be a second and a half in, and an edit that opened there would leave the
+    intro with no picture on it.
+    """
+    starts = beatmap.bar_starts()
+    if not starts:
+        return 0.0, beatmap.duration
+    lo = max(0, min(start_bar, len(starts) - 1))
+    start = 0.0 if lo == 0 else beatmap.beats[starts[lo]]
+    if end_bar is None or end_bar >= len(starts):
+        return start, beatmap.duration
+    hi = max(lo + 1, end_bar)
+    end = beatmap.beats[starts[hi]] if hi < len(starts) else beatmap.duration
+    return start, end
+
+
+async def _resolve_layers(items: list[MergeItem]):
+    """Selection → (layer sources, canvas, fps, loop, warnings).
+
+    Reuses the beat cut's resolver, so a clip's real file is still its upscaled
+    sibling and a finished video is still probed rather than believed. What is
+    added here is the shared loop length and the checks that only matter when
+    the tracks are supposed to be interchangeable.
+    """
+    sources, renderers, (width, height), fps = await _resolve_sources(items)
+    if len(sources) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="Ein Schichtenschnitt braucht mindestens zwei Spuren",
+        )
+    if len(sources) > MAX_LAYERS:
+        raise HTTPException(
+            status_code=400, detail=f"Höchstens {MAX_LAYERS} Spuren",
+        )
+
+    durations = [r.duration for r in renderers]
+    loop = min(durations)
+    warnings: list[str] = []
+    spread = (max(durations) - loop) / loop if loop > 0 else 0.0
+    if spread > LOOP_SPREAD_TOLERANCE:
+        warnings.append(
+            f"Die Spuren sind unterschiedlich lang ({loop:.1f}s bis "
+            f"{max(durations):.1f}s). Geschnitten wird auf die kürzeste — von den "
+            "längeren wird das Ende nie gezeigt."
+        )
+    if fps < SMOOTH_FPS:
+        warnings.append(
+            f"Die Spuren laufen mit {fps} fps. Überblendungen sind dabei nur "
+            "wenige Frames lang und die Tempowechsel ruckeln — finalisiere die "
+            "Spuren zuerst mit Interpolation auf 24 fps."
+        )
+    return sources, renderers, (width, height), fps, loop, warnings
+
+
+def _build_layer_plan(
+    body: LayerPlanRequest, beatmap: beats.BeatMap, tracks: int, loop: float,
+    fps: int = 24,
+) -> LayerPlan:
+    if body.style not in LAYER_STYLE_BY_KEY:
+        raise HTTPException(status_code=400, detail=f"Unknown style: {body.style}")
+    span = _bar_span(beatmap, max(0, body.start_bar), body.end_bar)
+    try:
+        return plan_layers(
+            beatmap,
+            tracks=tracks,
+            loop=loop,
+            style=body.style,
+            transition=body.transition,
+            seed=body.seed,
+            speed_low=body.speed_low,
+            speed_high=body.speed_high,
+            swell=body.swell,
+            pulse=body.pulse,
+            # The planner needs the target rate: a segment that comes out one
+            # frame long collapses in the filtergraph, so the floor it keeps
+            # its knots above is measured in frames.
+            fps=fps,
+            span=span,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/layer/styles")
+async def layer_styles():
+    """What the layer planner can be asked for, read off its own tables."""
+    return {
+        "styles": layer_style_options(),
+        "default_style": LAYER_DEFAULT_STYLE,
+        "transitions": transition_options(),
+        "default_transition": DEFAULT_TRANSITION,
+        "harmonies": grade.harmony_options(),
+        "default_harmony": grade.DEFAULT_HARMONY,
+        "motions": motion_options(),
+        "default_motion": DEFAULT_MOTION,
+        "ladder": list(LADDER),
+        "speed": {
+            "min": SPEED_MIN, "max": SPEED_MAX,
+            "low_default": SPEED_LOW_DEFAULT, "high_default": SPEED_HIGH_DEFAULT,
+            "swell_default": SWELL_DEFAULT,
+            "pulse_default": PULSE_DEFAULT, "pulse_max": PULSE_MAX,
+            "accent_seconds": ACCENT_SECONDS,
+        },
+        "max_layers": MAX_LAYERS,
+        "smooth_fps": SMOOTH_FPS,
+    }
+
+
+@router.post("/layer/plan")
+async def make_layer_plan(body: LayerPlanRequest, db: AsyncSession = Depends(get_db)):
+    """Build a layer edit and return it, without rendering anything.
+
+    Cheap — a cached beat map plus arithmetic — so the client can re-roll the
+    seed and switch styles against this until the timeline reads right, and
+    only then spend ffmpeg on it.
+    """
+    song = await db.get(Song, body.song_id)
+    if not song:
+        raise HTTPException(status_code=404, detail="Song not found")
+    if song.status != "done":
+        raise HTTPException(status_code=409, detail="Song is not ready")
+
+    beatmap = await _song_beatmap(song, body.beats_per_bar)
+    sources, renderers, (width, height), fps, loop, warnings = \
+        await _resolve_layers(body.items)
+    plan = _build_layer_plan(body, beatmap, len(sources), loop, fps)
+    plan.warnings = warnings + plan.warnings
+
+    samples = await _measure_sources([r.path for r in renderers])
+    grades = grade.harmonise(samples, _harmony_strength(body.harmonize))
+
+    return {
+        "plan": plan.to_json(),
+        "harmonize": {
+            "key": body.harmonize,
+            "strength": _harmony_strength(body.harmonize),
+            "spread": grade.spread(samples),
+            "clips": [g.describe() for g in grades],
+            "touched": sum(1 for g in grades if not g.is_identity),
+        },
+        "beatmap": {
+            "bpm": beatmap.bpm,
+            "duration": beatmap.duration,
+            "beats_per_bar": beatmap.beats_per_bar,
+            "bar_count": beatmap.bar_count,
+            "bar_energy": beatmap.bar_energy,
+            "bar_times": [beatmap.beats[i] for i in beatmap.bar_starts()],
+            "sections": beatmap.sections,
+            "confidence": beatmap.confidence,
+        },
+        "sources": [{"key": s.key, "label": s.label, "duration": round(s.duration, 3)}
+                    for s in sources],
+        "output": {
+            "width": width, "height": height, "fps": fps,
+            "duration": round(layer_duration(plan, fps), 3),
+            "loop": round(loop, 3),
+            # How much of the loop the piece actually walks through, and how
+            # many times it comes back around. Both are the answer to "will
+            # this feel repetitive", which is the question this mode invites.
+            "source_consumed": round(plan.source_consumed, 3),
+            "loops_used": round(plan.source_consumed / loop, 2) if loop else 0,
+        },
+        "song": {
+            "id": str(song.id),
+            "title": song.title,
+            "url": f"/api/music/file/{song.filename}" if song.filename else None,
+            "requested_bpm": song.bpm,
+        },
+    }
+
+
+@router.post("/layer/render", status_code=202)
+async def render_layer(body: LayerRenderRequest, db: AsyncSession = Depends(get_db)):
+    """Render the layer edit and attach the song. Returns immediately; poll
+    `GET /api/video/jobs/{video_id}/progress` like any other video job."""
+    song = await db.get(Song, body.song_id)
+    if not song:
+        raise HTTPException(status_code=404, detail="Song not found")
+    if song.status != "done" or not song.filename:
+        raise HTTPException(status_code=409, detail="Song is not ready")
+
+    beatmap = await _song_beatmap(song, body.beats_per_bar)
+    sources, _, (width, height), fps, loop, _warnings = await _resolve_layers(body.items)
+    plan = _build_layer_plan(body, beatmap, len(sources), loop, fps)
+
+    video = Video(
+        id=uuid.uuid4(),
+        workflow=LAYER_WORKFLOW_NAME,
+        status="assembling",
+        title=(body.title or "").strip()[:255] or None,
+        width=width,
+        height=height,
+        fps=fps,
+        n_images=len(sources),
+        frame_count=round(layer_duration(plan, fps) * fps),
+        cut_plan=plan.to_json(),
+        soundtrack_start_seconds=plan.song_start or None,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(video)
+    await db.commit()
+
+    bed = clamp_bed_volume(body.bed_volume) if body.include_bed else None
+    safe_create_task(
+        _run_layer_cut(video.id, plan, body.song_id, bed,
+                       [(i.kind, i.id) for i in body.items],
+                       width, height, fps, _harmony_strength(body.harmonize),
+                       fade_in=body.fade_in, motion=clamp_motion(body.motion)),
+        name=f"layercut:{video.id}",
+    )
+    blends = sum(1 for s in plan.slots if s.is_blend)
+    logger.info(
+        "Queued layer cut %s — %d changes in %d segments (%d transitions) over "
+        "%d tracks, %s/%s at %.1f BPM, %.1f s, Schwelle=%.2f Puls=%.2f",
+        video.id, plan.changes, len(plan.slots), blends, len(sources),
+        plan.style, plan.transition, plan.bpm, layer_duration(plan, fps),
+        plan.swell, plan.pulse,
+    )
+    return {
+        "video_id": str(video.id),
+        "status": "assembling",
+        "slots": plan.changes,
+        "segments": len(plan.slots),
+        "transitions": blends,
+        "duration": round(layer_duration(plan, fps), 3),
+    }
+
+
+async def _run_layer_cut(
+    video_id: uuid.UUID,
+    plan: LayerPlan,
+    song_id: uuid.UUID,
+    bed_volume: float | None,
+    keys: list[tuple[str, uuid.UUID]],
+    width: int,
+    height: int,
+    fps: int,
+    harmony: float = 0.0,
+    *,
+    fade_in: bool = False,
+    motion: str = DEFAULT_MOTION,
+) -> None:
+    """Render the stack, mux the song onto it, and only then call it done.
+
+    Deliberately the same shape as `_run_beat_cut`, down to staying
+    'assembling' across the mux — see that function for why the status matters
+    more than it looks like it should.
+    """
+    key = str(video_id)
+    try:
+        blends = sum(1 for s in plan.slots if s.is_blend)
+        _set_progress(
+            key, "assembling",
+            f"Schichten werden gerendert — {len(plan.slots)} Abschnitte, "
+            f"{blends} Überblendungen…", 10,
+        )
+        resolved = await _resolve_merge_sources(keys, ungrained=True)
+        paths = [s.inp.path for s in resolved]
+
+        # Harmonisation matters more here than in a beat cut: two tracks that
+        # sit at different black levels announce every dissolve as a brightness
+        # step, which is exactly the thing the shared form is supposed to hide.
+        grades = grade.harmonise(await _measure_sources(paths), harmony)
+        if any(not g.is_identity for g in grades):
+            _set_progress(key, "assembling", "Spuren werden angeglichen…", 12)
+            logger.info("Layer cut %s colour grades: %s", video_id,
+                        "; ".join(g.describe() for g in grades))
+
+        renderer = [
+            LayerSource(path=p, duration=await probe_video_duration(p),
+                        grade=g.filter_chain())
+            for p, g in zip(paths, grades)
+        ]
+
+        settings.videos_dir.mkdir(parents=True, exist_ok=True)
+        dest = settings.videos_dir / f"{video_id}_artrium.mp4"
+        await render_layers(
+            plan, renderer, dest, width, height, fps, ffmpeg_path=settings.ffmpeg_path,
+            fade_in=fade_in, motion=motion,
+        )
+
+        await _finalize_video_done(video_id, dest, key, status="assembling")
+        logger.info("Layer cut %s rendered (%d slots)", video_id, len(plan.slots))
+
+    except Exception as exc:
+        logger.exception("Layer cut %s failed", video_id)
+        await _finalize_video_failure(video_id, exc, key)
+        return
+
+    _set_progress(key, "muxing", "Song wird untergelegt…", 97)
+    await _run_soundtrack_mux(video_id, song_id, bed_volume)
+    await _finish_beat_cut(video_id, key)

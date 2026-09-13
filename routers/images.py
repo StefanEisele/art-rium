@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
+from core.job_control import cancel_job
 from core.models import Image
 from core.tasks import safe_create_task
 from core.thumbnail import make_thumbnail, thumb_rel_path
@@ -632,12 +633,26 @@ def _png_size(path) -> tuple[int, int]:
         return im.width, im.height
 
 
+async def _stop_upscale(image_id: uuid.UUID) -> None:
+    """Cancel an upscale still running for this image, if there is one.
+
+    The tiled redraw is minutes of GPU, and it writes its result onto a row
+    that may be about to disappear — so dropping the rendition or deleting the
+    image has to call this off first, or the pass finishes and re-populates the
+    columns that were just cleared.
+    """
+    key = str(image_id)
+    await cancel_job(image_id, prompt_ids=[_upscale_progress.get(key, {}).get("_prompt_id")])
+    _upscale_progress.pop(key, None)
+
+
 @router.delete("/{image_id}/upscale")
 async def remove_upscale(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """Drop the upscaled rendition and put the one under it back in front."""
     img = await db.get(Image, image_id)
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
+    await _stop_upscale(image_id)
     return await _clear_upscale(img, db)
 
 
@@ -681,6 +696,7 @@ async def bulk_delete_images(
     images = result.scalars().all()
 
     for img in images:
+        await _stop_upscale(img.id)
         _delete_files(img)
         await db.delete(img)
 
@@ -697,6 +713,7 @@ async def delete_image(
     if not img:
         raise HTTPException(status_code=404, detail="Image not found")
 
+    await _stop_upscale(image_id)
     _delete_files(img)
     await db.delete(img)
     await db.commit()

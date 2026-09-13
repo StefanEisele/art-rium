@@ -15,6 +15,12 @@ POST   /api/improv/sessions            multipart (source_video_id, recording)
 GET    /api/improv/sessions/{id}       poll
 GET    /api/improv/sessions            list (newest first)
 DELETE /api/improv/sessions/{id}       remove session + output files (best-effort)
+
+POST   /api/improv/piano-songs                  multipart (recording, title?) → Song
+POST   /api/improv/sessions/{id}/piano-song     a session's recording → Song (once)
+
+The last two take a played piece in as a Song row, which is what lets the
+Schichtenschnitt in the video tool cut to it — see services/improv/piano_song.
 """
 from __future__ import annotations
 
@@ -28,8 +34,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
-from core.models import ImprovSession, Video
+from core.job_control import cancel_job
+from core.models import ImprovSession, Song, Video
 from core.tasks import safe_create_task
+from routers.music import _serialize as serialize_song
+from services.improv.piano_song import (
+    create_piano_song,
+    song_id_for_session,
+    warm_analysis,
+)
 from services.improv.runner import run_improv_session
 from services.improv.source import source_filename
 from services.instagram.graph import share_url
@@ -80,23 +93,7 @@ async def create_session(
     rec_name = f"recording_{session_id.hex}{suffix}"
     rec_path = settings.improv_dir / rec_name
 
-    written = 0
-    try:
-        with rec_path.open("wb") as f:
-            while True:
-                chunk = await recording.read(1024 * 1024)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > _MAX_UPLOAD_BYTES:
-                    raise HTTPException(413, "Recording exceeds 1 GB upload cap")
-                f.write(chunk)
-    except HTTPException:
-        rec_path.unlink(missing_ok=True)
-        raise
-    except Exception as exc:
-        rec_path.unlink(missing_ok=True)
-        raise HTTPException(500, f"Upload failed: {exc}") from exc
+    written = await _save_capped(recording, rec_path)
 
     session = ImprovSession(
         id=session_id,
@@ -194,6 +191,10 @@ async def delete_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_d
     if not session:
         raise HTTPException(404, "Session not found")
 
+    # The mux is a chain of long ffmpeg passes; stop it before its inputs and
+    # outputs are unlinked out from under it.
+    await cancel_job(session_id)
+
     for video_id in (
         session.mix_synth_video_id,
         session.mix_hands_video_id,
@@ -212,6 +213,77 @@ async def delete_session(session_id: uuid.UUID, db: AsyncSession = Depends(get_d
     await db.commit()
 
 
+# ── Piano recordings as songs ────────────────────────────────────────────────
+# A played piece becomes a Song row, so the Schichtenschnitt can follow it like
+# any track — only as a performance: tempo that moves, dynamics, accents,
+# phrases. Only the sound is taken; see services/improv/piano_song.py.
+
+_AUDIO_SUFFIXES = (".m4a", ".wav", ".mp3", ".flac", ".aac", ".aif", ".aiff")
+
+
+@router.post("/piano-songs", status_code=201)
+async def upload_piano_song(
+    recording: UploadFile = File(...),
+    title: str | None = Form(None),
+):
+    """Take an uploaded recording (video with sound, or plain audio) in as a song."""
+    ctype = recording.content_type or ""
+    name = recording.filename or "aufnahme"
+    audio_suffix = next((s for s in _AUDIO_SUFFIXES if name.lower().endswith(s)), None)
+    if not (ctype.startswith(("video/", "audio/")) or audio_suffix):
+        raise HTTPException(400, f"Expected a video or audio file, got {ctype!r}")
+
+    settings.improv_dir.mkdir(parents=True, exist_ok=True)
+    suffix = audio_suffix or _safe_suffix(name)
+    tmp = settings.improv_dir / f"piano_upload_{uuid.uuid4().hex}{suffix}"
+    await _save_capped(recording, tmp)
+    try:
+        song = await create_piano_song(
+            tmp, title=title or name.rsplit(".", 1)[0], origin=f"Hochgeladen: {name}",
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
+    finally:
+        # The sound is in the song now; the upload was only its carrier.
+        tmp.unlink(missing_ok=True)
+
+    safe_create_task(warm_analysis(song.id, song.filepath), name=f"piano_analysis:{song.id}")
+    return serialize_song(song)
+
+
+@router.post("/sessions/{session_id}/piano-song")
+async def session_piano_song(session_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Take an improv session's recording in as a song. Idempotent: the song id
+    is derived from the session id, so a second call returns the first song."""
+    session = await db.get(ImprovSession, session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    existing = await db.get(Song, song_id_for_session(session_id))
+    if existing:
+        return serialize_song(existing)
+
+    rec = settings.improv_dir / session.recording_filename
+    if not rec.is_file():
+        raise HTTPException(404, "Recording file missing on disk")
+    when = session.created_at.astimezone() if session.created_at else None
+    try:
+        song = await create_piano_song(
+            rec,
+            title=f"Impro {when:%d.%m.%Y %H:%M}" if when else "Impro",
+            origin=f"Impro-Session {session_id}",
+            song_id=song_id_for_session(session_id),
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+    safe_create_task(warm_analysis(song.id, song.filepath), name=f"piano_analysis:{song.id}")
+    return serialize_song(song)
+
+
 # ── Serialisation ────────────────────────────────────────────────────────────
 
 
@@ -220,6 +292,7 @@ async def _serialize(session: ImprovSession, db: AsyncSession) -> dict:
     synth = await db.get(Video, session.mix_synth_video_id) if session.mix_synth_video_id else None
     hands = await db.get(Video, session.mix_hands_video_id) if session.mix_hands_video_id else None
     pip   = await db.get(Video, session.mix_pip_video_id)   if session.mix_pip_video_id   else None
+    piano = await db.get(Song, song_id_for_session(session.id))
     return {
         "id":            str(session.id),
         "status":        session.status,
@@ -230,6 +303,8 @@ async def _serialize(session: ImprovSession, db: AsyncSession) -> dict:
         "mix_synth":     _video_summary(synth),
         "mix_hands":     _video_summary(hands),
         "mix_pip":       _video_summary(pip),
+        # Set once the recording has been taken in as a song for the layer cut.
+        "piano_song_id": str(piano.id) if piano else None,
     }
 
 
@@ -244,6 +319,29 @@ def _video_summary(video: Video | None) -> dict | None:
         "status":    video.status,
         "thumb_url": f"/api/video/thumb/{video.id}" if video.status == "done" else None,
     }
+
+
+async def _save_capped(upload: UploadFile, dest) -> int:
+    """Stream an upload to `dest` under the 1 GB cap; returns bytes written.
+    Removes the partial file on any failure."""
+    written = 0
+    try:
+        with dest.open("wb") as f:
+            while True:
+                chunk = await upload.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > _MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "Recording exceeds 1 GB upload cap")
+                f.write(chunk)
+    except HTTPException:
+        dest.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(500, f"Upload failed: {exc}") from exc
+    return written
 
 
 def _safe_suffix(name: str | None) -> str:

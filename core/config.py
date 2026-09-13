@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     # ── ComfyUI ──────────────────────────────────────────────────────────────
     comfyui_host: str = "127.0.0.1:8188"
     comfyui_output_dir: Path = Path("E:/00_comfy/output")
+    # Where ComfyUI lives, and what relaunches it. The dashboard's "ComfyUI neu
+    # starten" button kills whatever holds comfyui_host's port and then runs
+    # this script — which is the same one start-remote.bat calls, so the
+    # restarted process carries the exact flags the box needs (--cuda-device 0
+    # above all; scripts/start-comfy.bat says why).
+    comfyui_dir: Path = Path("E:/00_comfy")
+    comfyui_start_script: Path = Path(__file__).parent.parent / "scripts" / "start-comfy.bat"
     # Route the Wan 2.2 experts' attention through SageAttention (INT8 QK,
     # FP8 PV) instead of PyTorch SDPA. Scoped to the two Wan builders on
     # purpose — it is an approximation, and every other model in this project

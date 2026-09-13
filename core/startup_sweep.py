@@ -29,6 +29,11 @@ reason, and it matters more there: a MiniMax task keeps running — and keeps
 being billed — while this process is down. Marking it failed here would strand
 its budget reservation and throw away a clip that was paid for.
 `services.video_api.queue.CloudVideoQueue.reconcile()` owns those rows.
+
+`sweep_stuck_jobs` has a second caller now: core/job_control.py::cancel_all_jobs
+runs it right after cancelling every job task, where the same "an in-flight row
+must be an orphan" argument holds for the same reason — nothing is left running
+that could still claim one. Hence the `reason` parameter.
 """
 import json
 import logging
@@ -52,7 +57,15 @@ logger = logging.getLogger(__name__)
 _INTERRUPTED_MSG = "Interrupted by server restart"
 
 
-async def sweep_stuck_jobs() -> None:
+async def sweep_stuck_jobs(reason: str = _INTERRUPTED_MSG) -> int:
+    """Mark every row still claiming to be in flight as failed; return the count.
+
+    `reason` is what the row will say happened. The default is the startup
+    case; core/job_control.py::cancel_all_jobs passes its own, because after it
+    has cancelled every job task the same query finds the same kind of orphan
+    for an entirely different reason, and a job the user stopped on purpose
+    should not claim the server restarted.
+    """
     async with AsyncSessionLocal() as db:
         n = 0
 
@@ -64,13 +77,13 @@ async def sweep_stuck_jobs() -> None:
         )
         for video in result.scalars():
             video.status = "failed"
-            video.error = _INTERRUPTED_MSG
+            video.error = reason
             n += 1
 
         result = await db.execute(select(Song).where(Song.status == "generating"))
         for song in result.scalars():
             song.status = "failed"
-            song.error = _INTERRUPTED_MSG
+            song.error = reason
             n += 1
 
         result = await db.execute(
@@ -78,7 +91,7 @@ async def sweep_stuck_jobs() -> None:
         )
         for session in result.scalars():
             session.status = "failed"
-            session.error = _INTERRUPTED_MSG
+            session.error = reason
             n += 1
 
         result = await db.execute(
@@ -92,9 +105,10 @@ async def sweep_stuck_jobs() -> None:
 
         if n:
             await db.commit()
-            logger.warning(f"Startup sweep: marked {n} orphaned job(s) as failed")
+            logger.warning(f"Job sweep ({reason}): marked {n} orphaned job(s) as failed")
         else:
-            logger.info("Startup sweep: no orphaned jobs found")
+            logger.info("Job sweep: no orphaned jobs found")
+        return n
 
 
 # routers/vace.py parks its two-stage AnimateLCM renders in status 'review'

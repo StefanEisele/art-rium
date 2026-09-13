@@ -45,6 +45,7 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.models import ControlTrack, Image, Video
+from core.subproc import communicate
 from core.tasks import safe_create_task
 from core.video_thumb import (
     make_video_thumbnail,
@@ -255,7 +256,7 @@ async def _transcode_to_mp4(src: Path, dest: Path) -> None:
         "-pix_fmt", "yuv420p", str(dest),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
     )
-    _, err = await proc.communicate()
+    _, err = await communicate(proc)
     if proc.returncode != 0 or not dest.is_file():
         raise RuntimeError(err.decode(errors="replace")[:400] or "ffmpeg failed")
 
@@ -296,7 +297,7 @@ async def _apply_budget(src: Path, dest: Path, budget, lossless: bool = False) -
     proc = await asyncio.create_subprocess_exec(
         *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
     )
-    _, err = await proc.communicate()
+    _, err = await communicate(proc)
     if proc.returncode != 0 or not dest.is_file():
         raise RuntimeError(err.decode(errors="replace")[:400] or "ffmpeg failed")
 

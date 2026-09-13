@@ -37,8 +37,10 @@ import json
 import logging
 import math
 import statistics
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
+from core.subproc import communicate
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +94,32 @@ class BeatMap:
     sections: list[int]             # bar indices where the music changes
     confidence: float               # 0 = no audible pulse, 1 = unmistakable
     version: int = ANALYSIS_VERSION
+    # ── Played music only (services/video/piano.py) ──────────────────────────
+    # A recorded performance has what a generated song does not: dynamics that
+    # move within a bar, accents that are not on the grid, and phrases that
+    # breathe. Empty for every generated song, so the planners read those
+    # exactly as they always did.
+    profile: str = "song"                                        # "song" | "piano"
+    dynamics: list[float] = field(default_factory=list)          # loudness 0..1
+    dynamics_rate: float = 0.0                                   # samples per second
+    accents: list[float] = field(default_factory=list)           # strong attacks, seconds
+    accent_strength: list[float] = field(default_factory=list)   # 0..1, parallel to accents
+    phrases: list[float] = field(default_factory=list)           # a phrase begins, seconds
+
+    @property
+    def is_played(self) -> bool:
+        return self.profile != "song" and bool(self.dynamics)
+
+    def dynamics_at(self, t: float) -> float:
+        """Loudness at `t`, linearly interpolated; 0.5 when there is no curve."""
+        if not self.dynamics or self.dynamics_rate <= 0:
+            return 0.5
+        x = max(0.0, t * self.dynamics_rate)
+        i = int(x)
+        if i >= len(self.dynamics) - 1:
+            return self.dynamics[-1]
+        frac = x - i
+        return self.dynamics[i] + (self.dynamics[i + 1] - self.dynamics[i]) * frac
 
     def bar_starts(self) -> list[int]:
         """Indices into `beats` of every downbeat."""
@@ -170,7 +198,7 @@ async def _read_envelopes(source: Path, ffmpeg_path: str) -> list[list[float]]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    stdout, stderr = await communicate(proc)
     if proc.returncode != 0:
         tail = stderr.decode(errors="replace")[-600:]
         raise RuntimeError(f"ffmpeg envelope pass failed (rc={proc.returncode}): {tail}")
@@ -529,7 +557,10 @@ async def load_or_analyze(
     different metre, or a corrupt one is simply re-analysed."""
     try:
         data = json.loads(cache.read_text(encoding="utf-8"))
+        # A piano recording's sidecar lives at the same path with its own
+        # profile (services/video/piano.py); never read one as a song's.
         if (data.get("version") == ANALYSIS_VERSION
+                and data.get("profile", "song") == "song"
                 and data.get("beats_per_bar") == beats_per_bar):
             return BeatMap.from_json(data)
     except (OSError, ValueError, TypeError):

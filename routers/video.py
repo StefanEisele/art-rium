@@ -58,6 +58,7 @@ POST /api/video/suggest-transitions → VLM-suggested per-transition prompts (fl
 POST /api/video/suggest-i2v         → VLM-suggested surreal per-image prompts (i2v/minimax)
 GET  /api/video/jobs/{id}           → poll status
 GET  /api/video/jobs/{id}/progress  → lightweight progress (ComfyUI queue + phase)
+POST /api/video/jobs/{id}/cancel    → stop the render, keep the clips it has
 GET  /api/video/clips               → all library clips (frontend groups by job)
 DELETE /api/video/clips/{clip_id}   → delete one clip (empty source jobs are pruned)
 POST /api/video/clips/{id}/upscale  → SEEDVR2 pass on ONE clip, before merging
@@ -91,8 +92,10 @@ from core.comfy import WORKFLOW_NAME as ZIMAGE_WORKFLOW_NAME
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.imaging import prepare_jpg_for_web
+from core.job_control import CANCELLED_MSG, cancel_job
 from core.loras import ALLOWED_LORAS, DEFAULT_LORA, LORAS
 from core.models import AUDIO_WORKFLOWS, Image, Song, Video, VideoClip
+from core.subproc import communicate
 from core.tasks import safe_create_task
 from core.video_thumb import (
     make_video_thumbnail,
@@ -1289,6 +1292,39 @@ def _set_progress(
     if band_node:
         entry["_band_node"] = band_node
     _progress[vid_key] = entry
+
+
+# ── Stopping a job ────────────────────────────────────────────────────────────
+
+def forget_progress(key: str | None = None) -> int:
+    """Drop the cached progress entry for one job, or for every job.
+
+    The all-at-once form is what routers/system.py's cancel-all uses: after
+    every job task has been cancelled, an entry left behind would keep a
+    finished-looking bar on screen for a render that is not running.
+    """
+    if key is not None:
+        return 1 if _progress.pop(key, None) is not None else 0
+    n = len(_progress)
+    _progress.clear()
+    return n
+
+
+def _live_prompt_ids(key: str, video: Video | None = None) -> list[str | None]:
+    """Every ComfyUI prompt this job may still have in flight.
+
+    Two sources, because they answer at different resolutions: the row carries
+    the last prompt this job *submitted*, and the progress entry carries the
+    one it is *waiting on right now*. In a per-segment render they are usually
+    the same id; when they are not, the newer one is the one still burning GPU.
+    """
+    return [_progress.get(key, {}).get("_prompt_id"), video.comfy_prompt_id if video else None]
+
+
+async def _stop_video_job(video: Video) -> dict:
+    """Cancel a video job's task and drop its ComfyUI prompt. Idempotent."""
+    key = str(video.id)
+    return await cancel_job(video.id, prompt_ids=_live_prompt_ids(key, video))
 
 
 async def _finalize_video_failure(video_id: uuid.UUID, exc: Exception, vid_key: str) -> None:
@@ -2550,6 +2586,30 @@ async def get_job_progress(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
     return {**_attach_live_stage(prog), **clip_counts}
 
 
+@router.post("/jobs/{video_id}/cancel")
+async def cancel_video_job(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Stop this job without deleting it — the clips it already rendered stay.
+
+    A post-pass (upscale, look, soundtrack) is stopped the same way, but the
+    row keeps its status: the *video* is fine, it is the pass on top of it that
+    was called off, and marking it failed would hide a finished piece behind an
+    error it does not have.
+    """
+    video = await db.get(Video, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    stopped = await _stop_video_job(video)
+    forget_progress(str(video_id))
+    if video.status in ("queued", "generating", "assembling"):
+        video.status = "failed"
+        video.error = CANCELLED_MSG
+        await db.commit()
+    await db.refresh(video)
+    logger.info("Cancelled video job %s (%s)", video_id, video.status)
+    return {**_serialize(video), "cancelled": stopped}
+
+
 def _serialize_clip(c: VideoClip) -> dict:
     # `url` serves the upscaled rendition when there is one, so previewing a
     # clip shows what the merge will actually consume. `width`/`height` stay
@@ -2650,6 +2710,9 @@ async def delete_clip(clip_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
     job_id = clip.video_id
+    # A clip carries its own task (an upscale runs as `clip_upscale:<clip id>`),
+    # so it is stopped by clip id, not by the job's.
+    await cancel_job(clip_id, prompt_ids=_live_prompt_ids(_clip_key(clip_id)))
     seg_dir = _segments_dir(job_id)
     (seg_dir / clip.filename).unlink(missing_ok=True)
     (seg_dir / clip.thumb).unlink(missing_ok=True)
@@ -2890,6 +2953,7 @@ async def bulk_delete_videos(
         if not video:
             deleted.append(str(vid))
             continue
+        await _stop_video_job(video)      # see delete_video — stop, then delete
         paths, seg_dir = _video_owned_paths(video), _segments_dir(vid)
         try:
             await db.delete(video)
@@ -2915,6 +2979,10 @@ async def delete_video(video_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     video = await db.get(Video, video_id)
     if not video:
         raise HTTPException(status_code=404, detail="Video not found")
+    # Stop the render before touching anything. Deleting the row used to leave
+    # the job running: ComfyUI finished the clip nobody would ever see, and the
+    # task then wrote its segments back into the directory removed below.
+    await _stop_video_job(video)
     paths, seg_dir = _video_owned_paths(video), _segments_dir(video_id)
     # Row first, files after — see bulk_delete_videos above. This used to
     # unlink first, which turned a refused delete into a playable-looking row
@@ -3233,7 +3301,7 @@ async def _conform_frame_rate(
     proc = await asyncio.create_subprocess_exec(
         *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
     )
-    _, err = await proc.communicate()
+    _, err = await communicate(proc)
     if proc.returncode != 0 or not dest.is_file():
         raise RuntimeError(
             f"frame-rate conform to {fps} failed: "

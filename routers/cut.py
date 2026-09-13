@@ -61,7 +61,8 @@ from routers.video import (
     _run_soundtrack_mux,
     _set_progress,
 )
-from services.video import beats, grade
+from services.improv.piano_song import is_recording
+from services.video import beats, grade, piano
 from services.video.audio_bed import BED_VOLUME_DEFAULT, clamp_bed_volume
 from services.video.cut import (
     DEFAULT_STYLE,
@@ -92,6 +93,7 @@ from services.video.layers import STYLE_BY_KEY as LAYER_STYLE_BY_KEY
 from services.video.layers import (
     ACCENT_SECONDS,
     DEFAULT_TRANSITION,
+    GLOW_DEFAULT,
     PULSE_DEFAULT,
     PULSE_MAX,
     SPEED_HIGH_DEFAULT,
@@ -99,6 +101,7 @@ from services.video.layers import (
     SPEED_MAX,
     SPEED_MIN,
     SWELL_DEFAULT,
+    TOUCH_DEFAULT,
     LayerPlan,
     plan_layers,
     transition_options,
@@ -132,6 +135,11 @@ LOOP_SPREAD_TOLERANCE = 0.25
 # how early a cut can be pulled. 200 ms is roughly a sixteenth at 75 BPM — past
 # that the picture stops anticipating the beat and starts missing it.
 ANTICIPATION_MAX = 0.20
+
+# The timeline is a few hundred pixels wide and a four-minute recording has two
+# thousand dynamics samples. Thinned rather than averaged — the curve is
+# already smoothed, and thinning keeps its peaks where they are.
+TIMELINE_POINTS = 480
 
 
 # ── Request bodies ───────────────────────────────────────────────────────────
@@ -199,6 +207,23 @@ async def _measure_sources(paths: list[Path]) -> list[grade.Stats | None]:
     return out
 
 
+def _played_fields(beatmap: beats.BeatMap) -> dict:
+    """What the timeline draws for a recorded performance, on top of the bars:
+    its dynamics curve, the accents, and where the phrases begin. A generated
+    song answers with its profile alone."""
+    if not beatmap.is_played:
+        return {"profile": beatmap.profile}
+    step = max(1, -(-len(beatmap.dynamics) // TIMELINE_POINTS))
+    return {
+        "profile": beatmap.profile,
+        "dynamics": beatmap.dynamics[::step],
+        "dynamics_rate": beatmap.dynamics_rate / step,
+        "accents": beatmap.accents,
+        "accent_strength": beatmap.accent_strength,
+        "phrases": beatmap.phrases,
+    }
+
+
 def _harmony_strength(key: str) -> float:
     """Preset key → strength. An unknown key harmonises nothing rather than
     guessing, so a stale client cannot silently regrade a piece."""
@@ -213,6 +238,11 @@ async def _song_beatmap(song: Song, beats_per_bar: int) -> beats.BeatMap:
     `songs.bpm` is what ACE-Step was asked for when the track was generated,
     and handing it over as a hint is the single biggest accuracy win available
     here — see the module docstring of services/video/beats.py.
+
+    A piano recording taken in by the improv tool is read as a performance
+    instead: a tempo that is allowed to move, a continuous dynamics curve,
+    accents and phrases (services/video/piano.py). Everything downstream reads
+    the same BeatMap either way.
     """
     if not song.filepath:
         raise HTTPException(status_code=409, detail="Song has no file")
@@ -220,6 +250,13 @@ async def _song_beatmap(song: Song, beats_per_bar: int) -> beats.BeatMap:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Song file missing on disk")
     try:
+        if is_recording(song):
+            return await piano.load_or_analyze_piano(
+                path,
+                beats.cache_path(settings.songs_dir, song.id),
+                beats_per_bar=beats_per_bar,
+                ffmpeg_path=settings.ffmpeg_path,
+            )
         return await beats.load_or_analyze(
             path,
             beats.cache_path(settings.songs_dir, song.id),
@@ -361,6 +398,7 @@ async def make_plan(body: PlanRequest, db: AsyncSession = Depends(get_db)):
             "bar_times": [beatmap.beats[i] for i in beatmap.bar_starts()],
             "sections": beatmap.sections,
             "confidence": beatmap.confidence,
+            **_played_fields(beatmap),
         },
         "sources": [{"key": s.key, "label": s.label, "duration": round(s.duration, 3)}
                     for s in sources],
@@ -555,6 +593,11 @@ class LayerPlanRequest(BaseModel):
     # material and pushes through it. Either at 0 removes that half.
     swell: float = SWELL_DEFAULT
     pulse: float = PULSE_DEFAULT
+    # Only read when the music is a recorded performance: how far the playing
+    # shapes each transition, and how strongly accents between changes light
+    # the picture up. See services/video/layers.py.
+    touch: float = TOUCH_DEFAULT
+    glow: float = GLOW_DEFAULT
     harmonize: str = grade.DEFAULT_HARMONY
     # See PlanRequest.motion. It matters more here than in a beat cut: the
     # whole stack is retimed by the energy curve, so nearly every slot in a
@@ -647,6 +690,8 @@ def _build_layer_plan(
             speed_high=body.speed_high,
             swell=body.swell,
             pulse=body.pulse,
+            touch=body.touch,
+            glow=body.glow,
             # The planner needs the target rate: a segment that comes out one
             # frame long collapses in the filtergraph, so the floor it keeps
             # its knots above is measured in frames.
@@ -677,6 +722,7 @@ async def layer_styles():
             "pulse_default": PULSE_DEFAULT, "pulse_max": PULSE_MAX,
             "accent_seconds": ACCENT_SECONDS,
         },
+        "played": {"touch_default": TOUCH_DEFAULT, "glow_default": GLOW_DEFAULT},
         "max_layers": MAX_LAYERS,
         "smooth_fps": SMOOTH_FPS,
     }
@@ -723,6 +769,7 @@ async def make_layer_plan(body: LayerPlanRequest, db: AsyncSession = Depends(get
             "bar_times": [beatmap.beats[i] for i in beatmap.bar_starts()],
             "sections": beatmap.sections,
             "confidence": beatmap.confidence,
+            **_played_fields(beatmap),
         },
         "sources": [{"key": s.key, "label": s.label, "duration": round(s.duration, 3)}
                     for s in sources],
@@ -741,6 +788,7 @@ async def make_layer_plan(body: LayerPlanRequest, db: AsyncSession = Depends(get
             "title": song.title,
             "url": f"/api/music/file/{song.filename}" if song.filename else None,
             "requested_bpm": song.bpm,
+            "recording": is_recording(song),
         },
     }
 
@@ -787,10 +835,11 @@ async def render_layer(body: LayerRenderRequest, db: AsyncSession = Depends(get_
     blends = sum(1 for s in plan.slots if s.is_blend)
     logger.info(
         "Queued layer cut %s — %d changes in %d segments (%d transitions) over "
-        "%d tracks, %s/%s at %.1f BPM, %.1f s, Schwelle=%.2f Puls=%.2f",
+        "%d tracks, %s/%s at %.1f BPM, %.1f s, Schwelle=%.2f Puls=%.2f, %s "
+        "(Anschlag=%.2f, %d glows)",
         video.id, plan.changes, len(plan.slots), blends, len(sources),
         plan.style, plan.transition, plan.bpm, layer_duration(plan, fps),
-        plan.swell, plan.pulse,
+        plan.swell, plan.pulse, plan.profile, plan.touch, len(plan.glows),
     )
     return {
         "video_id": str(video.id),

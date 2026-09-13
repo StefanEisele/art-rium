@@ -797,6 +797,8 @@
     <a class="back-btn" href="/" title="Dashboard">‹</a>
     <h1>Instagram Scheduler</h1>
     <div class="dot" id="dot" style="opacity:0"></div>
+    <button class="chip-btn" id="reset-btn" onclick="resetSession()"
+            title="Clear the remembered new-post form">Reset</button>
   </header>
 
   <!-- ── Timeline ── -->
@@ -1421,6 +1423,33 @@ function updateScheduleBtn() {
   } else {
     $('schedule-btn').disabled = state.selectedMedia.length === 0;
   }
+}
+
+
+// ── Session cache ─────────────────────────────────────────────────────────────
+// The new-post form only: a written caption, the pictures picked for it, the
+// collaborators and the offset. The detail modal is deliberately untouched —
+// it edits a post that already exists on the server, and putting a cached
+// draft into it would be editing the wrong thing.
+//
+// `aiLabel` is not cached either: /framing-defaults decides it on load, and a
+// remembered value would quietly override a server-side policy change about
+// AI disclosure, which is not a setting to be clever with.
+const IG_SESSION_KEYS = ['mode', 'selectedMedia', 'selectedReelVideos',
+                         'reelVideoId', 'reelVideo', 'frameRatio'];
+
+const igSession = ArtRium.session('instagram', {
+  version: 1,
+  fields: ['caption-input', 'collab-input', 'offset-days'],
+  snapshot: () => Object.fromEntries(IG_SESSION_KEYS.map(k => [k, state[k]])),
+  restore: (saved) => {
+    for (const k of IG_SESSION_KEYS) if (saved[k] !== undefined) state[k] = saved[k];
+  },
+});
+
+function resetSession() {
+  if (!confirm('Reset the new-post form?\n\nCaption, pictures and settings are cleared. Scheduled posts are not touched.')) return;
+  igSession.reset();
 }
 
 // ── Mode toggle ───────────────────────────────────────────────────────────────
@@ -2927,7 +2956,14 @@ window.addEventListener('load', async () => {
     onDisconnected: () => ArtRium.setDot('disconnected'),
   });
 
+  // Before the strips are drawn: both read their list straight off `state`.
+  // setMode() is called rather than assigned so the panels, the two headings
+  // and the companion-delay rows follow the restored kind.
+  const savedSession = igSession.load();
+  if (savedSession?.state?.mode) setMode(savedSession.state.mode);
   renderSelectedStrip();
+  renderSelectedReelStrip();
+  igSession.start();
 
   // Drag-to-reorder for both the new-post strip and the detail-modal strip.
   // Listeners attach to the persistent strip elements; chips opt in via

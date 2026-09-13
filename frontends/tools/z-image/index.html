@@ -327,16 +327,17 @@
       object-fit: contain; border-radius: 10px;
       will-change: transform; -webkit-user-drag: none;
     }
-    /* The verdict, drawn on the picture as it moves — same stamp the Gallery
-       uses, in the one colour this view needs. */
+    /* The verdict, drawn on the picture as it moves — same shape and colours
+       as the Gallery's own `.swipe-stamp.keep`/`.doom`. */
     .lb-stamp {
-      position: absolute; top: 14px; right: 24px;
+      position: absolute; top: 14px;
       font-size: 17px; font-weight: 800; letter-spacing: 1.2px;
       text-transform: uppercase; padding: 6px 11px;
       border: 3px solid currentColor; border-radius: var(--radius-sm);
-      color: var(--red); transform: rotate(11deg);
       opacity: 0; pointer-events: none; will-change: opacity;
     }
+    .lb-stamp.doom { right: 24px; color: var(--red);   transform: rotate(11deg); }
+    .lb-stamp.keep { left: 24px;  color: var(--green); transform: rotate(-11deg); }
     .lb-foot {
       display: flex; gap: 8px; flex-shrink: 0;
       padding: 12px 14px calc(14px + env(safe-area-inset-bottom));
@@ -550,6 +551,8 @@
       <div class="dot connecting" id="dot"></div>
       <span id="status-label">connecting…</span>
     </div>
+    <button class="chip-btn" id="reset-btn" onclick="resetSession()"
+            title="Clear the remembered form and start over">Reset</button>
   </header>
 
   <main>
@@ -729,9 +732,10 @@
   </div>
   <div class="lb-stage" id="lb-stage">
     <img id="lb-img" alt="">
-    <div class="lb-stamp" id="lb-stamp">Löschen</div>
+    <div class="lb-stamp keep" id="lb-stamp-keep">Behalten</div>
+    <div class="lb-stamp doom" id="lb-stamp-doom">Löschen</div>
   </div>
-  <div class="lb-hint">Zur Seite wischen löscht — mit Rückgängig für ein paar Sekunden.</div>
+  <div class="lb-hint">Rechts löscht — mit Rückgängig. Links behält und geht weiter.</div>
   <div class="lb-foot">
     <button class="save-btn" id="lb-save" onclick="lightbox.save()">Save to Gallery</button>
   </div>
@@ -1044,6 +1048,12 @@ const gallery = {
 // Gallery's swipe deck keeps verdicts and deletions apart for the same reason —
 // a flick is cheap to misfire and `DELETE /api/images/{id}` unlinks the file,
 // the renditions and the row with nothing to restore from.
+//
+// Direction matches the Gallery's own swipe-to-cull everywhere else in the
+// app (its modal image swipe, its Aussortieren deck): right deletes, left is
+// safe. Only one verdict exists here — there is nothing to advance to in a
+// grid — so a left drag simply has no commit direction and always settles
+// back, whatever its distance or speed.
 
 const SWIPE_COMMIT_PX = 90;      // travel past which a slow drag counts
 const SWIPE_FLICK_V   = 0.55;    // px/ms past which a short one does too
@@ -1085,15 +1095,20 @@ function attachSwipeToDelete(item, layer, hint, data) {
     dx = mx;
     layer.style.transform = `translateX(${dx}px)`;
     layer.style.opacity = String(Math.max(0.35, 1 - Math.abs(dx) / 320));
-    hint.style.opacity = String(Math.min(1, Math.abs(dx) / SWIPE_COMMIT_PX));
+    // Only a rightward drag can delete, so the warning only makes sense while
+    // dragging that way — a left drag shows nothing rather than a hint for an
+    // outcome that direction cannot produce.
+    hint.style.opacity = dx > 0 ? String(Math.min(1, dx / SWIPE_COMMIT_PX)) : '0';
   });
 
   const end = () => {
     if (!dragging) return;
     dragging = false;
-    const speed = Math.abs(dx) / Math.max(1, Date.now() - at);
-    if (Math.abs(dx) > SWIPE_COMMIT_PX || speed > SWIPE_FLICK_V) {
-      settle(Math.sign(dx) * (item.offsetWidth + 60), '0');
+    // Signed, not `Math.abs` — a fast leftward flick must not read as a fast
+    // flick that happens to delete; it has to fail this check outright.
+    const speed = dx / Math.max(1, Date.now() - at);
+    if (dx > SWIPE_COMMIT_PX || speed > SWIPE_FLICK_V) {
+      settle(item.offsetWidth + 60, '0');
       setTimeout(() => queueDelete(data), 180);
       return;
     }
@@ -1145,7 +1160,8 @@ const lightbox = {
     setText('lb-count', `${lightbox.index + 1} / ${n}`);
     $('lb-prev').disabled = lightbox.index === 0;
     $('lb-next').disabled = lightbox.index >= n - 1;
-    $('lb-stamp').style.opacity = '0';
+    $('lb-stamp-keep').style.opacity = '0';
+    $('lb-stamp-doom').style.opacity = '0';
   },
 
   step(d) {
@@ -1174,11 +1190,17 @@ const lightbox = {
   },
 };
 
-/** The same flick as on a card, on the enlarged picture. */
+/** The same flick as on a card, on the enlarged picture — same direction as
+ *  everywhere else this app swipes a picture: right deletes, left keeps and
+ *  moves on to the next one (mirrors the Gallery modal's own
+ *  `advanceAfterSwipe` — a review flow that always lands somewhere, never
+ *  just declines and sits still). Running off the end closes the lightbox
+ *  rather than sticking on the last picture with nothing left to decide. */
 function initLightboxSwipe() {
   const stage = $('lb-stage');
   const img = $('lb-img');
-  const stamp = $('lb-stamp');
+  const stampKeep = $('lb-stamp-keep');
+  const stampDoom = $('lb-stamp-doom');
   let x0 = 0, y0 = 0, dx = 0, at = 0, dragging = false, decided = false, horizontal = false;
 
   stage.addEventListener('pointerdown', (e) => {
@@ -1202,27 +1224,45 @@ function initLightboxSwipe() {
     dx = mx;
     img.style.transform = `translate3d(${dx}px,0,0) rotate(${(dx / 22).toFixed(2)}deg)`;
     img.style.opacity = String(Math.max(0.35, 1 - Math.abs(dx) / 420));
-    stamp.style.opacity = String(Math.min(1, Math.abs(dx) / SWIPE_COMMIT_PX));
+    stampDoom.style.opacity = dx > 0 ? String(Math.min(1, dx / SWIPE_COMMIT_PX)) : '0';
+    stampKeep.style.opacity = dx < 0 ? String(Math.min(1, -dx / SWIPE_COMMIT_PX)) : '0';
   });
 
   const end = () => {
     if (!dragging) return;
     dragging = false;
-    const speed = Math.abs(dx) / Math.max(1, Date.now() - at);
-    const commit = horizontal
-      && (Math.abs(dx) > SWIPE_COMMIT_PX || speed > SWIPE_FLICK_V);
-    if (commit) {
+    // Signed: a fast flick the wrong way for a branch has to fail that
+    // branch outright, not read as "fast enough" regardless of direction.
+    const speed = dx / Math.max(1, Date.now() - at);
+    const doom = horizontal && (dx > SWIPE_COMMIT_PX || speed > SWIPE_FLICK_V);
+    const keep = horizontal && (dx < -SWIPE_COMMIT_PX || speed < -SWIPE_FLICK_V);
+    if (doom) {
       img.style.transition = 'transform .24s ease-in, opacity .24s ease-in';
-      img.style.transform = `translate3d(${Math.sign(dx) * (window.innerWidth + 120)}px,0,0)`;
+      img.style.transform = `translate3d(${window.innerWidth + 120}px,0,0)`;
       img.style.opacity = '0';
-      stamp.style.opacity = '0';
+      stampDoom.style.opacity = '0';
       setTimeout(() => lightbox.remove(), 200);
+      return;
+    }
+    if (keep) {
+      img.style.transition = 'transform .22s ease-in, opacity .22s ease-in';
+      img.style.transform = `translate3d(${-(window.innerWidth + 120)}px,0,0)`;
+      img.style.opacity = '0';
+      stampKeep.style.opacity = '0';
+      // `paint()` (called by `step`/`close`) resets transform/opacity/
+      // transition on `img` before this timer fires, so the next picture
+      // never inherits the outgoing one's slide.
+      setTimeout(() => {
+        if (lightbox.index + 1 < state.generatedImages.length) lightbox.step(1);
+        else lightbox.close();
+      }, 200);
       return;
     }
     img.style.transition = 'transform .2s ease, opacity .2s ease';
     img.style.transform = '';
     img.style.opacity = '';
-    stamp.style.opacity = '0';
+    stampDoom.style.opacity = '0';
+    stampKeep.style.opacity = '0';
   };
   stage.addEventListener('pointerup', end);
   stage.addEventListener('pointercancel', end);
@@ -2161,6 +2201,115 @@ const buildBatchRow = () => {
   }
 };
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SESSION CACHE
+// ═══════════════════════════════════════════════════════════════════════════
+// The prompt, the model, the LoRA stack and the size are what this tool is;
+// losing them to a trip to the Gallery is what this puts right. Generated
+// images are NOT in here — they have their own store (`storage`, keyed on
+// STORAGE_KEYS.images) and have had one all along.
+//
+// Split in two on purpose. `restore` runs before anything is built, because
+// buildLoraList() fetches the registry for `state.model` and has to know which
+// model that is. Everything that depends on a list arriving from the server —
+// the LoRA selection, the denoise band, a variant's source picture — is put
+// back afterwards by applySessionLate().
+const Z_SESSION_KEYS = [
+  'mode', 'model', 'imgWidth', 'imgHeight', 'batchCount', 'denoise',
+  'enhancePhase', 'enhancedPrompts',
+];
+
+const zSession = ArtRium.session('z-image', {
+  version: 1,
+  fields: [DOM_IDS.prompt, DOM_IDS.negativePrompt, DOM_IDS.seed],
+  snapshot: () => {
+    const d = Object.fromEntries(Z_SESSION_KEYS.map(k => [k, state[k]]));
+    d.activeLoras = [...state.activeLoras];
+    d.loraStrengths = state.loraStrengths;
+    // The picture itself is not cached, only which one it was: it is re-read
+    // from the server on the way back, so a variant source that has since been
+    // retitled, re-rated or deleted is handled by the same code that handles a
+    // deep link to it.
+    d.variantSourceId = state.variantSource?.id || null;
+    return d;
+  },
+  restore: (saved) => {
+    if (saved.model) state.model = saved.model;
+    if (saved.imgWidth)  state.imgWidth  = saved.imgWidth;
+    if (saved.imgHeight) state.imgHeight = saved.imgHeight;
+    if (saved.batchCount) state.batchCount = saved.batchCount;
+    if (typeof saved.denoise === 'number') state.denoise = saved.denoise;
+    $(DOM_IDS.modelZimageBtn).classList.toggle('active', state.model === 'zimage');
+    $(DOM_IDS.modelSdxlBtn).classList.toggle('active', state.model === 'sdxl');
+    $(DOM_IDS.modelErnieBtn).classList.toggle('active', state.model === 'ernie');
+    const sizeBtn = [...document.querySelectorAll('.size-btn')].find(b => {
+      const m = /setSize\((\d+),\s*(\d+)/.exec(b.getAttribute('onclick') || '');
+      return m && Number(m[1]) === state.imgWidth && Number(m[2]) === state.imgHeight;
+    });
+    if (sizeBtn) selectButton('.size-btn', sizeBtn);
+    updateNegativePromptVisibility();
+  },
+});
+
+/** The half of the restore that needs the server's lists to have landed. */
+const applySessionLate = async (saved) => {
+  if (!saved || !saved.state) return;
+  const s = saved.state;
+
+  // The batch row is built after restore() runs, so its highlight is set here.
+  const batchBtns = document.querySelectorAll('.batch-btn');
+  batchBtns.forEach((b, i) => b.classList.toggle('active', i + 1 === state.batchCount));
+
+  // setMode() rewrites the prompt textarea (it moves the LoRA trigger in and
+  // out), so it has to run before the cached prompt is put back — and it
+  // early-returns when the mode already matches, which is the Direct case.
+  const promptText = $(DOM_IDS.prompt).value;
+  if (s.mode && s.mode !== state.mode) setMode(s.mode);
+  if (promptText) { $(DOM_IDS.prompt).value = promptText; onPromptInput(); }
+
+  // buildLoraList() has just reset the selection to the registry's default.
+  // Only names it still offers: a LoRA dropped from the library would fail
+  // the whole submission rather than be quietly ignored.
+  if (s.activeLoras) {
+    const known = new Set(loraRegistry.list.map(l => l.filename));
+    state.activeLoras = new Set(s.activeLoras.filter(f => known.has(f)));
+    Object.assign(state.loraStrengths, s.loraStrengths || {});
+    renderLoraState();
+  }
+
+  if (s.mode === 'variant' && s.variantSourceId) {
+    try {
+      const r = await apiFetch(`/api/images/${encodeURIComponent(s.variantSourceId)}`);
+      setVariantSource(await r.json());
+      // setVariantSource() puts the source's own prompt back and snaps the
+      // slider to the recommended band — both of which throw away an edit
+      // that was the entire point of coming back to this.
+      if (promptText) { $(DOM_IDS.prompt).value = promptText; onPromptInput(); }
+      if (typeof s.denoise === 'number') { state.denoise = s.denoise; renderDenoise(); }
+    } catch (_) {
+      // The source is gone. Direct mode with the prompt still in the box is a
+      // better landing than a variant panel pointing at nothing.
+      setMode('direct');
+    }
+  }
+
+  // A reviewed set of enhanced prompts is real work — several seconds of LLM
+  // and a read-through — so it comes back rather than sending you round again.
+  if (s.mode === 'enhance' && s.enhancePhase === 'review' && s.enhancedPrompts?.length) {
+    state.enhancedPrompts = s.enhancedPrompts;
+    state.enhancePhase = 'review';
+    renderEnhanceReview();
+  }
+  updateGenButton();
+  updateAdvSummary();
+};
+
+function resetSession() {
+  if (!confirm('Reset the form?\n\nPrompt, model, LoRAs and settings are cleared. Generated images stay.')) return;
+  zSession.reset();
+}
+
 const buildLoraList = async () => {
   const row = $(DOM_IDS.loraRow);
   row.innerHTML = '';
@@ -2296,12 +2445,16 @@ const applyContinueDeepLink = async () => {
 };
 
 window.addEventListener('load', async () => {
+  // First, so buildLoraList() below fetches the registry for the model that
+  // was actually in use rather than the default one.
+  const savedSession = zSession.load();
   buildBatchRow();
   buildHeaderButtons();
   await buildLoraList();
   // Awaited: the deep link below snaps the slider into the recommended band,
   // which needs the ranges to already be here.
   await loadDenoiseOptions();
+  await applySessionLate(savedSession);
   state.generatedImages = storage.loadImages();
   gallery.render();
 
@@ -2325,6 +2478,7 @@ window.addEventListener('load', async () => {
 
   await applyVariantDeepLink();
   await applyContinueDeepLink();
+  zSession.start();
   initLightboxSwipe();
 
   wsConn = ArtRium.connectWs({

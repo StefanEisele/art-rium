@@ -313,6 +313,7 @@
     .save-indicator.error { color: var(--red); }
     .action-btn { flex: 1; padding: 9px; border-radius: 8px; border: 1.5px solid var(--border); background: var(--surface2); color: var(--text-dim); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; text-align: center; text-decoration: none; }
     .action-btn.delete { background: rgba(255,69,58,0.08); color: var(--red); border-color: rgba(255,69,58,0.2); }
+    .action-btn.cancel { background: rgba(217,165,68,0.10); color: var(--yellow); border-color: rgba(217,165,68,0.28); }
     /* Picking a finished video as a merge source — same accent language as a
        selected clip row, so the two read as one selection. */
     .action-btn.merge-pick.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
@@ -445,6 +446,26 @@
     .cut-song { display: flex; align-items: center; gap: 10px; }
     .cut-song .name { flex: 1; min-width: 0; font-weight: 700; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .cut-card audio { width: 100%; height: 32px; margin-top: 8px; }
+    /* Played music: controls and marks only a recorded performance has. */
+    body:not(.played-mode) .played-only { display: none; }
+    #cut-energy .accent { position: absolute; bottom: 0; width: 1px; background: var(--text); opacity: .35; }
+    #cut-energy .accent.glow { width: 2px; background: #f2c14e; opacity: .95; }
+
+    /* ── Klavier-Aufnahme → Song ── above #cut-modal, like the song picker */
+    #piano-modal { display: none; position: fixed; inset: 0; z-index: 110; background: var(--bg); flex-direction: column; padding-top: env(safe-area-inset-top); }
+    #piano-modal.show { display: flex; }
+    #piano-body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px 20px; display: flex; flex-direction: column; gap: 14px; }
+    .piano-drop { display: block; border: 1.5px dashed var(--border); border-radius: 10px; padding: 20px 12px; text-align: center; cursor: pointer; font-size: 13px; color: var(--text-dim); }
+    .piano-drop.over { border-color: var(--accent); color: var(--text); }
+    .piano-drop input { display: none; }
+    .piano-progress { height: 4px; border-radius: 2px; background: var(--surface2); overflow: hidden; margin-top: 10px; display: none; }
+    .piano-progress.show { display: block; }
+    .piano-progress div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+    .piano-session { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); }
+    .piano-session:first-child { border-top: none; }
+    .piano-session img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; background: var(--surface2); flex-shrink: 0; }
+    .piano-session .meta { flex: 1; min-width: 0; font-size: 12px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .piano-session .meta b { display: block; font-size: 13px; color: var(--text); }
 
     /* The timeline. One row of shot blocks over one row of bar-energy bars,
        sharing an x-axis, so "the cuts get shorter where the song gets louder"
@@ -487,6 +508,8 @@
   <header>
     <a class="back-btn" href="/" title="Dashboard">‹</a>
     <h1>Video</h1>
+    <button class="chip-btn" id="reset-btn" onclick="resetSession()"
+            title="Clear the remembered form and start over">Reset</button>
   </header>
 
   <main>
@@ -719,6 +742,32 @@
   <div id="song-list"><div style="color:var(--text-dim);padding:20px;text-align:center">Loading…</div></div>
 </div>
 
+<!-- Klavier-Aufnahme → Song. Only the sound is taken, levelled with one gain. -->
+<div id="piano-modal">
+  <div class="picker-header">
+    <button class="back-btn" onclick="closePianoModal()">✕</button>
+    <h2>Klavier-Aufnahme</h2>
+  </div>
+  <div id="piano-body">
+    <div class="cut-card">
+      <h3>Hochladen</h3>
+      <label class="piano-drop" id="piano-drop">
+        <input type="file" id="piano-file" accept="video/*,audio/*,.mov,.m4a,.wav,.flac">
+        <span id="piano-drop-label">Video oder Ton deines Stücks wählen oder hierher ziehen</span>
+      </label>
+      <div class="piano-progress" id="piano-progress"><div></div></div>
+      <div class="cut-hint">
+        Übernommen wird nur der Ton, mit einer einzigen Pegelanpassung für die ganze
+        Aufnahme — kein Kompressor, denn deiner Dynamik folgt der Schnitt.
+      </div>
+    </div>
+    <div class="cut-card">
+      <h3>Aus dem Impro-Tool</h3>
+      <div id="piano-sessions"><div class="cut-hint">Lädt…</div></div>
+    </div>
+  </div>
+</div>
+
 <!-- Rhythmusschnitt — plan an edit against a song, then render it -->
 <div id="cut-modal">
   <div class="picker-header">
@@ -741,8 +790,15 @@
       <div class="cut-song">
         <div class="name" id="cut-song-name">Noch kein Song gewählt</div>
         <button class="chip-btn" type="button" onclick="openCutSongPicker()">Wählen</button>
+        <!-- A played piece instead of a generated song: the layer cut then
+             follows the performance (services/video/piano.py). -->
+        <button class="chip-btn" type="button" onclick="openPianoModal()">🎹 Aufnahme</button>
       </div>
       <audio id="cut-audio" controls preload="none"></audio>
+      <div class="cut-hint played-only" id="cut-played-hint">
+        Aufnahme: Der Schnitt liest dein Spiel statt eines Rasters — freies Tempo,
+        Dynamik, Akzente und Phrasen.
+      </div>
     </div>
 
     <div class="cut-card">
@@ -833,6 +889,32 @@
         <input type="checkbox" id="cut-layer-fadein" style="width:16px;height:16px;accent-color:var(--accent);flex:0 0 auto">
         <span class="cut-hint" style="flex:1;margin:0">sonst beginnt das Video sofort mit dem ersten Bild</span>
       </label>
+      </div>
+    </details>
+
+    <!-- Only for a recorded performance: how far the playing shapes the cut. -->
+    <details class="fold layer-only played-only">
+      <summary><span class="fold-title">Anschlag</span><span class="fold-value" id="cut-touch-val"></span></summary>
+      <div class="fold-body">
+      <label class="cut-dial">
+        <span>Anschlag folgen</span>
+        <input type="range" id="cut-touch" min="0" max="100" step="5" value="60"
+               oninput="onLayerDial()">
+        <span class="val" id="cut-touch-num">60%</span>
+      </label>
+      <label class="cut-dial">
+        <span>Leuchten</span>
+        <input type="range" id="cut-glow" min="0" max="100" step="5" value="35"
+               oninput="onLayerDial()">
+        <span class="val" id="cut-glow-num">35%</span>
+      </label>
+      <div class="cut-hint">
+        Wechsel landen auf den Akkorden, die du angeschlagen hast, ein neuer Satz
+        nach dem Atemholen bekommt immer einen eigenen Wechsel, und das Tempo des
+        Bildes folgt deiner Dynamik. <b>Anschlag</b> formt die Blenden — leise
+        Stellen ziehen sie lang, harte Akzente kurz. <b>Leuchten</b> lässt starke
+        Akzente zwischen den Wechseln kurz aufblühen; in der Vorschau gelb markiert.
+      </div>
       </div>
     </details>
 
@@ -1020,6 +1102,82 @@ function frameBounds() {
     ? MINIMAX_TRAINED_MIN
     : Math.min(max, MINIMAX_DEFAULT_FRAMES);
   return {min: 22, max, step: 17, def};
+}
+
+
+// ── Session cache ─────────────────────────────────────────────────────────────
+// This form is the most expensive one in the project to fill in: up to twenty
+// pictures picked out of the gallery, a written prompt and a frame count for
+// each, plus the canvas and the sampler dials. Stepping over to the Gallery to
+// check one thumbnail used to throw all of it away.
+//
+// Cached: everything the user chose. Not cached: the job list, the clip stacks,
+// the picker's page of images — all server-owned and re-fetched on load, where
+// a stale copy would be worse than none.
+const SESSION_KEYS = [
+  'mode', 'selectedImages', 'perImageSettings', 'transitionSettings',
+  'width', 'height', 'rifeMultiplier', 'wanSteps', 'wanLoraHigh',
+  'pingpong', 'endOnKeyframe', 'styleLora', 'styleLoraStrength',
+  'clipUpscaleRes', 'clipUpscaleRife', 'clipUpscaleFps', 'deleteAfterMerge',
+];
+
+const videoSession = ArtRium.session('video', {
+  // Bump when SESSION_KEYS or the story shape changes.
+  version: 1,
+  // Story-mode inputs live only in the DOM. `story-style` is in this list but
+  // cannot land here — its options arrive from the server — so init re-applies
+  // it once loadStoryStyles() has run.
+  fields: ['story-text', 'story-n', 'story-beat', 'story-style'],
+  snapshot: () => {
+    // The rows on screen hold newer text than the two Maps do; fold it in
+    // before serialising or the last thing typed is the one thing lost.
+    capturePromptInputs();
+    const data = Object.fromEntries(SESSION_KEYS.map(k => [k, state[k]]));
+    data.storyLoras = {
+      active: [...storyLoraState.active],
+      strengths: storyLoraState.strengths,
+    };
+    return data;
+  },
+  restore: (saved) => {
+    for (const k of SESSION_KEYS) if (saved[k] !== undefined) state[k] = saved[k];
+    // Two checkboxes write straight into state from their own onchange, so
+    // they are the two controls the state assignment above does not repaint.
+    const pp = $('pingpong-toggle'); if (pp) pp.checked = !!state.pingpong;
+    const ek = $('endkf-toggle');    if (ek) ek.checked = !!state.endOnKeyframe;
+    document.querySelectorAll('#mode-chips .chip-btn').forEach(c =>
+      c.classList.toggle('on', c.dataset.mode === state.mode));
+    const md = $('merge-delete-toggle'); if (md) md.checked = !!state.deleteAfterMerge;
+  },
+});
+
+/** Everything the two server-fed lists overwrite, put back once they land. */
+function _reapplyServerFedSelections(saved) {
+  if (!saved) return;
+  const style = saved.fields?.['story-style'];
+  if (style && $('story-style')) $('story-style').value = style;
+
+  const loras = saved.state?.storyLoras;
+  if (loras) {
+    // Only names the server still offers: a LoRA that has been removed from
+    // the shelf would otherwise sit checked in state and be sent with the job.
+    const known = new Set(storyLoraRegistry.map(l => l.filename));
+    storyLoraState.active = new Set((loras.active || []).filter(f => known.has(f)));
+    Object.assign(storyLoraState.strengths, loras.strengths || {});
+    renderStoryLoraList();
+  }
+  // loadWanLoras() ends by calling onStyleLoraChange(), which resets the
+  // strength to the LoRA's own trained default — right when picking one by
+  // hand, wrong when putting back a number that was deliberately tuned.
+  if (state.styleLora && saved.state?.styleLoraStrength != null) {
+    state.styleLoraStrength = saved.state.styleLoraStrength;
+    if ($('style-lora-strength')) $('style-lora-strength').value = String(state.styleLoraStrength);
+  }
+}
+
+function resetSession() {
+  if (!confirm('Reset the form?\n\nEverything picked and typed here is cleared. Videos and clips are not touched.')) return;
+  videoSession.reset();
 }
 
 // ── Mode ──────────────────────────────────────────────────────────────────────
@@ -1418,6 +1576,32 @@ function removeImage(idx) {
   renderStrip();
 }
 
+// The prompts and frame counts a user types live in the DOM rows, not in
+// `state` — the two Maps are a staging cache that is only refilled when a
+// section is about to be torn down and redrawn. That was fine while nothing
+// else ever read them; the session cache does, and on the way out of the page
+// the rows are still holding the newest text. So the capture is a function
+// now, called both before a re-render and before every cache write.
+function capturePromptInputs() {
+  const b = frameBounds();
+  document.querySelectorAll('#per-img-section .per-img-row').forEach(row => {
+    const id = row.dataset.imgId;
+    if (!id) return;
+    state.perImageSettings.set(id, {
+      prompt:     row.querySelector('.per-img-prompt')?.value || '',
+      frameCount: parseInt(row.querySelector('.per-img-frames')?.value) || b.def,
+    });
+  });
+  document.querySelectorAll('#per-transition-section .per-transition-row').forEach(row => {
+    const key = row.dataset.pairKey;
+    if (!key) return;
+    state.transitionSettings.set(key, {
+      prompt:     row.querySelector('.per-transition-prompt')?.value || '',
+      frameCount: parseInt(row.querySelector('.per-transition-frames')?.value) || 0,
+    });
+  });
+}
+
 // ── Per-image section ─────────────────────────────────────────────────────────
 function renderPerImageSection() {
   const sec = $('per-img-section');
@@ -1429,14 +1613,7 @@ function renderPerImageSection() {
 
   // Snapshot current input values before clearing
   const b = frameBounds();
-  sec.querySelectorAll('.per-img-row').forEach(row => {
-    const id = row.dataset.imgId;
-    if (!id) return;
-    state.perImageSettings.set(id, {
-      prompt:     row.querySelector('.per-img-prompt')?.value || '',
-      frameCount: parseInt(row.querySelector('.per-img-frames')?.value) || b.def,
-    });
-  });
+  capturePromptInputs();
 
   sec.innerHTML = '';
   // Surreal Wan2.2/MiniMax animation prompts — one VLM call per image, run as a
@@ -1528,14 +1705,7 @@ function renderPerTransitionSection() {
   sec.style.display = '';
 
   // Snapshot current input values before clearing
-  sec.querySelectorAll('.per-transition-row').forEach(row => {
-    const key = row.dataset.pairKey;
-    if (!key) return;
-    state.transitionSettings.set(key, {
-      prompt:     row.querySelector('.per-transition-prompt')?.value || '',
-      frameCount: parseInt(row.querySelector('.per-transition-frames')?.value) || 0,
-    });
-  });
+  capturePromptInputs();
 
   // The two transition families do not share a frame band — Wan takes 5-81,
   // MiniMax only lands on its 17k+5 grid — so a count carried over from the
@@ -1543,17 +1713,27 @@ function renderPerTransitionSection() {
   const b = frameBounds();
   const n = state.selectedImages.length;
   let rowsHtml = '';
+  // `from`/`to` rather than `a`/`b`: this loop used to name the second image
+  // `b`, which shadowed the frame bounds above it for the whole body. Every
+  // one of the four reads below then asked an image object for `.min`/`.max`/
+  // `.def` and got undefined, so the Frames box rendered value="NaN" (which a
+  // number input drops on the floor, showing blank), min/max/step="undefined"
+  // (dead spinner arrows) and a hint that read "0.3s" for every transition.
+  // Only the submitted job was right, because readFrameCount() re-derives the
+  // bounds itself and falls back to the default — which is exactly why this
+  // survived so long.
   for (let i = 0; i < n - 1; i++) {
-    const a = state.selectedImages[i], b = state.selectedImages[i + 1];
-    const key = `${a.id}__${b.id}`;
+    const from = state.selectedImages[i], to = state.selectedImages[i + 1];
+    const key = `${from.id}__${to.id}`;
     const saved = state.transitionSettings.get(key) || {};
+    const fc = Math.min(b.max, Math.max(b.min, saved.frameCount || b.def));
     rowsHtml += `
       <div class="per-transition-row" data-pair-key="${key}">
         <div class="per-transition-header">
           <div class="per-transition-thumbs">
-            <img class="per-transition-thumb" src="${withAuth(a.thumb_url)}" alt="">
+            <img class="per-transition-thumb" src="${withAuth(from.thumb_url)}" alt="">
             <span class="per-transition-arrow">→</span>
-            <img class="per-transition-thumb" src="${withAuth(b.thumb_url)}" alt="">
+            <img class="per-transition-thumb" src="${withAuth(to.thumb_url)}" alt="">
           </div>
           <span class="per-transition-num">Transition ${i + 1} → ${i + 2}</span>
           <button type="button" class="paste-btn" onclick="pasteInto(this)">📋 Paste</button>
@@ -1561,10 +1741,9 @@ function renderPerTransitionSection() {
         <textarea class="per-transition-prompt" rows="2" placeholder="What does the first picture turn into on the way to the second?">${_esc(saved.prompt || '')}</textarea>
         <div class="per-transition-frames-row">
           <span class="field-label">Frames</span>
-          <input class="field-input per-transition-frames" type="number"
-                 value="${Math.min(b.max, Math.max(b.min, saved.frameCount || b.def))}"
+          <input class="field-input per-transition-frames" type="number" value="${fc}"
                  min="${b.min}" max="${b.max}" step="${b.step}" oninput="updateFramesHint(this)">
-          <span class="frames-hint" style="font-size:11px;color:var(--text-dim)">${durationHint(Math.min(b.max, Math.max(b.min, saved.frameCount || b.def)))}</span>
+          <span class="frames-hint" style="font-size:11px;color:var(--text-dim)">${durationHint(fc)}</span>
         </div>
       </div>`;
   }
@@ -2399,6 +2578,9 @@ const cutState = {
   speedHigh: 1.6,
   swell: 1.0,
   pulse: 0.35,
+  touch: 0.6,           // played music only — see services/video/layers.py
+  glow: 0.35,
+  transitionTouched: false,  // once the user picks a blend, a recording stops choosing one
   harmony: null,
   motion: null,
   seed: null,
@@ -2458,6 +2640,10 @@ async function initCutModal() {
       cutState.pulse = layer.speed.pulse_default;
       cutState.speedLow = layer.speed.low_default;
       cutState.speedHigh = layer.speed.high_default;
+      cutState.touch = layer.played ? layer.played.touch_default : cutState.touch;
+      cutState.glow = layer.played ? layer.played.glow_default : cutState.glow;
+      $('cut-touch').value = Math.round(cutState.touch * 100);
+      $('cut-glow').value = Math.round(cutState.glow * 100);
       $('cut-speed-low').value = Math.round(cutState.speedLow * 100);
       $('cut-speed-high').value = Math.round(cutState.speedHigh * 100);
       $('cut-stretch').max = Math.round(beat.max_stretch_ceiling * 100);
@@ -2523,7 +2709,8 @@ function renderCutTransitions() {
     b.textContent = t.label;
     b.className = cutState.transition === t.key ? 'active' : '';
     b.onclick = () => {
-      cutState.transition = t.key; renderCutTransitions(); refreshCutPlan();
+      cutState.transition = t.key; cutState.transitionTouched = true;
+      renderCutTransitions(); refreshCutPlan();
     };
     row.appendChild(b);
   }
@@ -2547,6 +2734,12 @@ function onLayerDial() {
   $('cut-tempo-val').textContent =
     `${cutState.speedLow.toFixed(2)}× – ${cutState.speedHigh.toFixed(2)}× · ` +
     `Schwelle ${Math.round(cutState.swell * 100)}% · Puls ${Math.round(cutState.pulse * 100)}%`;
+  cutState.touch = parseInt($('cut-touch').value, 10) / 100;
+  cutState.glow = parseInt($('cut-glow').value, 10) / 100;
+  $('cut-touch-num').textContent = Math.round(cutState.touch * 100) + '%';
+  $('cut-glow-num').textContent = Math.round(cutState.glow * 100) + '%';
+  $('cut-touch-val').textContent =
+    `${Math.round(cutState.touch * 100)}% · Leuchten ${Math.round(cutState.glow * 100)}%`;
   if (_isLayer()) scheduleCutPlan();
 }
 
@@ -2668,11 +2861,19 @@ function useSongForCut(songId) {
   cutState.seed = null;                    // a new song deserves a fresh roll
   cutState.startBar = 0;
   $('cut-startbar').value = 0;
+  // A recording reads best with the blend its playing picks — unless the user
+  // has already chosen one, which is theirs to keep.
+  const played = song.workflow === PIANO_WORKFLOW;
+  if (played && !cutState.transitionTouched) {
+    cutState.transition = 'spiel';
+    renderCutTransitions();
+  }
+  _setPlayedMode(played);
   // Duration only. The tempo shown anywhere in this modal is the one the
   // analysis measured, not the one ACE was asked for — printing both invites
   // the question of which one the edit is actually on.
   const bits = song.duration_seconds ? ` — ${song.duration_seconds}s` : '';
-  $('cut-song-name').textContent = (song.title || 'Ohne Titel') + bits;
+  $('cut-song-name').textContent = (played ? '🎹 ' : '') + (song.title || 'Ohne Titel') + bits;
   $('cut-audio').src = withAuth(song.url);
   refreshCutPlan();
 }
@@ -2697,6 +2898,8 @@ function layerRequestBody() {
     speed_high: cutState.speedHigh,
     swell: cutState.swell,
     pulse: cutState.pulse,
+    touch: cutState.touch,
+    glow: cutState.glow,
   };
 }
 
@@ -2734,6 +2937,7 @@ async function refreshCutPlan() {
     cutState.sources = d.sources;
     cutState.output = d.output;
     cutState.seed = d.plan.seed;           // adopt the roll, so render repeats it
+    _setPlayedMode(d.beatmap.profile === 'piano');
     renderHarmonyReport(d.harmonize);
     const maxBar = Math.max(0, d.beatmap.bar_count - 2);
     for (const id of ['cut-startbar', 'cut-layer-startbar']) {
@@ -2831,8 +3035,11 @@ function renderLayerPreview() {
     return `<div class="wrap-mark" style="left:${at.toFixed(3)}%" title="Loop beginnt von vorn"></div>`;
   }).join('');
 
+  // A recording shows its own dynamics under the shots instead of a rank per
+  // bar, with every accent as a tick — the yellow ones are the glows.
+  const played = bm.profile === 'piano';
   const times = bm.bar_times || [];
-  $('cut-energy').innerHTML = (bm.bar_energy || []).map((e, i) => {
+  $('cut-energy').innerHTML = played ? _playedEnergyRow(plan, bm, span) : (bm.bar_energy || []).map((e, i) => {
     const from = times[i], to = i + 1 < times.length ? times[i + 1] : plan.song_end;
     if (from === undefined || to <= plan.song_start || from >= plan.song_end) return '';
     const a = Math.max(from, plan.song_start), b = Math.min(to, plan.song_end);
@@ -2855,7 +3062,11 @@ function renderLayerPreview() {
   $('cut-facts').innerHTML =
     `<span><b>${blends}</b> Überblendung${blends === 1 ? '' : 'en'}</span>` +
     `<span><b>${plan.tracks}</b> Spuren</span>` +
-    `<span><b>${bm.bpm.toFixed(1)}</b> BPM · ${pulse}</span>` +
+    (played
+      ? `<span><b>gespielt</b> · freies Tempo um ${bm.bpm.toFixed(0)} BPM</span>` +
+        `<span><b>${(bm.accents || []).length}</b> Akzente · <b>${(bm.phrases || []).length}</b> Phrasen` +
+        ` · <b>${(plan.glows || []).length}</b> Leuchtpunkte</span>`
+      : `<span><b>${bm.bpm.toFixed(1)}</b> BPM · ${pulse}</span>`) +
     `<span><b>${out.duration.toFixed(1)}</b> s</span>` +
     // How far through the loop the piece walks, and how often it comes back
     // around — the answer to "wird das repetitiv", which this mode invites.
@@ -2921,6 +3132,145 @@ document.addEventListener('DOMContentLoaded', () => {
   };
   audio.addEventListener('pause', stop);
   audio.addEventListener('ended', stop);
+});
+
+// ── Klavier-Aufnahme → Song ───────────────────────────────────────────────────
+// A played piece taken in as a song (services/improv/piano_song.py), so the
+// layer cut can follow the performance. The upload goes through XHR rather
+// than fetch for its progress bar: a phone video of a whole piece is hundreds
+// of megabytes.
+
+const PIANO_WORKFLOW = 'piano_recording';
+
+function _setPlayedMode(on) {
+  document.body.classList.toggle('played-mode', !!on);
+}
+
+function _playedEnergyRow(plan, bm, span) {
+  const rate = bm.dynamics_rate || 0, dyn = bm.dynamics || [];
+  let html = '';
+  if (rate && dyn.length) {
+    const width = Math.max(0.2, 100 / Math.max(1, span * rate) - 0.05).toFixed(3);
+    dyn.forEach((v, i) => {
+      const t = i / rate;
+      if (t < plan.song_start || t >= plan.song_end) return;
+      const left = ((t - plan.song_start) / span * 100).toFixed(3);
+      html += `<div style="position:absolute;bottom:0;left:${left}%;width:${width}%;` +
+              `height:${(8 + v * 92).toFixed(1)}%;background:var(--border)"></div>`;
+    });
+  }
+  const glowAt = new Set((plan.glows || []).map(g => (g[0] + plan.song_start).toFixed(2)));
+  (bm.accents || []).forEach((a, i) => {
+    if (a < plan.song_start || a >= plan.song_end) return;
+    const left = ((a - plan.song_start) / span * 100).toFixed(3);
+    const s = (bm.accent_strength || [])[i] || 0.5;
+    const glow = glowAt.has(a.toFixed(2)) ? ' glow' : '';
+    html += `<div class="accent${glow}" style="left:${left}%;height:${(30 + s * 70).toFixed(0)}%"></div>`;
+  });
+  return html;
+}
+
+function openPianoModal() {
+  $('piano-modal').classList.add('show');
+  _resetPianoDrop();
+  loadPianoSessions();
+}
+
+function closePianoModal() {
+  $('piano-modal').classList.remove('show');
+}
+
+function _resetPianoDrop() {
+  $('piano-drop-label').textContent = 'Video oder Ton deines Stücks wählen oder hierher ziehen';
+  $('piano-progress').classList.remove('show');
+  $('piano-progress').firstElementChild.style.width = '0';
+  $('piano-file').value = '';
+}
+
+function _adoptPianoSong(song) {
+  state.songs = [song, ...(state.songs || []).filter(s => s.id !== song.id)];
+  closePianoModal();
+  useSongForCut(song.id);
+  ArtRium.toast(`Aufnahme übernommen — ${song.duration_seconds}s`);
+}
+
+function uploadPianoRecording(file) {
+  if (!file) return;
+  const fd = new FormData();
+  fd.append('recording', file);
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/improv/piano-songs');
+  if (state.apiKey) xhr.setRequestHeader('X-API-Key', state.apiKey);
+  const bar = $('piano-progress');
+  bar.classList.add('show');
+  $('piano-drop-label').textContent = `Lädt ${file.name}…`;
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    bar.firstElementChild.style.width = (e.loaded / e.total * 100).toFixed(1) + '%';
+    if (e.loaded >= e.total) $('piano-drop-label').textContent = 'Ton wird übernommen und eingepegelt…';
+  };
+  xhr.onload = () => {
+    let body = null;
+    try { body = JSON.parse(xhr.responseText); } catch (e) {}
+    if (xhr.status >= 200 && xhr.status < 300 && body) { _adoptPianoSong(body); return; }
+    const detail = body && body.detail;
+    ArtRium.toast(typeof detail === 'string' ? detail : `Fehler ${xhr.status}`, true);
+    _resetPianoDrop();
+  };
+  xhr.onerror = () => { ArtRium.toast('Upload fehlgeschlagen', true); _resetPianoDrop(); };
+  xhr.send(fd);
+}
+
+async function loadPianoSessions() {
+  const box = $('piano-sessions');
+  box.innerHTML = '<div class="cut-hint">Lädt…</div>';
+  try {
+    const sessions = await (await api('/api/improv/sessions?limit=30')).json();
+    if (!sessions.length) {
+      box.innerHTML = '<div class="cut-hint">Noch keine Aufnahmen im Impro-Tool.</div>';
+      return;
+    }
+    box.innerHTML = sessions.map(s => {
+      const when = s.created_at ? new Date(s.created_at).toLocaleString('de-DE',
+        {day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'}) : '';
+      const src = s.source_video;
+      const thumb = src && src.thumb_url
+        ? `<img src="${withAuth(src.thumb_url)}" alt="" loading="lazy">` : '<img alt="">';
+      const label = s.piano_song_id ? 'Verwenden' : 'Übernehmen';
+      return `<div class="piano-session">${thumb}` +
+             `<div class="meta"><b>Impro ${_esc(when)}</b>${_esc(src ? (src.title || src.prompt || 'Clip') : '')}</div>` +
+             `<button class="chip-btn" type="button" onclick="importPianoSession('${s.id}', this)">${label}</button></div>`;
+    }).join('');
+  } catch (e) {
+    box.innerHTML = `<div class="cut-hint">${_esc(e.message || 'Konnte nicht geladen werden')}</div>`;
+  }
+}
+
+async function importPianoSession(sessionId, btn) {
+  btn.disabled = true;
+  const was = btn.textContent;
+  btn.textContent = '…';
+  try {
+    const r = await api(`/api/improv/sessions/${sessionId}/piano-song`, {method: 'POST'});
+    _adoptPianoSong(await r.json());
+  } catch (e) {
+    ArtRium.toast(e.message || 'Übernehmen fehlgeschlagen', true);
+    btn.disabled = false;
+    btn.textContent = was;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const drop = $('piano-drop'), input = $('piano-file');
+  if (!drop || !input) return;
+  input.addEventListener('change', e => uploadPianoRecording(e.target.files[0]));
+  drop.addEventListener('dragover', e => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', e => {
+    e.preventDefault();
+    drop.classList.remove('over');
+    uploadPianoRecording(e.dataTransfer.files[0]);
+  });
 });
 
 // ── Per-clip upscale ──────────────────────────────────────────────────────────
@@ -3559,11 +3909,20 @@ function makeVideoCard(v) {
     : '';
   if (mergeOrder) card.classList.add('merge-selected');
 
+  // Cancel is offered for anything actually running — the render itself, and
+  // the passes that run on a finished video. Deleting stops a job too, but
+  // throws the clips away with it; cancelling keeps whatever already landed.
+  const running = v.status === 'generating' || v.status === 'assembling' || postPassBusy;
+  const cancelBtn = running
+    ? `<button class="action-btn cancel" onclick="cancelVideoJob('${v.id}')">Cancel</button>`
+    : '';
+
   const actions = v.status === 'done' && v.url
     ? `${pickBtn}
        <a class="action-btn" href="${withAuth(v.url)}" download>Download</a>
+       ${cancelBtn}
        <button class="action-btn delete" onclick="deleteVideo('${v.id}')">Delete</button>`
-    : `<button class="action-btn delete" onclick="deleteVideo('${v.id}')">Delete</button>`;
+    : `${cancelBtn}<button class="action-btn delete" onclick="deleteVideo('${v.id}')">Delete</button>`;
 
   const titleVal = (v.title || '').replace(/"/g, '&quot;');
   // The title is the card's identity and stays in view; the notes editor is a
@@ -4281,6 +4640,24 @@ function updateVideoCard(v) {
   _postRenderVideo(v);
 }
 
+async function cancelVideoJob(id) {
+  if (!confirm('Cancel this job?\n\nThe render stops now. Clips that already finished are kept.')) return;
+  try {
+    const v = await (await api(`/api/video/jobs/${id}/cancel`, {method: 'POST'})).json();
+    // The pass flags live in the frontend as well as on the row; a cancelled
+    // pass that stayed in these sets would keep its card showing a spinner
+    // for work that is no longer running.
+    state.upscalingVideos.delete(id);
+    state.grainingVideos.delete(id);
+    state.muxingVideos.delete(id);
+    clearInterval(state.progressIntervals.get(id));
+    state.progressIntervals.delete(id);
+    ArtRium.toast('Cancelled');
+    updateVideoCard(v);
+    await loadClips();
+  } catch (e) { ArtRium.toast(e.message || 'Cancel failed', true); }
+}
+
 async function deleteVideo(id) {
   try {
     await api(`/api/video/${id}`, {method:'DELETE'});
@@ -4364,7 +4741,7 @@ function renderSongList() {
   }
   const esc = s => String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   list.innerHTML = filtered.map(s => {
-    const title = esc(s.title || 'Untitled song');
+    const title = esc((s.workflow === PIANO_WORKFLOW ? '🎹 ' : '') + (s.title || 'Untitled song'));
     const tags = esc(s.tags || '');
     const audioUrl = withAuth(s.url);
     const metaBits = [];
@@ -4473,15 +4850,26 @@ function pollSoundtrackMux(videoId, songId) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
+  // Before the first paint: every render below reads `state`, so restoring
+  // after them would draw the defaults once and the real setup never.
+  const saved = videoSession.load();
   renderStrip();
   renderResChips();
   renderRifeChips();
   renderStepsChips();
   renderMotionChips();
+  // Was only ever called from setMode(), which meant a restored mode other
+  // than i2v_multi came back with i2v_multi's rows showing.
+  _updateModeFields();
+  updateSettingsSummary();
   loadSamplerInfo();
-  loadWanLoras();
-  loadStoryLoras();
-  loadStoryStyles();
+  // Awaited now rather than fired and forgotten: each of the three ends by
+  // filling a control from the server — and in doing so overwrites what was
+  // just restored into it — so the re-apply has to run after them, not
+  // racing them.
+  await Promise.all([loadWanLoras(), loadStoryLoras(), loadStoryStyles()]);
+  _reapplyServerFedSelections(saved);
+  videoSession.start();
   // Songs name the soundtrack on each card, so they have to be in hand BEFORE
   // the cards render — and it has to be this one render, because loadVideos()
   // hangs the clip stacks on the cards it just made. A second renderVideos()

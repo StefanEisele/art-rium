@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
+from core.job_control import cancel_job
 from core.models import Song
 from core.tasks import safe_create_task
 from services.comfy.client import poll_history, post_workflow, queue_info
@@ -420,14 +421,26 @@ async def delete_song(song_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     song = await db.get(Song, song_id)
     if not song:
         raise HTTPException(status_code=404, detail="Song not found")
+    # Stop the render first — ACE-Step holds the GPU for the full duration,
+    # and a deleted song used to keep it for the whole take.
+    await cancel_job(song_id, prompt_ids=[song.comfy_prompt_id])
     if song.filepath:
         p = settings.storage_dir / song.filepath
         if p.exists():
             p.unlink(missing_ok=True)
     waveform = settings.songs_dir / f"{song_id}_waveform.png"
     waveform.unlink(missing_ok=True)
+    # The cut planners' beat-map sidecar (services/video/beats.py::cache_path).
+    (settings.songs_dir / f"{song_id}_beats.json").unlink(missing_ok=True)
     await db.delete(song)
     await db.commit()
+
+
+# ACE-Step writes MP3; a piano recording taken in by the improv tool is FLAC
+# (services/improv/piano_song.py). Safari refuses an <audio> source whose
+# declared type does not match its bytes, so the type follows the file.
+_AUDIO_MEDIA_TYPES = {".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav",
+                      ".m4a": "audio/mp4"}
 
 
 @router.get("/file/{filename}")
@@ -435,7 +448,7 @@ async def serve_song(filename: str):
     safe = Path(filename).name
     p = settings.songs_dir / safe
     if p.exists():
-        return FileResponse(p, media_type="audio/mpeg")
+        return FileResponse(p, media_type=_AUDIO_MEDIA_TYPES.get(p.suffix.lower(), "audio/mpeg"))
     raise HTTPException(status_code=404, detail="Song not found")
 
 

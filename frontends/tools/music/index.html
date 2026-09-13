@@ -205,6 +205,8 @@
   <header>
     <a class="back-btn" href="/" title="Dashboard">‹</a>
     <h1>Music</h1>
+    <button class="chip-btn" id="reset-btn" onclick="resetSession()"
+            title="Clear the remembered form and start over">Reset</button>
   </header>
 
   <main>
@@ -633,7 +635,24 @@ $('songs-list').addEventListener('dblclick', (e) => {
   }
 });
 
+// ── Session cache ─────────────────────────────────────────────────────────────
+// This form is all DOM and no state object, so the field list is the whole of
+// it. `search` is left out on purpose: it filters the list below, and coming
+// back to a tool that silently hides most of your songs is a bug report, not a
+// convenience.
+const musicSession = ArtRium.session('music', {
+  version: 1,
+  fields: ['tags', 'lyrics', 'duration', 'bpm', 'key', 'language', 'seed', 'time_signature'],
+});
+
+function resetSession() {
+  if (!confirm('Reset the form?\n\nTags, lyrics and settings are cleared. Songs are not touched.')) return;
+  musicSession.reset();
+}
+
 // Initial load
+musicSession.load();
+musicSession.start();
 loadSongs();
 </script>
 </body>

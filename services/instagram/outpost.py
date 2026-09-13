@@ -219,12 +219,12 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
             await _record_failure(post_id, f"Slideshow render failed: {exc}")
             return
 
-    # `collaborators` rides along as the same JSON array the Graph API takes;
-    # a Pi that predates collaborator support just ignores the extra field.
-    # `is_ai_generated` rides along the same way `collaborators` does: a Pi
-    # that predates AI-label support simply ignores the extra field, and the
-    # images it uploads are already cropped because the crop is baked into the
-    # file it re-encodes.
+    # `collaborators` rides along as the same JSON array the Graph API takes.
+    # `is_ai_generated` rides along the same way — and "a Pi that predates it
+    # simply ignores the extra field" is exactly how every cloud-scheduled post
+    # went out unlabelled until 2026-09-13: FastAPI drops undeclared form
+    # fields without a word. The Pi now echoes `ai_label` back, and
+    # `_warn_if_label_dropped` says so when it does not.
     data = {
         "caption": caption,
         "scheduled_at": _iso(scheduled_at),
@@ -272,6 +272,7 @@ async def _dispatch_feed(post_id: uuid.UUID) -> None:
     if result is None:
         return
     outpost_id, body = result
+    _warn_if_label_dropped(post_id, ai_label, body)
 
     await _finalize_outpost_dispatch(
         post_id,
@@ -337,11 +338,8 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
 
     # ── Multipart upload to /enqueue-reel ──────────────────────────────────
     # Streamed from disk (not read into bytes) so httpx doesn't hold the
-    # whole concatenated reel resident in RAM.
-    # `is_ai_generated` rides along the same way `collaborators` does: a Pi
-    # that predates AI-label support simply ignores the extra field, and the
-    # images it uploads are already cropped because the crop is baked into the
-    # file it re-encodes.
+    # whole concatenated reel resident in RAM. `is_ai_generated` as in
+    # `_dispatch_feed`, including the check that the Pi actually took it.
     data = {
         "caption": caption,
         "scheduled_at": _iso(scheduled_at),
@@ -361,6 +359,7 @@ async def _dispatch_reel_only(post_id: uuid.UUID) -> None:
     if result is None:
         return
     outpost_id, body = result
+    _warn_if_label_dropped(post_id, ai_label, body)
 
     await _finalize_outpost_dispatch(
         post_id,
@@ -434,6 +433,29 @@ async def sync_outpost_status() -> None:
 
             await _apply_remote_state(post.id, remote)
 
+            if label_needs_push(post.ai_label, remote):
+                try:
+                    await update_on_outpost(post.outpost_id, ai_label=bool(post.ai_label))
+                    logger.info("outpost %s: AI label set to %s on the queued job",
+                                post.outpost_id, bool(post.ai_label))
+                except RuntimeError as exc:
+                    logger.warning("outpost %s: could not correct the AI label: %s",
+                                   post.outpost_id, exc)
+
+
+def label_needs_push(wanted: bool, remote: dict) -> bool:
+    """Whether a job still queued on the Pi carries a different AI label than
+    the post it came from.
+
+    This is what brings the jobs enqueued before the outpost learned the label
+    into line: they sit on the Pi with ai_label=0, and the first sync after the
+    update corrects them. Only a Pi that reports the label can be corrected,
+    and only while queued — the label is read when the container is built.
+    """
+    return (remote.get("status") == "queued"
+            and "ai_label" in remote
+            and bool(remote["ai_label"]) != bool(wanted))
+
 
 async def _apply_remote_state(post_id: uuid.UUID, remote: dict) -> None:
     """Mirror Pi /status response into local row. Idempotent."""
@@ -466,6 +488,13 @@ async def _apply_remote_state(post_id: uuid.UUID, remote: dict) -> None:
             if media_id and post.instagram_media_id != media_id:
                 post.instagram_media_id = media_id
                 changed = True
+                # Once, on the tick that first sees the media id. The Pi reads
+                # the label back off the published post before reporting it.
+                if post.ai_label and remote.get("ai_label_confirmed") is False:
+                    logger.warning(
+                        "Post %s published as %s, but Instagram shows no KI-Label on it",
+                        post_id, media_id,
+                    )
             if post.error:
                 post.error = None
                 changed = True
@@ -546,6 +575,7 @@ async def update_on_outpost(
     scheduled_at: datetime | None = None,
     reel_publish_at: datetime | None = None,
     story_publish_at: datetime | None = None,
+    ai_label: bool | None = None,
 ) -> None:
     """
     PATCH the Pi-side post. Only sends fields the caller passed (None = leave
@@ -557,6 +587,8 @@ async def update_on_outpost(
     payload: dict = {}
     if caption is not None:
         payload["caption"] = caption
+    if ai_label is not None:
+        payload["ai_label"] = ai_label
     if scheduled_at is not None:
         payload["scheduled_at"] = _iso(scheduled_at)
     if reel_publish_at is not None:
@@ -624,6 +656,28 @@ async def _post_to_outpost(
             f"{error_label}: {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
         )
         return None
+
+
+def _warn_if_label_dropped(post_id: uuid.UUID, wanted: bool, body: dict) -> None:
+    """Say so when the Pi did not take the AI label.
+
+    A Pi that honours it echoes `ai_label` in the enqueue response; one that
+    predates it drops the form field without an error — which is how every
+    cloud-scheduled post published unlabelled until 2026-09-13. A log line
+    rather than a failed dispatch: the post is fine to publish, and the fix is
+    deploying the outpost, not rescheduling.
+    """
+    if not wanted:
+        return
+    if "ai_label" not in body:
+        logger.warning(
+            "outpost %s: this Pi predates AI-label support — post %s will publish "
+            "WITHOUT the KI-Label until the outpost is updated",
+            body.get("id"), post_id,
+        )
+    elif body.get("ai_label") is not True:
+        logger.warning("outpost %s: Pi stored ai_label=%r for post %s, expected true",
+                       body.get("id"), body.get("ai_label"), post_id)
 
 
 async def _finalize_outpost_dispatch(

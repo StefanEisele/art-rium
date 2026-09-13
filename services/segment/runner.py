@@ -20,6 +20,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from core.config import settings
+from core.subproc import kill
 from services.segment.plan import FrameBudget
 
 logger = logging.getLogger(__name__)
@@ -142,6 +143,12 @@ async def run_segmentation(
         raise SegmentError(
             f"Segmentierung hat das Zeitlimit von {timeout / 60:.0f} min überschritten"
         ) from None
+    except asyncio.CancelledError:
+        # The job was deleted or cancelled. The worker holds the GPU for the
+        # whole run and would keep holding it — see core/subproc.py, which
+        # makes the same guarantee for the ffmpeg passes.
+        kill(proc)
+        raise
 
     stderr = (await proc.stderr.read()).decode("utf-8", errors="replace") if proc.stderr else ""
 

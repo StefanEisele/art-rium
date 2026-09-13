@@ -38,9 +38,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.subproc import communicate
 from core.video_thumb import probe_video_duration
 from services.video.cut_render import (
     DEFAULT_MOTION,
@@ -50,6 +52,7 @@ from services.video.cut_render import (
     spill_filtergraph,
 )
 from services.video.layers import (
+    BLEND_NEUTRAL,
     BLEND_PIX_FMT,
     CLOSING_FADE_SECONDS,
     OPENING_FADE_SECONDS,
@@ -74,6 +77,109 @@ _TAIL_PAD_SECONDS = 0.5
 # see the bit-depth note in services/video/layers.py for why a dissolve is
 # exactly the picture that shows an 8-bit intermediate.
 _BLEND_FORMAT = BLEND_PIX_FMT
+
+
+# ── Accent glow ──────────────────────────────────────────────────────────────
+# Strong accents between changes of material light the picture up: the
+# highlights travel toward white with the attack and fall back with the note's
+# decay. Planned in services/video/layers.py::plan_glows; only a recorded
+# performance has any.
+#
+# **It is a LUT on the one stream, rewritten once per glowing frame.** The
+# envelope is computed here, in Python; `sendcmd` hands `lutyuv` a new curve on
+# every frame that glows and the identity on the frame after, so the per-pixel
+# cost is a table lookup and nothing has a second clock.
+#
+# Two things that look simpler and are wrong, both checked 2026-09-13:
+#
+#   `eq=brightness` is 8-bit only. ffmpeg silently converts the 10-bit stack
+#   down to feed it (-v verbose: auto_scale yuv420p10le -> yuv420p), and a
+#   dissolve through 8 bits is exactly the banding the 10-bit blend avoids.
+#
+#   Blending the stack with a generated envelope stream (a 2x2 `nullsrc` ->
+#   `geq` -> `scale` -> `blend`) was exact in isolation and wrong inside the
+#   layer graph: measured against the same plan rendered without glow, luma
+#   rose +30..+40 at moments where the envelope was 0.003, with and without
+#   `enable`. Whatever the second input's frames were paired with, it was not
+#   the picture's clock. A LUT cannot pair anything with anything.
+GLOW_ATTACK_SECONDS = 0.04
+GLOW_DECAY_SECONDS = 0.30
+# A glow's window closes once its decay is below e^-3 (5%) of its peak.
+GLOW_TAIL_DECAYS = 3.0
+# How far the brightest highlights travel toward white at full intensity. The
+# lift is weighted by the pixel's own level, so the shadows barely move: a
+# bloom, not a flash.
+GLOW_LIFT = 0.55
+# Chroma pulled toward neutral at full intensity; light that bright loses its
+# colour, as in the `licht` transition.
+GLOW_DESATURATE = 0.30
+# A command is stamped this far ahead of its frame, so rounding the time to
+# four decimals can never push it one frame late.
+_CMD_LEAD_SECONDS = 0.0005
+
+
+def glow_level(glows: list[list[float]], t: float) -> float:
+    """The summed glow envelope at output time `t`, 0..1.
+
+    A linear attack into each accent, an exponential decay out of it, and
+    every decay still running is carried rather than cut off by the next one.
+    """
+    level = 0.0
+    for at, amount in glows:
+        start = at - GLOW_ATTACK_SECONDS
+        if t < start:
+            break                              # glows are in time order
+        if t < at:
+            level += amount * (t - start) / GLOW_ATTACK_SECONDS
+        else:
+            x = (t - at) / GLOW_DECAY_SECONDS
+            if x < 8.0:
+                level += amount * math.exp(-x)
+    return min(1.0, level)
+
+
+def glow_windows(glows: list[list[float]], total: float) -> list[tuple[float, float]]:
+    """Merged [start, end] spans in which anything glows at all."""
+    out: list[tuple[float, float]] = []
+    for t, _ in glows:
+        a = max(0.0, t - GLOW_ATTACK_SECONDS)
+        b = min(total, t + GLOW_TAIL_DECAYS * GLOW_DECAY_SECONDS)
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
+def _glow_command(t: float, level: float) -> str:
+    if level <= 1e-4:
+        y = c = "val"
+    else:
+        y = f"val+(maxval-val)*val/maxval*{GLOW_LIFT * level:.4f}"
+        c = f"val+({BLEND_NEUTRAL}-val)*{GLOW_DESATURATE * level:.4f}"
+    return f"{t:.4f} lutyuv@glow y '{y}', lutyuv@glow u '{c}', lutyuv@glow v '{c}';"
+
+
+def glow_commands(glows: list[list[float]], total: float, fps: int) -> str:
+    """The `sendcmd` script: one LUT per frame inside every glow window, and
+    the identity on the frame after each window closes."""
+    lines: list[str] = []
+    last_frame = max(0, math.ceil(total * fps) - 1)
+    for a, b in glow_windows(glows, total):
+        first = max(0, math.floor(a * fps))
+        last = min(math.ceil(b * fps), last_frame)
+        for k in range(first, last + 2):
+            t = k / fps
+            level = glow_level(glows, t) if k <= last else 0.0
+            lines.append(_glow_command(max(0.0, t - _CMD_LEAD_SECONDS), level))
+    return "\n".join(lines) + "\n"
+
+
+def glow_commands_name(dest: Path) -> str:
+    """The script's filename, referenced relative to the output directory —
+    ffmpeg runs there, so no Windows drive colon has to survive filtergraph
+    escaping."""
+    return f"{dest.stem}.glow.txt"
 
 
 @dataclass(frozen=True)
@@ -238,12 +344,20 @@ def build_layer_command(
     filters.append(f"{concat_feed}concat=n={len(plan.slots)}:v=1:a=0[vc]")
 
     total = plan_duration(plan, fps)
+    # Glow goes on the finished stack and before the fades, so a flare near the
+    # end still sinks into black with everything else.
+    head = "vc"
+    if _glows_of(plan, total):
+        filters.append(
+            f"[vc]sendcmd=f={glow_commands_name(dest)},lutyuv@glow=y=val:u=val:v=val[vg]"
+        )
+        head = "vg"
     fade_out_at = max(0.0, total - CLOSING_FADE_SECONDS)
     # Opt-in, default off — see services/video/cut_render.py's docstring for
     # why an opening fade-from-black stopped being unconditional.
     tail = [f"fade=t=in:st=0:d={OPENING_FADE_SECONDS:.3f}"] if fade_in else []
     tail.append(f"fade=t=out:st={fade_out_at:.3f}:d={CLOSING_FADE_SECONDS:.3f}")
-    filters.append(f"[vc]{','.join(tail)}[vout]")
+    filters.append(f"[{head}]{','.join(tail)}[vout]")
 
     cmd += [
         "-filter_complex", ";".join(filters),
@@ -259,6 +373,10 @@ def build_layer_command(
         str(dest),
     ]
     return cmd
+
+
+def _glows_of(plan: LayerPlan, total: float) -> list[list[float]]:
+    return [g for g in (plan.glows or []) if 0.0 <= g[0] < total and g[1] > 0]
 
 
 def plan_duration(plan: LayerPlan, fps: int) -> float:
@@ -282,26 +400,36 @@ async def render_layers(
     cmd = build_layer_command(ffmpeg_path, plan, sources, dest, width, height, fps,
                               fade_in=fade_in, motion=motion)
     cmd, spilled = spill_filtergraph(cmd, dest)
+    total = plan_duration(plan, fps)
+    glows = _glows_of(plan, total)
+    glow_script: Path | None = None
+    if glows:
+        glow_script = dest.parent / glow_commands_name(dest)
+        glow_script.write_text(glow_commands(glows, total, fps), encoding="utf-8")
     blends = sum(1 for s in plan.slots if s.is_blend)
     logger.info(
         "Rendering layer cut: %d segments (%d changes, %d transitions) over "
         "%d tracks → %s (%dx%d @ %d fps, %.2f s, %.1f s of loop consumed, "
-        "Bewegung=%s, Schwelle=%.2f, Puls=%.2f)",
+        "Bewegung=%s, Schwelle=%.2f, Puls=%.2f, %s, %d glows)",
         len(plan.slots), plan.changes, blends,
         len({s.track for s in plan.slots}), dest.name,
         width, height, fps, plan_duration(plan, fps), plan.source_consumed,
-        clamp_motion(motion), plan.swell, plan.pulse,
+        clamp_motion(motion), plan.swell, plan.pulse, plan.profile, len(plan.glows),
     )
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
+            # The glow script is named relative to here; see glow_commands_name.
+            cwd=str(dest.parent),
         )
-        _, stderr = await proc.communicate()
+        _, stderr = await communicate(proc)
     finally:
         if spilled:
             spilled.unlink(missing_ok=True)
+        if glow_script:
+            glow_script.unlink(missing_ok=True)
     if proc.returncode != 0:
         tail = stderr.decode(errors="replace")[-1500:]
         raise RuntimeError(f"ffmpeg layer cut failed (rc={proc.returncode}): {tail}")

@@ -253,6 +253,8 @@
       <h1>Struktur</h1>
     </div>
     <div class="status"><span id="status-label" style="font-size:12px;color:var(--text-dim)"></span></div>
+    <button class="chip-btn" id="reset-btn" onclick="resetSession()"
+            title="Gemerkte Einstellungen verwerfen">Reset</button>
   </header>
 
   <main>
@@ -561,6 +563,42 @@ const norm = (s) => (s || '').trim();
 function onStrength() {
   state.strength = parseInt($('strength').value, 10) / 100;
   renderStrength();
+}
+
+
+// ── Session cache ─────────────────────────────────────────────────────────────
+// A Struktur setup is a control track, a mask, one reference picture per
+// colour region and a row of dials — several minutes of picking, and all of it
+// used to go when the page did. The two tracks and the pictures are cached as
+// the rows the server gave us; if one has since been deleted its thumbnail
+// 404s, which is visible and fixable, where silently dropping the whole setup
+// is neither.
+//
+// The job in flight is not cached: restoreOpenJob() already re-adopts it from
+// the server, which is the only place that knows whether it is still running.
+const VACE_SESSION_KEYS = [
+  'control', 'mask', 'reference', 'regions', 'baseRef',
+  'strength', 'engine', 'canvas', 'aspect', 'recipe', 'lcm', 'budget',
+];
+
+const vaceSession = ArtRium.session('vace', {
+  version: 1,
+  fields: ['prompt', 'lcm-rife'],
+  snapshot: () => {
+    const d = Object.fromEntries(VACE_SESSION_KEYS.map(k => [k, state[k]]));
+    // Only the words. The rest of `seg` is a running job and its poll timer.
+    d.segConcepts = state.seg.concepts;
+    return d;
+  },
+  restore: (saved) => {
+    for (const k of VACE_SESSION_KEYS) if (saved[k] !== undefined) state[k] = saved[k];
+    if (Array.isArray(saved.segConcepts)) state.seg.concepts = saved.segConcepts;
+  },
+});
+
+function resetSession() {
+  if (!confirm('Alles zurücksetzen?\n\nVorlage, Regionen, Prompt und Regler werden geleert. Tracks und Videos bleiben.')) return;
+  vaceSession.reset();
 }
 
 function renderStrength() {
@@ -1697,6 +1735,13 @@ window.addEventListener('load', async () => {
     $('lcm-ip').value = Math.round(state.lcm.ip * 100);
     $('lcm-hires').value = Math.round(state.lcm.hires * 100);
   }
+  // After the defaults above have been applied, so a remembered setup wins
+  // over them, and before the renderers, which all read `state`.
+  vaceSession.load();
+  $('strength').value = Math.round(state.strength * 100);
+  $('lcm-depth').value = Math.round(state.lcm.depth * 100);
+  $('lcm-ip').value    = Math.round(state.lcm.ip * 100);
+  $('lcm-hires').value = Math.round(state.lcm.hires * 100);
   fillBudgetRow();
   renderStrength();
   renderAxes();
@@ -1705,6 +1750,9 @@ window.addEventListener('load', async () => {
   refreshEstimate();
   renderSlots();
   renderRegions();
+  renderBaseRef();
+  renderConcepts();
+  vaceSession.start();
   await restoreOpenJob();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 });

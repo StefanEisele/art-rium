@@ -163,6 +163,8 @@
     <a class="back-btn" href="/" title="Dashboard">‹</a>
     <h1>Video Cloud</h1>
     <span class="status-badge" id="header-badge" style="background:var(--surface2);color:var(--text-dim)">H3</span>
+    <button class="chip-btn" id="reset-btn" onclick="resetSession()"
+            title="Clear the remembered form and start over">Reset</button>
   </header>
 
   <main>
@@ -322,6 +324,27 @@ const usd = v => '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits:
 // ══════════════════════════════════════════════════════════
 // BUDGET
 // ══════════════════════════════════════════════════════════
+
+// ── Session cache ─────────────────────────────────────────────────────────────
+// Frames picked out of the gallery and a written prompt, against a budget that
+// makes a wasted re-run cost real money — the one tool here where rebuilding a
+// form by hand is also the one most worth not doing twice.
+const VAPI_SESSION_KEYS = ['resolution', 'ratio', 'firstFrame', 'lastFrame', 'references'];
+
+const vapiSession = ArtRium.session('video-api', {
+  version: 1,
+  fields: ['prompt', 'duration'],
+  snapshot: () => Object.fromEntries(VAPI_SESSION_KEYS.map(k => [k, state[k]])),
+  restore: (saved) => {
+    for (const k of VAPI_SESSION_KEYS) if (saved[k] !== undefined) state[k] = saved[k];
+  },
+});
+
+function resetSession() {
+  if (!confirm('Reset the form?\n\nFrames, prompt and settings are cleared. Jobs and budget are not touched.')) return;
+  vapiSession.reset();
+}
+
 async function loadBudget() {
   try {
     state.budget = await (await api('/api/video-api/budget')).json();
@@ -797,8 +820,14 @@ window.addEventListener('load', async () => {
     $('header-badge').textContent = state.config.model || 'H3';
   } catch (e) { /* the page still works with defaults */ }
 
+  // Before the two renderers, which draw the chips and the frame slots from
+  // `state`. The duration slider's own label is repainted by hand: assigning
+  // `.value` fires no input event, so the listener above never runs for it.
+  vapiSession.load();
+  $('duration-value').textContent = $('duration').value + ' s';
   renderChips();
   renderSlots();
+  vapiSession.start();
   await Promise.all([loadBudget(), loadJobs()]);
   await loadEstimate();
   if (state.jobs.some(j => j.status === 'queued' || j.status === 'generating')) startPolling();

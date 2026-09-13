@@ -148,6 +148,25 @@
     .comfy-track { height: 2px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
     #comfy-bar   { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; transition: width 0.35s ease; }
 
+    /* ── System panel ── */
+    .system-panel {
+      background: var(--surface);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .system-state {
+      display: flex; align-items: center; gap: 9px;
+      font-size: 13px; color: var(--text-dim);
+    }
+    .system-state b { color: var(--text); font-weight: 600; }
+    .system-actions { display: flex; gap: 8px; }
+    .system-actions .btn { padding: 11px 14px; font-size: 14px; }
+    .system-note { font-size: 12px; color: var(--text-faint); line-height: 1.45; }
+
     /* ── Auth panel ── */
     #auth-panel {
       display: none;
@@ -218,6 +237,27 @@
       </div>
       <button class="connect-btn" onclick="saveApiKey()">Connect</button>
     </div>
+
+    <!-- Render queue — the escape hatches, on the hub rather than in a tool,
+         because you reach for them when you no longer trust the tool. -->
+    <section>
+      <div class="section-label">Render Queue</div>
+      <div class="system-panel">
+        <div class="system-state">
+          <span class="dot connecting" id="queue-dot"></span>
+          <span id="queue-state">Checking ComfyUI…</span>
+        </div>
+        <div class="system-actions">
+          <button class="btn danger" id="cancel-all-btn" onclick="cancelAllJobs()">Cancel all jobs</button>
+          <button class="btn" id="restart-comfy-btn" onclick="restartComfy()">Restart ComfyUI</button>
+        </div>
+        <div class="system-note">
+          Cancel stops every running job and empties ComfyUI's queue. Restart
+          also kills the ComfyUI process — for when it answers but never
+          renders. Paid cloud renders are left alone either way.
+        </div>
+      </div>
+    </section>
 
     <section>
       <div class="section-label">Generation</div>
@@ -377,6 +417,8 @@
 
 </div>
 
+<div id="toast"></div>
+
 <script src="/shared/shared.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -446,6 +488,117 @@ const handleMsg = (msg) => {
   }
 };
 
+// ── Render queue ─────────────────────────────────────────────────────────────
+const api = (url, opts) => ArtRium.apiFetch(url, opts, state.apiKey, () => {
+  state.apiKey = '';
+  ArtRium.clearApiKey();
+  showAuthPanel();
+});
+
+const QUEUE_POLL_MS = 15000;
+let queuePollTimer = null;
+let queueBusy = false;      // an action is in flight — don't let a poll overwrite its label
+
+const setQueueState = (text, dotClass) => {
+  setText('queue-state', text);
+  $('queue-dot').className = 'dot' + (dotClass ? ' ' + dotClass : '');
+};
+
+const setQueueButtons = (disabled) => {
+  $('cancel-all-btn').disabled = disabled;
+  $('restart-comfy-btn').disabled = disabled;
+};
+
+async function refreshQueue() {
+  if (queueBusy) return;
+  try {
+    const d = await (await api('/api/system/comfy')).json();
+    if (queueBusy) return;
+    if (!d.reachable) {
+      setQueueState(`ComfyUI unreachable (${d.host})`, 'disconnected');
+      return;
+    }
+    // Three numbers, because they fail independently: ComfyUI can be idle
+    // while a job is deep in an ffmpeg pass, and a queue with entries but no
+    // jobs behind it is exactly the leftover this panel exists to clear.
+    const busy = d.running + d.pending + d.jobs;
+    const parts = [];
+    if (d.running) parts.push(`${d.running} rendering`);
+    if (d.pending) parts.push(`${d.pending} queued`);
+    if (d.jobs)    parts.push(`${d.jobs} job${d.jobs === 1 ? '' : 's'}`);
+    setQueueState(busy ? parts.join(' · ') : 'ComfyUI idle', busy ? 'connecting' : 'connected');
+  } catch (_) {
+    if (!queueBusy) setQueueState('Queue status unavailable', 'disconnected');
+  }
+}
+
+const startQueuePolling = () => {
+  clearInterval(queuePollTimer);
+  refreshQueue();
+  queuePollTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') refreshQueue();
+  }, QUEUE_POLL_MS);
+};
+
+async function cancelAllJobs() {
+  if (!confirm('Cancel every running job and empty ComfyUI\'s queue?\n\nUnfinished renders are lost. Clips already rendered are kept.')) return;
+  queueBusy = true;
+  setQueueButtons(true);
+  setQueueState('Cancelling…', 'connecting');
+  try {
+    const d = await (await api('/api/system/jobs/cancel', {method: 'POST'})).json();
+    const n = (d.tasks_cancelled || []).length;
+    const q = (d.comfy && d.comfy.cleared) || 0;
+    ArtRium.toast(`Cancelled ${n} job${n === 1 ? '' : 's'}, dropped ${q} queued prompt${q === 1 ? '' : 's'}`);
+  } catch (e) {
+    ArtRium.toast(e.message || 'Cancel failed', true);
+  } finally {
+    queueBusy = false;
+    setQueueButtons(false);
+    refreshQueue();
+  }
+}
+
+async function restartComfy() {
+  if (!confirm('Restart ComfyUI?\n\nEvery running job is cancelled first, then the process is killed and started again. It takes about a minute to come back.')) return;
+  queueBusy = true;
+  setQueueButtons(true);
+  setQueueState('Restarting ComfyUI…', 'connecting');
+  try {
+    await api('/api/system/comfy/restart', {method: 'POST'});
+    ArtRium.toast('ComfyUI restarting — waiting for it to come back…');
+    // The endpoint returns as soon as the launch is issued; ComfyUI itself
+    // needs the better part of a minute to bind its port and load nodes.
+    await waitForComfy();
+  } catch (e) {
+    ArtRium.toast(e.message || 'Restart failed', true);
+    queueBusy = false;
+    setQueueButtons(false);
+    refreshQueue();
+  }
+}
+
+async function waitForComfy(attempts = 40, delayMs = 3000) {
+  for (let i = 0; i < attempts; i++) {
+    await new Promise(r => setTimeout(r, delayMs));
+    try {
+      const d = await (await api('/api/system/comfy')).json();
+      if (d.reachable) {
+        queueBusy = false;
+        setQueueButtons(false);
+        ArtRium.toast('ComfyUI is back');
+        refreshQueue();
+        return;
+      }
+    } catch (_) { /* still down — keep waiting */ }
+    setQueueState(`Restarting ComfyUI… (${(i + 1) * delayMs / 1000}s)`, 'connecting');
+  }
+  queueBusy = false;
+  setQueueButtons(false);
+  ArtRium.toast('ComfyUI did not come back — check its window', true);
+  refreshQueue();
+}
+
 // ── Init ─────────────────────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
   // Check if auth is required before connecting
@@ -473,6 +626,13 @@ window.addEventListener('load', async () => {
       ArtRium.clearApiKey();
       showAuthPanel();
     },
+  });
+
+  startQueuePolling();
+  // A phone that was in another app for an hour comes back to a stale count;
+  // the interval alone would leave it wrong until its next tick.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshQueue();
   });
 
   if ('serviceWorker' in navigator) {

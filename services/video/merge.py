@@ -21,6 +21,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.subproc import communicate
 from core.video_thumb import probe_video_duration
 
 logger = logging.getLogger(__name__)
@@ -145,7 +146,7 @@ async def merge_clips(
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr_b = await proc.communicate()
+    _, stderr_b = await communicate(proc)
     if proc.returncode != 0:
         tail = stderr_b.decode(errors="replace")[-1500:]
         raise RuntimeError(f"ffmpeg merge failed (rc={proc.returncode}): {tail}")

@@ -808,10 +808,18 @@ async def _update_outpost_post(
 
     # Apply local mutations (only the editable subset).
     pi_caption = pi_scheduled_at = pi_reel_publish_at = pi_story_publish_at = None
+    pi_ai_label: bool | None = None
 
     if "caption" in requested and body.caption != post.caption:
         post.caption = body.caption
         pi_caption = body.caption or ""
+
+    # The Pi builds the container at publish time, so the label is still
+    # editable while the job is queued — it used to be dropped here silently,
+    # neither pushed nor refused.
+    if "ai_label" in requested and body.ai_label is not None and body.ai_label != post.ai_label:
+        post.ai_label = body.ai_label
+        pi_ai_label = body.ai_label
 
     if "scheduled_at" in requested and body.scheduled_at is not None:
         new_sched = body.scheduled_at
@@ -848,7 +856,8 @@ async def _update_outpost_post(
             story.scheduled_at = new_story_at
             pi_story_publish_at = new_story_at
 
-    if all(v is None for v in (pi_caption, pi_scheduled_at, pi_reel_publish_at, pi_story_publish_at)):
+    if all(v is None for v in (pi_caption, pi_scheduled_at, pi_reel_publish_at,
+                               pi_story_publish_at, pi_ai_label)):
         # Nothing to push to the Pi, but local-only fields (status,
         # companion_time with no active companion yet, etc.) may still have
         # changed — commit those rather than silently discarding them.
@@ -864,6 +873,7 @@ async def _update_outpost_post(
             scheduled_at=pi_scheduled_at,
             reel_publish_at=pi_reel_publish_at,
             story_publish_at=pi_story_publish_at,
+            ai_label=pi_ai_label,
         )
     except RuntimeError as exc:
         # Don't commit local edits if the Pi rejected them — keeps state aligned.

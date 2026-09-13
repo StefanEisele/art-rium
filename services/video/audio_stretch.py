@@ -31,6 +31,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+from core.subproc import communicate
 from core.video_thumb import probe_video_duration
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,7 @@ async def _run_ffmpeg(cmd: list[str], *, label: str) -> None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
+    _, stderr = await communicate(proc)
     if proc.returncode != 0:
         tail = stderr.decode(errors="replace")[-600:]
         raise RuntimeError(f"ffmpeg {label} failed (rc={proc.returncode}): {tail}")

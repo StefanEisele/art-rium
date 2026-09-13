@@ -25,6 +25,7 @@ import logging
 import uuid
 from pathlib import Path
 
+from core.subproc import communicate
 from core.video_thumb import probe_has_audio
 from services.video.audio_bed import (  # noqa: F401  (re-exported for this module's callers)
     BED_VOLUME_DEFAULT,
@@ -275,7 +276,7 @@ async def _run_ffmpeg(cmd: list[str], *, label: str) -> None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr = await proc.communicate()
+    _, stderr = await communicate(proc)
     if proc.returncode != 0:
         tail = stderr.decode(errors="replace")[-600:]
         raise RuntimeError(f"ffmpeg {label} failed (rc={proc.returncode}): {tail}")

@@ -75,7 +75,7 @@ def evaluate(expr, *, a, b, p, duration=1.0, x=0.5, y=0.5):
     return eval(expr, {"__builtins__": {}}, env)   # noqa: S307 — our own strings
 
 
-BLENDED = [o["key"] for o in transition_options() if o["key"] not in ("hart", "mix")]
+BLENDED = [o["key"] for o in transition_options() if o["key"] not in ("hart", "mix", "spiel")]
 
 
 def beatmap(seconds=64.0, bpm=120.0, energy=None):

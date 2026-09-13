@@ -53,6 +53,7 @@ bars and holds through quiet ones.
 """
 from __future__ import annotations
 
+import bisect
 import math
 import random
 from dataclasses import asdict, dataclass, field
@@ -328,6 +329,11 @@ TRANSITIONS: tuple[tuple[str, str, str], ...] = (
      "Das neue Material blutet in weichen Wolken durch das alte."),
     ("hart", "Hart", "Kein Übergang — der Wechsel sitzt auf dem Schlag."),
     ("mix", "Gemischt", "Pro Wechsel eine andere der vier Blenden."),
+    ("spiel", "Dem Spiel folgend",
+     "Die Musik wählt die Blende: leise Stellen lösen sich in Wolken auf, "
+     "kräftige Akzente blitzen durch Licht, laute Passagen wischen, ein neuer "
+     "Satz nach dem Atemholen blendet weich. Bei einer Aufnahme folgt das dem "
+     "Anschlag, bei einem Song der Lautstärke des Takts."),
 )
 
 _BUILDERS = {
@@ -339,6 +345,25 @@ DEFAULT_TRANSITION = "weich"
 
 def transition_options() -> list[dict]:
     return [{"key": k, "label": lab, "hint": h} for k, lab, h in TRANSITIONS]
+
+
+def played_transition(loudness: float, accent: float, *, phrase: bool = False) -> str:
+    """Which blend the music asks for at one change — the "spiel" transition.
+
+    A breath into a new phrase dissolves, as clouds when the phrase opens
+    quietly; a loud, hard attack flashes; loud playing wipes; quiet playing
+    bleeds through; everything between is a plain dissolve. Deterministic, so
+    it takes nothing from the seed and a re-roll changes only the material.
+    """
+    if phrase:
+        return "aufloesen" if loudness < 0.45 else "weich"
+    if accent >= 0.7 and loudness >= 0.6:
+        return "licht"
+    if loudness >= 0.6:
+        return "wisch"
+    if loudness <= 0.3:
+        return "aufloesen"
+    return "weich"
 
 
 def blend_expr(
@@ -421,6 +446,84 @@ MIN_SEGMENT_FRAMES = 2
 SWELL_DEFAULT = 1.0
 PULSE_DEFAULT = 0.35
 PULSE_MAX = 0.75
+
+
+# ── Played music ─────────────────────────────────────────────────────────────
+# A recorded performance (BeatMap.is_played, services/video/piano.py) carries
+# what a generated song does not: a continuous dynamics curve, the accents the
+# pianist actually struck, and the breaths between phrases. The planner reads
+# them in four places, and two dials say how hard:
+#
+#   **Anschlag** (touch) — how far the playing shapes each transition. Soft
+#   playing draws the dissolve out, a struck accent pulls it towards a cut,
+#   and a new phrase after a breath gets the longest one of all.
+#
+#   **Leuchten** (glow) — strong accents that do NOT coincide with a change of
+#   material light the picture up for a moment: the highlights bloom with the
+#   note and decay with it (services/video/layer_render.py). The accents that
+#   do coincide already have their transition.
+TOUCH_DEFAULT = 0.6
+GLOW_DEFAULT = 0.35
+
+# How far a change may be pulled onto a struck accent, in beats. Past half a
+# beat it stops being "on the beat, where the chord was" and becomes a
+# different rhythm.
+ACCENT_SNAP_BEATS = 0.45
+# Accents weaker than this do not glow — a glow on every note is a strobe.
+GLOW_MIN_STRENGTH = 0.45
+# An accent this close to a change belongs to the change.
+GLOW_CUT_CLEARANCE = 0.25
+# Two glows closer than this are one; the stronger stays. Also what bounds the
+# render cost, since only glowing frames are blended.
+GLOW_MIN_GAP = 0.5
+# The dynamics move inside a bar, so the speed curve gets knots twice as often;
+# a 1.6 s straight ramp would iron a two-beat crescendo flat.
+PLAYED_MAX_KNOT_SECONDS = 0.8
+# The swell reads every other dynamics sample (4 per second). Finer, and the
+# picture starts following single notes instead of phrases.
+PLAYED_MARK_STEP = 2
+
+
+def touch_factor(loudness: float, accent: float, *, phrase: bool, touch: float) -> float:
+    """How the playing stretches one transition, as a factor on the style's
+    own length. `touch` at 0 is exactly 1.0 everywhere."""
+    if phrase:
+        return 1.0 + touch
+    force = max(loudness, accent)            # 0 soft .. 1 struck hard
+    return max(0.25, 1.0 + touch * (0.8 - 1.6 * force))
+
+
+def plan_glows(
+    accents: list[float], strengths: list[float], *, cuts: list[float],
+    start: float, end: float, amount: float,
+) -> list[list[float]]:
+    """[output time, intensity] for every accent that lights the picture up.
+
+    Strong accents only, clear of every change of material, never two in one
+    breath. Times are on the OUTPUT timeline, which begins at `start`, and the
+    closing fade is left alone — a flare into black reads as a mistake.
+    """
+    if amount <= 0 or not accents:
+        return []
+    candidates: list[tuple[float, float]] = []
+    for t, s in zip(accents, strengths):
+        if s < GLOW_MIN_STRENGTH or not (start + 0.05 < t < end - CLOSING_FADE_SECONDS):
+            continue
+        i = bisect.bisect_left(cuts, t)
+        if any(abs(t - c) < GLOW_CUT_CLEARANCE for c in cuts[max(0, i - 1):i + 1]):
+            continue
+        candidates.append((t, s))
+
+    kept: list[tuple[float, float]] = []
+    taken: list[float] = []
+    for t, s in sorted(candidates, key=lambda c: -c[1]):
+        k = bisect.bisect_left(taken, t)
+        if any(abs(t - x) < GLOW_MIN_GAP for x in taken[max(0, k - 1):k + 1]):
+            continue
+        bisect.insort(taken, t)
+        kept.append((t, s))
+    kept.sort()
+    return [[round(t - start, 4), round(min(1.0, amount * s), 4)] for t, s in kept]
 
 
 def clamp_unit(value, default: float) -> float:
@@ -546,6 +649,7 @@ class SpeedCurve:
 
 def _split_points(
     start: float, end: float, curve: SpeedCurve, min_span: float,
+    max_knot: float = MAX_KNOT_SECONDS,
 ) -> list[float]:
     """Segment boundaries for one stretch: the curve's knots, a cap on plain
     runs, and nothing shorter than `min_span`.
@@ -574,8 +678,8 @@ def _split_points(
     for nxt in kept[1:]:
         prev = out[-1]
         span = nxt - prev
-        if span > MAX_KNOT_SECONDS:
-            steps = int(math.ceil(span / MAX_KNOT_SECONDS))
+        if span > max_knot:
+            steps = int(math.ceil(span / max_knot))
             for i in range(1, steps):
                 out.append(prev + span * i / steps)
         out.append(nxt)
@@ -689,6 +793,12 @@ class LayerPlan:
     consumed: float = 0.0
     wraps: list[float] = field(default_factory=list)   # output times where the loop restarts
     warnings: list[str] = field(default_factory=list)
+    # "piano" when the plan followed a recorded performance, else "song".
+    profile: str = "song"
+    touch: float = TOUCH_DEFAULT
+    glow: float = GLOW_DEFAULT
+    # [output time, intensity 0..1] — the accents the renderer lights up.
+    glows: list[list[float]] = field(default_factory=list)
 
     @property
     def duration(self) -> float:
@@ -707,6 +817,7 @@ class LayerPlan:
         payload["slots"] = [Slot(**s) for s in payload.get("slots", [])]
         payload.setdefault("wraps", [])
         payload.setdefault("warnings", [])
+        payload.setdefault("glows", [])
         return cls(**payload)
 
 
@@ -755,6 +866,8 @@ def plan_layers(
     speed_high: float = SPEED_HIGH_DEFAULT,
     swell: float = SWELL_DEFAULT,
     pulse: float = PULSE_DEFAULT,
+    touch: float = TOUCH_DEFAULT,
+    glow: float = GLOW_DEFAULT,
     fps: int = 24,
     span: tuple[float, float] | None = None,
 ) -> LayerPlan:
@@ -771,6 +884,14 @@ def plan_layers(
          position through it. This is where slots become render segments.
       4. Wrap the positions into the loop, then absorb anything too short to
          render.
+
+    **Played music** changes what the passes read, not what they are. Loudness
+    comes from the continuous dynamics curve instead of a per-bar rank; a
+    change is pulled onto the accent the pianist struck when one is near its
+    beat; a phrase that begins after a breath forces a change of its own; and
+    `touch` lets the playing shape each transition. A generated song takes none
+    of those branches and plans exactly as it always did — same random draws in
+    the same order, so a stored seed still rebuilds the same edit.
     """
     if tracks < 2:
         raise ValueError("A layer cut needs at least two tracks")
@@ -788,6 +909,9 @@ def plan_layers(
         low, high = high, low
     swell = clamp_unit(swell, SWELL_DEFAULT)
     pulse = min(PULSE_MAX, clamp_unit(pulse, PULSE_DEFAULT))
+    touch = clamp_unit(touch, TOUCH_DEFAULT)
+    glow = clamp_unit(glow, GLOW_DEFAULT)
+    played = beatmap.is_played
 
     start, end = span or (0.0, beatmap.duration)
     start = max(0.0, start)
@@ -823,6 +947,36 @@ def plan_layers(
         step = beats[-1] - beats[-2]
         return beats[-1] + step * (beat_index - len(beats) + 1)
 
+    # ── what the played-music branches read ──────────────────────────────────
+    accents = beatmap.accents if played else []
+    accent_strength = beatmap.accent_strength if played else []
+    phrases = [p for p in (beatmap.phrases if played else [])
+               if start + 1e-6 < p < end - 1e-6]
+
+    def accent_near(t: float, window: float) -> tuple[float, float] | None:
+        """(time, strength) of the accent a change at `t` should land on: the
+        strongest within `window`, with nearness breaking a tie."""
+        if not accents or window <= 0:
+            return None
+        lo = bisect.bisect_left(accents, t - window)
+        hi = bisect.bisect_right(accents, t + window)
+        best = None
+        for k in range(lo, hi):
+            score = accent_strength[k] - 0.5 * abs(accents[k] - t) / window
+            if best is None or score > best[0]:
+                best = (score, accents[k], accent_strength[k])
+        return (best[1], best[2]) if best else None
+
+    def beat_index_at(t: float, after: int) -> int:
+        """The beat nearest `t`, never at or before `after` — a pulled change
+        must still move the walk forward."""
+        i = bisect.bisect_left(beats, t)
+        if 0 < i < len(beats) and t - beats[i - 1] < beats[i] - t:
+            i -= 1
+        if i >= len(beats) and len(beats) >= 2:
+            i = len(beats) - 1 + int(round((t - beats[-1]) / max(beats[-1] - beats[-2], 1e-6)))
+        return max(after + 1, i)
+
     # Open on the first beat at or after the span's start; anything before it
     # is covered by extending the first slot backwards, so the piece starts
     # with the music rather than with the grid.
@@ -838,6 +992,7 @@ def plan_layers(
     pos = start
     beat_i = first
     guard = 0
+    opens_phrase = False            # the stretch starting at `pos` follows a breath
 
     while pos < end - 1e-6:
         guard += 1
@@ -845,28 +1000,54 @@ def plan_layers(
             warnings.append("Der Beat-Raster brach ab — der Schnitt endet früher.")
             break
 
-        energy = energy_at(beat_i)
-        step_beats = LADDER[rung_for_energy(sty, energy, rng)]
+        loudness = beatmap.dynamics_at(pos) if played else energy_at(beat_i)
+        step_beats = LADDER[rung_for_energy(sty, loudness, rng)]
+        beat_len = max(beat_time(beat_i + 1) - beat_time(beat_i), 1e-6)
 
         segment_end = min(beat_time(beat_i + step_beats), end)
+        next_opens_phrase = False
+        if played:
+            # A breath before a new phrase is a change the music asks for,
+            # whatever the ladder said.
+            breath = next((p for p in phrases
+                           if pos + 0.5 * beat_len < p < segment_end - 1e-6), None)
+            if breath is not None:
+                segment_end = breath
+                next_opens_phrase = True
+            elif segment_end < end - 1e-6:
+                hit = accent_near(segment_end, ACCENT_SNAP_BEATS * beat_len)
+                if hit and pos + 0.5 * beat_len < hit[0] < end - 1e-6:
+                    segment_end = hit[0]
+
         if segment_end <= pos + 1e-6:
             beat_i += max(1, step_beats)
             continue
 
         nxt = bag.take() if stretches else current
-        kind = _pick_transition(transition, rng)
-        beat_len = max(beat_time(beat_i + 1) - beat_time(beat_i), 1e-6)
+        if played:
+            hit = accent_near(pos, 0.08)
+            accent = hit[1] if hit else 0.0
+        else:
+            accent = (beatmap.beat_strength[beat_i]
+                      if beat_i < len(beatmap.beat_strength) else 0.0)
+        if transition == "spiel":
+            kind = played_transition(loudness, accent, phrase=opens_phrase)
+        else:
+            kind = _pick_transition(transition, rng)
 
         # The transition opens the segment and the hold fills the rest of it,
         # so the beat carries the change and the form then has time to stand.
         blend_len = 0.0
         if kind and stretches:
             wanted = sty.blend_beats * beat_len
+            if played:
+                wanted *= touch_factor(loudness, accent, phrase=opens_phrase, touch=touch)
             blend_len = min(wanted, (segment_end - pos) * MAX_BLEND_SHARE)
             if blend_len < MIN_BLEND_SECONDS:
                 blend_len = 0.0
 
-        is_section = bar_of(beat_i) in sections and beat_i in bar_starts
+        is_section = ((bar_of(beat_i) in sections and beat_i in bar_starts)
+                      or (played and opens_phrase))
 
         if blend_len > 0:
             stretches.append(dict(
@@ -888,7 +1069,11 @@ def plan_layers(
             ))
             pos = segment_end
 
-        beat_i += step_beats
+        if played:
+            beat_i = beat_index_at(segment_end, beat_i)
+            opens_phrase = next_opens_phrase
+        else:
+            beat_i += step_beats
 
     if not stretches:
         raise ValueError("No slots were produced — is the beat grid empty?")
@@ -903,7 +1088,15 @@ def plan_layers(
     # first one is not: nothing changed there, the piece merely began.
     cuts = [st["start"] for st in stretches[1:]]
     marks: list[tuple[float, float]] = []
-    if beatmap.bar_energy:
+    if played:
+        # The performance's own dynamics, not a rank per bar: a crescendo
+        # inside a bar is exactly what the picture should lean into.
+        rate = beatmap.dynamics_rate
+        for k in range(0, len(beatmap.dynamics), PLAYED_MARK_STEP):
+            t = k / rate
+            if start - 1.0 <= t <= end + 1.0:
+                marks.append((t, beatmap.dynamics[k]))
+    elif beatmap.bar_energy:
         bar_index = beatmap.bar_starts()
         for i, e in enumerate(beatmap.bar_energy):
             if i < len(bar_index):
@@ -917,8 +1110,9 @@ def plan_layers(
     slots: list[Slot] = []
     src = 0.0
     min_span = MIN_SEGMENT_FRAMES / fps if fps > 0 else 0.0
+    max_knot = PLAYED_MAX_KNOT_SECONDS if played else MAX_KNOT_SECONDS
     for st in stretches:
-        points = _split_points(st["start"], st["end"], curve, min_span)
+        points = _split_points(st["start"], st["end"], curve, min_span, max_knot)
         whole = st["end"] - st["start"]
         for a, b in zip(points, points[1:]):
             if b - a <= 1e-9:
@@ -952,6 +1146,16 @@ def plan_layers(
             "Loop — ein höheres Tempo oder ein längeres Stück nutzt mehr davon."
         )
 
+    glows: list[list[float]] = []
+    if played:
+        glows = plan_glows(accents, accent_strength, cuts=cuts,
+                           start=start, end=end, amount=glow)
+        if not accents:
+            warnings.append(
+                "In der Aufnahme wurden keine deutlichen Anschläge gefunden — der "
+                "Schnitt folgt nur der Lautstärke."
+            )
+
     return LayerPlan(
         slots=slots, style=sty.key, transition=transition, seed=resolved_seed,
         tracks=tracks, loop=loop, bpm=beatmap.bpm,
@@ -963,6 +1167,10 @@ def plan_layers(
         consumed=consumed_total,
         wraps=wraps,
         warnings=warnings,
+        profile="piano" if played else "song",
+        touch=touch,
+        glow=glow,
+        glows=glows,
     )
 
 
@@ -1178,6 +1386,7 @@ def _pick_transition(transition: str, rng: random.Random) -> str:
         return ""
     if transition == "mix":
         return rng.choice(_MIXABLE)
+    # "spiel" is decided by the music in `plan_layers`; anything unknown dissolves.
     return transition if transition in _BUILDERS else DEFAULT_TRANSITION
 
 

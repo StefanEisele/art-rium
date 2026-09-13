@@ -51,6 +51,8 @@ import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.subproc import communicate
+
 logger = logging.getLogger(__name__)
 
 # Everything is measured and reasoned about in 8-bit units, whatever the source
@@ -238,7 +240,7 @@ async def measure(source: Path, *, ffmpeg_path: str = "ffmpeg") -> Stats | None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    stdout, stderr = await communicate(proc)
     if proc.returncode != 0:
         logger.warning("Colour measurement failed for %s: %s",
                        source.name, stderr.decode(errors="replace")[-200:])

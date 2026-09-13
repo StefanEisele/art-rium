@@ -49,6 +49,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from core.subproc import communicate
 from services.video.cut import CLOSING_FADE_SECONDS, OPENING_FADE_SECONDS, EditPlan
 
 logger = logging.getLogger(__name__)
@@ -316,7 +317,7 @@ async def render_cut(
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await proc.communicate()
+        _, stderr = await communicate(proc)
     finally:
         if spilled:
             spilled.unlink(missing_ok=True)

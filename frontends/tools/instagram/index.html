@@ -1677,7 +1677,13 @@ async function loadFramingDefaults() {
   restoreCollaborators();
 }
 
-const mediaRatio = (m) => (m && m.width && m.height) ? m.width / m.height : null;
+// The shape that gets published: a gallery row carries it as delivered_*
+// (a crop or an upscale makes it differ from the generated width/height); a
+// post's own media list already sends it as width/height.
+const mediaRatio = (m) => {
+  const w = m && (m.delivered_width || m.width), h = m && (m.delivered_height || m.height);
+  return w && h ? w / h : null;
+};
 const clampFeedRatio = (r) => Math.min(Math.max(r, IG_FEED_MIN), IG_FEED_MAX);
 
 /** The ratio Instagram will render this post in — mirrors framing.frame_ratio. */
@@ -1811,8 +1817,8 @@ function renderIgPreview() {
   const nImages = items.filter(m => m.kind === 'image').length;
   const allFilled = nImages > 0 && items.filter(m => m.kind === 'image').every(m => m.crop_mode === 'fill');
 
-  const srcLabel = (it.width && it.height)
-    ? `${it.width}×${it.height} (${(src).toFixed(2)}:1)` : 'Größe unbekannt';
+  const sw = it.delivered_width || it.width, sh = it.delivered_height || it.height;
+  const srcLabel = (sw && sh) ? `${sw}×${sh} (${(src).toFixed(2)}:1)` : 'Größe unbekannt';
 
   host.innerHTML = `
     <div class="igp-card">
@@ -3066,7 +3072,7 @@ async function applySeriesDeepLink() {
   state.selectedMedia = all.slice(0, MAX_CAROUSEL).map(img => ({
     kind: 'image', id: img.id, filename: img.filename, title: img.title,
     thumb_url: img.thumb_url, url: img.url,
-    width: img.width, height: img.height,
+    width: img.delivered_width || img.width, height: img.delivered_height || img.height,
   }));
   // The series wins over the session cache on purpose: arriving here from a
   // named package and finding the previous draft's caption would be the

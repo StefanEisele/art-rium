@@ -617,6 +617,10 @@
     /* The apply control inside a panel; the bar button only opens the panel. */
     .fx-panel .fx-row { gap: 10px; }
     .fx-jumps { display: flex; gap: 6px; margin-top: 9px; }
+    /* Four passes: two rows of two. One row of four truncates the labels the
+       bar exists to show — even the desktop sidebar is only 372 px wide. */
+    #fx-bar { flex-wrap: wrap; }
+    #fx-bar .pass-btn { flex: 1 1 calc(50% - 3px); }
 
     /* ── Diffusion upscale ──
        More surface than the other two passes get, because it is the only one
@@ -1032,7 +1036,7 @@
     .cmp-open-btn:hover { border-color: var(--accent-border); }
     .cmp-open-btn .glyph { color: var(--accent); font-size: 15px; line-height: 1; }
 
-    .cmp {
+    .cmp, .crop {
       position: fixed; inset: 0; z-index: 150;
       /* Opaque, not a dim overlay: anything ghosting through behind the
          picture is noise in exactly the thing being judged. */
@@ -1042,7 +1046,7 @@
       padding-bottom: env(safe-area-inset-bottom);
       overscroll-behavior: contain;
     }
-    .cmp.open { display: flex; }
+    .cmp.open, .crop.open { display: flex; }
     .cmp-bar {
       flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
       padding: 10px 12px;
@@ -1128,11 +1132,68 @@
        drag or a pinch everything is written directly, with nothing in the way. */
     .cmp-stage.animating .cmp-img {
       transition: width .24s cubic-bezier(.2,.8,.3,1), height .24s cubic-bezier(.2,.8,.3,1),
-                  transform .24s cubic-bezier(.2,.8,.3,1), opacity .15s;
+                  transform .24s cubic-bezier(.2,.8,.3,1), clip-path .24s cubic-bezier(.2,.8,.3,1),
+                  opacity .15s;
     }
     .cmp-stage.animating .cmp-clip  { transition: clip-path .24s cubic-bezier(.2,.8,.3,1); }
     .cmp-stage.animating .cmp-line,
     .cmp-stage.animating .cmp-label { transition: transform .24s cubic-bezier(.2,.8,.3,1); }
+
+    /* ══ Zuschnitt — the crop editor ═══════════════════════════════════
+       Full screen for the same reason as the compare (and built from its
+       bars and stage): a box is dragged with a thumb, and the modal gives the
+       picture 60 % of a phone. What is shown is always the whole frame the
+       crop is cut from, with the window over it — outside dimmed, inside a
+       rule-of-thirds grid. */
+    .crop-img {
+      position: absolute; left: 0; top: 0; max-width: none;
+      pointer-events: none; -webkit-user-drag: none;
+    }
+    .crop-box {
+      position: absolute; left: 0; top: 0;
+      outline: 1.5px solid rgba(255,255,255,.92);
+      /* Everything outside the window, dimmed: one shadow rather than four
+         panels that would each have to follow the box. */
+      box-shadow: 0 0 0 100vmax rgba(10,10,12,.66);
+      cursor: move;
+    }
+    .crop-box.hidden { display: none; }
+    .crop-grid { position: absolute; inset: 0; pointer-events: none; opacity: .55; transition: opacity .15s; }
+    .crop-stage.dragging .crop-grid { opacity: 1; }
+    .crop-grid i { position: absolute; background: rgba(255,255,255,.55); }
+    .crop-grid i:nth-child(1) { left: 33.333%; top: 0; bottom: 0; width: 1px; }
+    .crop-grid i:nth-child(2) { left: 66.667%; top: 0; bottom: 0; width: 1px; }
+    .crop-grid i:nth-child(3) { top: 33.333%; left: 0; right: 0; height: 1px; }
+    .crop-grid i:nth-child(4) { top: 66.667%; left: 0; right: 0; height: 1px; }
+    /* Hit areas are 44 px, centred on the corner or edge they move; what is
+       drawn is the usual bracket in each corner and a short bar per edge. */
+    .crop-h { position: absolute; width: 44px; height: 44px; }
+    .crop-h::after { content: ''; position: absolute; border: 0 solid #fff; }
+    .crop-h[data-h="n"]  { left: 50%; top: -22px;    margin-left: -22px; cursor: ns-resize; }
+    .crop-h[data-h="s"]  { left: 50%; bottom: -22px; margin-left: -22px; cursor: ns-resize; }
+    .crop-h[data-h="w"]  { top: 50%;  left: -22px;   margin-top: -22px;  cursor: ew-resize; }
+    .crop-h[data-h="e"]  { top: 50%;  right: -22px;  margin-top: -22px;  cursor: ew-resize; }
+    .crop-h[data-h="nw"] { left: -22px;  top: -22px;    cursor: nwse-resize; }
+    .crop-h[data-h="ne"] { right: -22px; top: -22px;    cursor: nesw-resize; }
+    .crop-h[data-h="sw"] { left: -22px;  bottom: -22px; cursor: nesw-resize; }
+    .crop-h[data-h="se"] { right: -22px; bottom: -22px; cursor: nwse-resize; }
+    .crop-h[data-h="n"]::after, .crop-h[data-h="s"]::after {
+      left: 10px; width: 24px; top: 20px; height: 4px; background: #fff; border-radius: 2px;
+    }
+    .crop-h[data-h="w"]::after, .crop-h[data-h="e"]::after {
+      top: 10px; height: 24px; left: 20px; width: 4px; background: #fff; border-radius: 2px;
+    }
+    .crop-h[data-h="nw"]::after { left: 19px;  top: 19px;    width: 18px; height: 18px; border-top-width: 3.5px; border-left-width: 3.5px; }
+    .crop-h[data-h="ne"]::after { right: 19px; top: 19px;    width: 18px; height: 18px; border-top-width: 3.5px; border-right-width: 3.5px; }
+    .crop-h[data-h="sw"]::after { left: 19px;  bottom: 19px; width: 18px; height: 18px; border-bottom-width: 3.5px; border-left-width: 3.5px; }
+    .crop-h[data-h="se"]::after { right: 19px; bottom: 19px; width: 18px; height: 18px; border-bottom-width: 3.5px; border-right-width: 3.5px; }
+    .crop-readout {
+      font-size: 12px; font-weight: 600; color: var(--text-dim);
+      font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    #crop-apply.busy { animation: wand-pulse .9s ease-in-out infinite; }
+    .crop-stage.busy { pointer-events: none; }
+    .crop-stage.busy .crop-img { opacity: .6; }
 
     /* ══ Aussortieren — the swipe deck ══════════════════════════════════
        A full-screen card stack for going through the library quickly: drag
@@ -1438,6 +1499,9 @@
         <button class="pass-btn" id="fx-btn-upscale" type="button" onclick="toggleFxPass('upscale')">
           <span class="glyph">⤢</span><span class="txt" id="fx-lbl-upscale">Vergrößern</span>
         </button>
+        <button class="pass-btn" id="fx-btn-crop" type="button" onclick="toggleFxPass('crop')">
+          <span class="glyph">✂&#xFE0E;</span><span class="txt" id="fx-lbl-crop">Zuschneiden</span>
+        </button>
       </div>
 
       <div class="fx-panel" id="fx-panel-enhance">
@@ -1505,6 +1569,20 @@
         <div class="us-detail" id="upscale-detail"></div>
       </div>
       <div class="fx-hint" id="upscale-hint"></div>
+      </div>
+
+      <!-- The framing. ✂ opens the full-screen editor, for a new crop and for
+           adjusting one; it is not a toggle like the wand, because a crop is a
+           box somebody drew and one tap should never throw it away. -->
+      <div class="fx-panel" id="fx-panel-crop">
+        <div class="fx-row">
+          <button class="wand-btn" id="crop-btn" onclick="openCropEditor()" title="Ausschnitt wählen">✂&#xFE0E;</button>
+          <span class="fx-pct" id="crop-size"></span>
+          <button class="chip-btn remove" id="crop-remove-btn" type="button" style="display:none"
+                  onclick="removeCrop()">Entfernen</button>
+        </div>
+        <div class="fx-chips" id="crop-chips"></div>
+        <div class="fx-hint" id="crop-hint"></div>
       </div>
 
       <!-- The two handoffs. Neither is a rendition of this picture: both make
@@ -1619,6 +1697,36 @@
     </div>
     <button class="chip-btn" id="cmp-zoom" type="button" onclick="cmpZoomToggle()"
             title="Pixelgenau (100 %) ↔ Einpassen"></button>
+  </div>
+</div>
+
+<!-- ── Zuschnitt: the crop editor ──
+     The whole frame the crop is cut from, the window over it. Formats on top
+     where the compare has its pairs, the decision at the bottom. Handles are
+     edges first, corners last, so where they overlap on a small box the
+     corner wins. -->
+<div class="crop" id="crop" aria-hidden="true">
+  <div class="cmp-bar">
+    <div class="cmp-pairs" id="crop-presets"></div>
+    <button class="chip-btn" id="crop-flip" type="button" onclick="cropToggleOrientation()"
+            title="Hochformat ↔ Querformat">⇄</button>
+    <button class="modal-close" onclick="closeCropEditor()" title="Abbrechen (Esc)">✕</button>
+  </div>
+  <div class="cmp-stage crop-stage" id="crop-stage">
+    <img class="crop-img" id="crop-img" alt="" draggable="false">
+    <div class="crop-box hidden" id="crop-box">
+      <div class="crop-grid"><i></i><i></i><i></i><i></i></div>
+      <span class="crop-h" data-h="n"></span><span class="crop-h" data-h="s"></span>
+      <span class="crop-h" data-h="w"></span><span class="crop-h" data-h="e"></span>
+      <span class="crop-h" data-h="nw"></span><span class="crop-h" data-h="ne"></span>
+      <span class="crop-h" data-h="sw"></span><span class="crop-h" data-h="se"></span>
+    </div>
+  </div>
+  <div class="cmp-bar bottom">
+    <button class="chip-btn" type="button" onclick="cropReset()"
+            title="Größter Ausschnitt im gewählten Format">Zurücksetzen</button>
+    <span class="crop-readout" id="crop-readout"></span>
+    <button class="chip-btn apply" id="crop-apply" type="button" onclick="applyCrop()">Übernehmen</button>
   </div>
 </div>
 
@@ -1859,22 +1967,24 @@ const modalPreviewSrc = (rawUrl) => {
   const W = box.w || window.innerWidth || 900;
   const H = box.h || Math.round((window.innerHeight || 800) * 0.6);
   let longEdge = Math.max(W, H);
-  if (rec && rec.width && rec.height) {
-    const k = Math.min(W / rec.width, H / rec.height);
-    longEdge = Math.max(rec.width * k, rec.height * k);
+  const shown = deliveredSize(rec);
+  if (shown.w && shown.h) {
+    const k = Math.min(W / shown.w, H / shown.h);
+    longEdge = Math.max(shown.w * k, shown.h * k);
   }
   return previewSrc(rawUrl, longEdge);
 };
 
 // The size of the rendition a viewer gets, which is NOT `width`/`height` once
-// the picture has been upscaled — those stay the dimensions it was generated
-// at. Anything reporting or requesting the real thing has to come through
-// here, or an upscale is described and fetched at half its size.
-const deliveredSize = (img) => (
-  img && img.upscaled && img.upscale_width
-    ? { w: img.upscale_width, h: img.upscale_height, upscaled: true }
-    : { w: (img && img.width) || 0, h: (img && img.height) || 0, upscaled: false }
-);
+// the picture has been upscaled or cropped — those stay the dimensions it was
+// generated at. Anything reporting, laying out or requesting the real thing
+// has to come through here, or an upscale is fetched at half its size and a
+// crop is laid out in the wrong shape. The server works it out
+// (rendition.delivered_size); the fallbacks only cover a row from before it.
+const deliveredSize = (img) => ({
+  w: (img && (img.delivered_width || img.upscale_width || img.width)) || 0,
+  h: (img && (img.delivered_height || img.upscale_height || img.height)) || 0,
+});
 
 const megapixels = (w, h) => (w * h / 1e6);
 
@@ -2311,6 +2421,7 @@ const populateModal = (img) => {
   resetFxPasses();
   renderEnhanceUI(img);
   renderGrainUI(img);
+  renderCropUI(img);
   // Opening an image whose upscale is still running has to pick the progress
   // back up — the job lives on the server, so closing the modal (or reloading)
   // never cancelled it.
@@ -2331,6 +2442,22 @@ const populateModal = (img) => {
     $('prompt-block').style.display = 'none';
   }
 
+  renderModalMeta(img);
+  renderTags();
+
+  $('modal-title').value = img.title || '';
+  $('modal-title').oninput = () => { state.modal.dirty = true; };
+
+  $('modal-notes').value = img.notes || '';
+  $('modal-notes').oninput = () => { state.modal.dirty = true; };
+
+  $('nav-prev').disabled = state.modal.index <= 0;
+  $('nav-next').disabled = state.modal.index >= modalList().length - 1;
+};
+
+/** The facts row under the picture. Its own function because the crop changes
+ *  what it says (the size) while the modal stays open. */
+const renderModalMeta = (img) => {
   const meta = $('modal-meta');
   meta.innerHTML = '';
   const loraChips = (img.loras || []).map(l =>
@@ -2339,7 +2466,7 @@ const populateModal = (img) => {
   const shown = deliveredSize(img);
   const chips = [
     shown.w && shown.h ? `${shown.w}×${shown.h}` : null,
-    shown.upscaled ? `Original ${img.width}×${img.height}` : null,
+    (img.upscaled || img.cropped) && img.width ? `Original ${img.width}×${img.height}` : null,
     img.seed !== null && img.seed !== undefined ? `seed ${img.seed}` : null,
     ...loraChips,
     // Only when it was actually turned: 0 sampled identically to every
@@ -2355,17 +2482,6 @@ const populateModal = (img) => {
     chip.textContent = c;
     meta.appendChild(chip);
   });
-
-  renderTags();
-
-  $('modal-title').value = img.title || '';
-  $('modal-title').oninput = () => { state.modal.dirty = true; };
-
-  $('modal-notes').value = img.notes || '';
-  $('modal-notes').oninput = () => { state.modal.dirty = true; };
-
-  $('nav-prev').disabled = state.modal.index <= 0;
-  $('nav-next').disabled = state.modal.index >= modalList().length - 1;
 };
 
 // ══════════════════════════════════════════════════════════
@@ -2412,6 +2528,7 @@ const renderFxBar = (img) => {
     ['enhance', img.enhanced, img.enhanced ? `${img.enhance_strength || 100} %` : 'Verbessern'],
     ['grain',   img.grained,  img.grained  ? `${img.grain_strength || 0} %`     : 'Korn'],
     ['upscale', img.upscaled, img.upscaled ? `${img.upscale_width}×${img.upscale_height}` : 'Vergrößern'],
+    ['crop',    img.cropped,  img.cropped  ? cropLabel(img) : 'Zuschneiden'],
   ];
   for (const [kind, set, label] of passes) {
     const btn = $(`fx-btn-${kind}`);
@@ -2508,11 +2625,11 @@ const previewEnhance = (strength) => {
 
 /**
  * Swap the modal image between the renditions. The stack, bottom to top, is
- *   original → upscaled → enhanced → grained
+ *   original → upscaled → cropped → enhanced → grained
  * (services/image/rendition.py), so each compare button names the layer
  * directly *below* its own pass:
- *   unenhanced — the upscale if there is one, the original otherwise
- *   ungrained  — enhanced, else upscaled, else the original
+ *   unenhanced — the crop, else the upscale, else the original
+ *   ungrained  — enhanced, else cropped, else upscaled, else the original
  *   primary    — what viewers actually get, i.e. the top of the stack
  * The upscale has no hold here: at modal size it and the original are the
  * same picture, so its button opens the split compare instead (comparePairs
@@ -2523,8 +2640,8 @@ const showRendition = (which) => {
   if (!img) return;
   // Showing the layer directly below a pass is what makes the comparison read
   // as that one pass's contribution — not the whole stack undone.
-  const src = which === 'unenhanced' ? (img.upscaled_url || img.url)
-            : which === 'ungrained'  ? (img.enhanced_url || img.upscaled_url || img.url)
+  const src = which === 'unenhanced' ? (img.cropped_url || img.upscaled_url || img.url)
+            : which === 'ungrained'  ? (img.enhanced_url || img.cropped_url || img.upscaled_url || img.url)
             : (img.primary_url || img.url);
   // Through the preview endpoint like everything else on screen: a compare
   // that had to fetch two multi-megabyte PNGs would stall exactly where it
@@ -2699,9 +2816,9 @@ const renderUpscaleUI = (img) => {
     ? ''
     : on
       ? '◧ Vergleichen legt Original und Vergrößerung übereinander — reinzoomen, Linie ziehen. '
-        + '⤢ entfernt die Vergrößerung wieder — Zauberstab und Korn bleiben erhalten.'
+        + '⤢ entfernt die Vergrößerung wieder — Zuschnitt, Zauberstab und Korn bleiben erhalten.'
       : 'Vergrößert das Originalbild und zeichnet dabei echte Details nach (Z-Image, kachelweise). '
-        + 'Zauberstab und Korn werden danach neu darüber gelegt. Dauert Minuten.';
+        + 'Zuschnitt, Zauberstab und Korn werden danach neu darüber gelegt. Dauert Minuten.';
   renderFxBar(img);
 };
 
@@ -2713,7 +2830,8 @@ const UPSCALE_MODEL_LABELS = {
 // much bigger, from what, with which model, and how far it was allowed to
 // repaint.
 const upscaleFactChips = (img) => {
-  const d = deliveredSize(img);
+  // The upscale's own size — not deliveredSize, which a crop on top changes.
+  const d = { w: img.upscale_width, h: img.upscale_height };
   return [
     `${img.upscale_scale}× · ${d.w}×${d.h}`,
     `von ${img.width}×${img.height}`,
@@ -2735,14 +2853,9 @@ const onUpscaleClick = async () => {
     if (!confirm('Vergrößerung entfernen und zum kleinen Bild zurück?')) return;
     try {
       const r = await apiFetch(`/api/images/${img.id}/upscale`, { method: 'DELETE' });
-      const updated = await r.json();
-      Object.assign(img, updated);
-      $('modal-img').src = withAuth(updated.primary_url);
-      renderUpscaleUI(updated);
-      // The wand and the grain came back down to the original with it.
-      renderEnhanceUI(updated);
-      renderGrainUI(updated);
-      refreshGridItem(state.modal.index, updated);
+      // The crop, the wand and the grain came back down to the original with
+      // it — every panel describes a smaller picture now.
+      adoptImageRow(img, await r.json());
       ArtRium.toast('Vergrößerung entfernt');
     } catch (e) {
       ArtRium.toast('Entfernen fehlgeschlagen: ' + e.message, true);
@@ -2891,15 +3004,10 @@ const pollUpscale = async (imageId) => {
       const r = await apiFetch(`/api/images/${imageId}`);
       const updated = await r.json();
       if (state.modal.image && state.modal.image.id === imageId) {
-        Object.assign(state.modal.image, updated);
-        $('modal-img').src = withAuth(updated.primary_url);
-        renderUpscaleUI(state.modal.image);
-        // Both Pillow passes were re-rendered on top of the new upscale, so
-        // the wand's chips describe the larger picture now — re-read them
-        // rather than leaving the amounts the small render produced.
-        renderEnhanceUI(state.modal.image);
-        renderGrainUI(state.modal.image);
-        refreshGridItem(state.modal.index, updated);
+        // The Pillow passes were re-rendered on top of the new upscale, so the
+        // crop's size and the wand's chips describe the larger picture now —
+        // re-read them rather than leaving what the small render produced.
+        adoptImageRow(state.modal.image, updated);
       }
     } catch (e) { /* the toast already said what happened */ }
     if (p.phase === 'done') ArtRium.toast('Vergrößert ✓ — ◧ Vergleich zeigt Vorher/Nachher');
@@ -2930,6 +3038,449 @@ const initUpscaleControls = () => {
   // Its compare button is a plain click into the split view (openCompare),
   // not a hold like the wand's and the grain's — see the markup.
 };
+
+// ══════════════════════════════════════════════════════════
+// ZUSCHNITT (crop)
+// ══════════════════════════════════════════════════════════
+// The fourth pass, and the only one that changes the picture's shape. It is
+// cut from the upscale when there is one and sits under the wand and the grain
+// (services/image/crop.py), so the editor always shows that source — the whole
+// frame — with the current window drawn over it, and committing re-renders the
+// two tone passes on the new framing server-side.
+//
+// The box is fractions of the source, so one framing fits the original and a
+// 2x upscale alike. On screen everything is stage pixels, where a W:H box is
+// simply w/h = W/H: the source is drawn at its own aspect.
+
+const CROP_PRESETS = [
+  ['free', 'Frei'], ['original', 'Original'], ['1:1', '1:1'],
+  ['4:5', '4:5'], ['3:4', '3:4'], ['2:3', '2:3'], ['9:16', '9:16'],
+];
+const CROP_MARGIN = 22;   // stage px around the picture, so edge handles stay grabbable
+const CROP_MIN = 48;      // the box's smaller side, in stage px
+
+const cropState = {
+  open: false,
+  img: null,
+  base: null,             // { url, w, h } — the rendition the crop is cut from
+  preset: 'original',     // a CROP_PRESETS key
+  landscape: false,       // fixed formats turned on their side: 4:5 → 5:4
+  box: null,              // { x, y, w, h } fractions of `base`
+  fit: { x: 0, y: 0, w: 0, h: 0 },
+  drag: null,
+  busy: false,
+  raf: 0,
+};
+
+const cropFlip = (ratio) => ratio.split(':').reverse().join(':');
+const cropCanFlip = () => !['free', 'original', '1:1'].includes(cropState.preset);
+
+/** What the server is told: "free", "original" or the W:H as oriented. */
+const cropAspect = () => {
+  const k = cropState.preset;
+  if (k === 'free' || k === 'original') return k;
+  return cropState.landscape && cropCanFlip() ? cropFlip(k) : k;
+};
+
+/** Width / height the box must keep, or null when it is free. */
+const cropRatio = () => {
+  const a = cropAspect();
+  if (a === 'free') return null;
+  if (a === 'original') return cropState.base.w / cropState.base.h;
+  const [w, h] = a.split(':').map(Number);
+  return w / h;
+};
+
+/** Which chip, and which way round, a stored aspect is. */
+const cropPresetOf = (aspect, landscapeDefault) => {
+  if (aspect === 'free' || aspect === 'original' || aspect === '1:1') return [aspect, landscapeDefault];
+  if (CROP_PRESETS.some(([k]) => k === aspect)) return [aspect, false];
+  if (CROP_PRESETS.some(([k]) => k === cropFlip(aspect))) return [cropFlip(aspect), true];
+  return ['free', landscapeDefault];
+};
+
+/** The pass button's label: the format when there is one, else the size. */
+const cropLabel = (img) => {
+  const a = img.crop && img.crop.aspect;
+  return a && a !== 'free' && a !== 'original' ? a : `${img.crop_width}×${img.crop_height}`;
+};
+
+const cropFactChips = (img) => {
+  const a = img.crop.aspect;
+  const from = img.upscaled ? `${img.upscale_width}×${img.upscale_height}` : `${img.width}×${img.height}`;
+  return [
+    a === 'free' ? 'Frei' : a === 'original' ? 'Originalformat' : a,
+    `von ${from}`,
+    `${Math.round(100 * img.crop.w * img.crop.h)} % der Fläche`,
+  ];
+};
+
+const renderCropUI = (img) => {
+  const on = !!img.cropped;
+  $('crop-btn').classList.toggle('on', on);
+  $('crop-size').textContent = on ? `${img.crop_width}×${img.crop_height}` : '';
+  $('crop-remove-btn').style.display = on ? '' : 'none';
+  $('crop-chips').innerHTML = (on ? cropFactChips(img) : [])
+    .map(c => `<span class="fx-chip">${ArtRium.escHtml(c)}</span>`).join('');
+  $('crop-hint').textContent = on
+    ? '✂ öffnet den Ausschnitt zum Nachjustieren. Entfernen stellt das volle Bild wieder her — '
+      + 'Zauberstab, Korn und Vergrößerung bleiben erhalten.'
+    : 'Wählt einen Bildausschnitt — frei oder in festem Format. Das Original bleibt erhalten; '
+      + 'Zauberstab und Korn werden danach auf den Ausschnitt gelegt.';
+  renderFxBar(img);
+};
+
+/** Take over the row a pass returned, everywhere at once. `img` is the array
+ *  element the grid and the modal both hold, so assigning into it keeps them
+ *  one object. The crop and the upscale change the picture's size — and the
+ *  crop its shape — so this also redoes the zoom, the size chips, the download
+ *  and every pass's panel, which describe the new picture now. */
+const adoptImageRow = (img, updated) => {
+  Object.assign(img, updated);
+  if (state.modal.image === img) {
+    resetZoom(false);
+    $('modal-img').src = modalPreviewSrc(img.preview_url || img.primary_url || img.url);
+    $('download-btn').href = withAuth(img.primary_url || img.url);
+    renderModalMeta(img);
+    renderEnhanceUI(img);
+    renderGrainUI(img);
+    renderUpscaleUI(img);
+    renderCropUI(img);
+  }
+  refreshGridItem(state.modal.index, img);
+};
+
+const removeCrop = async () => {
+  const img = state.modal.image;
+  if (!img || !img.cropped) return;
+  $('crop-remove-btn').disabled = true;
+  $('crop-btn').classList.add('busy');
+  try {
+    const r = await apiFetch(`/api/images/${img.id}/crop`, { method: 'DELETE' });
+    adoptImageRow(img, await r.json());
+    ArtRium.toast('Zuschnitt entfernt');
+  } catch (e) {
+    ArtRium.toast('Entfernen fehlgeschlagen: ' + e.message, true);
+  } finally {
+    $('crop-remove-btn').disabled = false;
+    $('crop-btn').classList.remove('busy');
+  }
+};
+
+// ── The editor ──────────────────────────────────────────────────────────────
+
+function openCropEditor() {
+  const img = state.modal.image;
+  if (!img) return;
+  const c = cropState;
+  c.img = img;
+  c.base = img.upscaled && img.upscale_width
+    ? { url: img.upscaled_url, w: img.upscale_width, h: img.upscale_height }
+    : { url: img.url, w: img.width || 0, h: img.height || 0 };
+  const saved = img.cropped ? img.crop : null;
+  const landscape = c.base.w > c.base.h;
+  [c.preset, c.landscape] = cropPresetOf(saved ? saved.aspect : 'original', landscape);
+  c.box = saved ? { x: saved.x, y: saved.y, w: saved.w, h: saved.h } : { x: 0, y: 0, w: 1, h: 1 };
+  c.drag = null;
+  c.busy = false;
+  c.open = true;
+  $('crop').classList.add('open');
+  $('crop').setAttribute('aria-hidden', 'false');
+  // No flash of the previous picture while this one loads.
+  $('crop-img').removeAttribute('src');
+  cropLayout();
+  renderCropPresets();
+  $('crop-img').src = previewUrlAt(c.base.url, Math.max(c.fit.w, c.fit.h) * cmpDpr());
+}
+
+function closeCropEditor() {
+  const c = cropState;
+  // A commit in flight lands on this row either way; closing under it would
+  // only hide the answer.
+  if (c.busy) return;
+  c.open = false;
+  c.drag = null;
+  $('crop').classList.remove('open');
+  $('crop').setAttribute('aria-hidden', 'true');
+  $('crop-img').removeAttribute('src');
+}
+
+/** Fit the source into the stage, then draw the box on it. */
+function cropLayout() {
+  const c = cropState;
+  const st = $('crop-stage');
+  const W = st.clientWidth, H = st.clientHeight;
+  // A row without recorded dimensions is laid out once its picture has
+  // loaded and told us its shape (initCrop).
+  $('crop-box').classList.toggle('hidden', !c.base.w || !c.base.h);
+  if (!c.base.w || !c.base.h) return;
+  const k = Math.max(0.01, Math.min((W - 2 * CROP_MARGIN) / c.base.w, (H - 2 * CROP_MARGIN) / c.base.h));
+  const w = c.base.w * k, h = c.base.h * k;
+  c.fit = { x: (W - w) / 2, y: (H - h) / 2, w, h };
+  const im = $('crop-img');
+  im.style.width = `${w}px`;
+  im.style.height = `${h}px`;
+  im.style.transform = `translate3d(${c.fit.x}px, ${c.fit.y}px, 0)`;
+  cropRender();
+}
+
+const cropToScreen = (b) => {
+  const f = cropState.fit;
+  return { l: f.x + b.x * f.w, t: f.y + b.y * f.h, r: f.x + (b.x + b.w) * f.w, b: f.y + (b.y + b.h) * f.h };
+};
+const cropFromScreen = (s) => {
+  const f = cropState.fit;
+  return { x: (s.l - f.x) / f.w, y: (s.t - f.y) / f.h, w: (s.r - s.l) / f.w, h: (s.b - s.t) / f.h };
+};
+
+/** The pixel size the server will cut — the same rounding as crop.pixel_box,
+ *  so the number shown is the number delivered. */
+function cropPixels() {
+  const c = cropState, B = c.base;
+  let w = Math.min(B.w, Math.max(1, Math.round(c.box.w * B.w)));
+  let h = Math.min(B.h, Math.max(1, Math.round(c.box.h * B.h)));
+  const r = cropRatio();
+  if (r) {
+    h = Math.round(w / r);
+    if (h > B.h) { h = B.h; w = Math.round(h * r); }
+  }
+  return [w, h];
+}
+
+/** The box keeps the whole picture — i.e. there is nothing to cut. */
+function cropIsFull() {
+  const c = cropState, B = c.base;
+  const [w, h] = cropPixels();
+  const l = Math.round(c.box.x * B.w), t = Math.round(c.box.y * B.h);
+  return l <= 1 && t <= 1 && l + w >= B.w - 1 && t + h >= B.h - 1;
+}
+
+function cropRender() {
+  const c = cropState;
+  c.raf = 0;
+  if (!c.open || !c.base.w) return;
+  const s = cropToScreen(c.box);
+  const el = $('crop-box');
+  el.style.transform = `translate3d(${s.l}px, ${s.t}px, 0)`;
+  el.style.width = `${s.r - s.l}px`;
+  el.style.height = `${s.b - s.t}px`;
+  const [w, h] = cropPixels();
+  $('crop-readout').textContent = `${w} × ${h}`;
+  const apply = $('crop-apply');
+  apply.disabled = c.busy || (cropIsFull() && !c.img.cropped);
+  apply.textContent = c.busy ? 'Schneide zu…' : 'Übernehmen';
+}
+
+const cropSchedule = () => {
+  if (!cropState.raf) cropState.raf = requestAnimationFrame(cropRender);
+};
+
+function renderCropPresets() {
+  const c = cropState;
+  // Every fixed format reads the way round it would be cut, so a landscape
+  // picture offers 5:4 and 16:9 without a tap on ⇄ first.
+  $('crop-presets').innerHTML = CROP_PRESETS.map(([key, label]) => {
+    const turned = c.landscape && key.includes(':') && key !== '1:1';
+    return `<button class="chip-btn ${key === c.preset ? 'on' : ''}" type="button"
+                    onclick="cropSetPreset('${key}')">${turned ? cropFlip(label) : label}</button>`;
+  }).join('');
+  const flip = $('crop-flip');
+  flip.disabled = !cropCanFlip();
+  flip.classList.toggle('on', cropCanFlip() && c.landscape);
+}
+
+/** The largest box of the current shape, around the current box's centre (or
+ *  the picture's) — the usual crop-tool answer to picking a format: as much
+ *  of the picture as fits, then shrink it where you want it. */
+function cropFitShape(centred) {
+  const c = cropState, f = c.fit;
+  const ratio = cropRatio();
+  if (!ratio) {
+    if (centred) c.box = { x: 0, y: 0, w: 1, h: 1 };
+    return;
+  }
+  let w, h;
+  if (f.w / f.h > ratio) { h = f.h; w = h * ratio; } else { w = f.w; h = w / ratio; }
+  const s = cropToScreen(c.box);
+  const cx = centred ? f.x + f.w / 2 : (s.l + s.r) / 2;
+  const cy = centred ? f.y + f.h / 2 : (s.t + s.b) / 2;
+  const l = Math.max(f.x, Math.min(f.x + f.w - w, cx - w / 2));
+  const t = Math.max(f.y, Math.min(f.y + f.h - h, cy - h / 2));
+  c.box = cropFromScreen({ l, t, r: l + w, b: t + h });
+}
+
+function cropSetPreset(key) {
+  if (cropState.busy) return;
+  cropState.preset = key;
+  cropFitShape(false);
+  renderCropPresets();
+  cropRender();
+}
+
+function cropToggleOrientation() {
+  if (cropState.busy || !cropCanFlip()) return;
+  cropState.landscape = !cropState.landscape;
+  cropFitShape(false);
+  renderCropPresets();
+  cropRender();
+}
+
+function cropReset() {
+  if (cropState.busy) return;
+  cropFitShape(true);
+  cropRender();
+}
+
+/** Where a drag from `S` (a screen box) by (dx, dy) leaves the box. Held edges
+ *  follow the pointer; with a fixed format the opposite corner or edge stays
+ *  put and the other side follows the shape. Never outside the picture,
+ *  never smaller than CROP_MIN on its short side. */
+function cropDragBox(mode, S, dx, dy) {
+  const f = cropState.fit;
+  const F = { l: f.x, t: f.y, r: f.x + f.w, b: f.y + f.h };
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const w0 = S.r - S.l, h0 = S.b - S.t;
+  if (mode === 'move') {
+    const l = clamp(S.l + dx, F.l, F.r - w0), t = clamp(S.t + dy, F.t, F.b - h0);
+    return { l, t, r: l + w0, b: t + h0 };
+  }
+  const n = mode.includes('n'), s = mode.includes('s');
+  const w = mode.includes('w'), e = mode.includes('e');
+  const ratio = cropRatio();
+  const minS = Math.min(CROP_MIN, f.w, f.h);
+
+  if (!ratio) {
+    const out = { ...S };
+    if (w) out.l = clamp(S.l + dx, F.l, S.r - minS);
+    if (e) out.r = clamp(S.r + dx, S.l + minS, F.r);
+    if (n) out.t = clamp(S.t + dy, F.t, S.b - minS);
+    if (s) out.b = clamp(S.b + dy, S.t + minS, F.b);
+    return out;
+  }
+
+  const minW = ratio >= 1 ? minS * ratio : minS;
+  if ((n || s) && (w || e)) {
+    // A corner: the opposite corner is the anchor, and whichever axis the
+    // pointer has moved further along decides the size.
+    const ax = e ? S.l : S.r, ay = s ? S.t : S.b;
+    const px = (e ? S.r : S.l) + dx, py = (s ? S.b : S.t) + dy;
+    const maxW = Math.min(e ? F.r - ax : ax - F.l, (s ? F.b - ay : ay - F.t) * ratio);
+    const bw = clamp(Math.max((px - ax) * (e ? 1 : -1), (py - ay) * (s ? 1 : -1) * ratio),
+                     Math.min(minW, maxW), maxW);
+    const bh = bw / ratio;
+    const l = e ? ax : ax - bw, t = s ? ay : ay - bh;
+    return { l, t, r: l + bw, b: t + bh };
+  }
+  if (w || e) {
+    // A side: width follows the pointer, height follows the shape, centred
+    // where it was and pushed back inside at the picture's edge.
+    const ax = e ? S.l : S.r;
+    const maxW = Math.min(e ? F.r - ax : ax - F.l, (F.b - F.t) * ratio);
+    const bw = clamp(e ? S.r + dx - ax : ax - (S.l + dx), Math.min(minW, maxW), maxW);
+    const bh = bw / ratio;
+    const t = clamp((S.t + S.b) / 2 - bh / 2, F.t, F.b - bh);
+    const l = e ? ax : ax - bw;
+    return { l, t, r: l + bw, b: t + bh };
+  }
+  // Top or bottom: the same, turned through 90°.
+  const ay = s ? S.t : S.b;
+  const maxH = Math.min(s ? F.b - ay : ay - F.t, (F.r - F.l) / ratio);
+  const bh = clamp(s ? S.b + dy - ay : ay - (S.t + dy), Math.min(minW / ratio, maxH), maxH);
+  const bw = bh * ratio;
+  const l = clamp((S.l + S.r) / 2 - bw / 2, F.l, F.r - bw);
+  const t = s ? ay : ay - bh;
+  return { l, t, r: l + bw, b: t + bh };
+}
+
+function onCropPointerDown(e) {
+  const c = cropState;
+  if (!c.open || c.busy || c.drag || !c.base.w) return;
+  const handle = e.target.closest('[data-h]');
+  const mode = handle ? handle.dataset.h : (e.target.closest('#crop-box') ? 'move' : null);
+  if (!mode) return;
+  e.preventDefault();
+  $('crop-stage').setPointerCapture(e.pointerId);
+  c.drag = { id: e.pointerId, mode, x0: e.clientX, y0: e.clientY, s0: cropToScreen(c.box) };
+  $('crop-stage').classList.add('dragging');
+}
+
+function onCropPointerMove(e) {
+  const c = cropState, d = c.drag;
+  if (!d || e.pointerId !== d.id) return;
+  c.box = cropFromScreen(cropDragBox(d.mode, d.s0, e.clientX - d.x0, e.clientY - d.y0));
+  cropSchedule();
+}
+
+function onCropPointerUp(e) {
+  const d = cropState.drag;
+  if (!d || e.pointerId !== d.id) return;
+  cropState.drag = null;
+  $('crop-stage').classList.remove('dragging');
+}
+
+async function applyCrop() {
+  const c = cropState;
+  if (!c.open || c.busy) return;
+  const img = c.img;
+  if (cropIsFull() && !img.cropped) { closeCropEditor(); return; }
+  c.busy = true;
+  $('crop-apply').classList.add('busy');
+  $('crop-stage').classList.add('busy');
+  cropRender();
+  try {
+    const r = await apiFetch(`/api/images/${img.id}/crop`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ ...c.box, aspect: cropAspect() }),
+    });
+    const updated = await r.json();
+    c.busy = false;
+    closeCropEditor();
+    adoptImageRow(img, updated);
+    ArtRium.toast(updated.cropped
+      ? `Zugeschnitten — ${updated.crop_width}×${updated.crop_height}`
+      : 'Zuschnitt entfernt');
+  } catch (err) {
+    ArtRium.toast('Zuschneiden fehlgeschlagen: ' + err.message, true);
+  } finally {
+    c.busy = false;
+    $('crop-apply').classList.remove('busy');
+    $('crop-stage').classList.remove('busy');
+    cropRender();
+  }
+}
+
+/** Esc cancels, Enter commits, arrows nudge the box (Shift: ten at a time). */
+function onCropKey(e) {
+  if (e.key === 'Escape') { closeCropEditor(); return; }
+  if (e.key === 'Enter') { e.preventDefault(); applyCrop(); return; }
+  const step = e.shiftKey ? 10 : 1;
+  const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0],
+              ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
+  if (!d || cropState.busy) return;
+  e.preventDefault();
+  cropState.box = cropFromScreen(cropDragBox('move', cropToScreen(cropState.box), d[0], d[1]));
+  cropRender();
+}
+
+function initCrop() {
+  const st = $('crop-stage');
+  st.addEventListener('pointerdown', onCropPointerDown);
+  st.addEventListener('pointermove', onCropPointerMove);
+  ['pointerup', 'pointercancel'].forEach(ev => st.addEventListener(ev, onCropPointerUp));
+  window.addEventListener('resize', () => { if (cropState.open) cropLayout(); });
+  // A row that never recorded its size learns it from the picture. The
+  // preview is scaled, but only the shape matters here — the server cuts
+  // from the file itself.
+  $('crop-img').addEventListener('load', () => {
+    const c = cropState, im = $('crop-img');
+    if (c.open && (!c.base.w || !c.base.h) && im.naturalWidth) {
+      c.base.w = im.naturalWidth;
+      c.base.h = im.naturalHeight;
+      cropLayout();
+    }
+  });
+}
 
 // ══════════════════════════════════════════════════════════
 // VORHER / NACHHER — the split compare
@@ -2981,30 +3532,39 @@ const cmpState = {
 
 /** The comparisons a picture offers: one per pass it has, each against the
  *  layer directly below it (the same rule as the hold-to-compare buttons),
- *  plus the whole stack when there is more than one. Every rendition above
- *  the original is at the delivered size; only the original is not.
+ *  plus the whole stack when there is more than one. Every rendition from the
+ *  crop up is at the delivered size; the original and the upscale are not.
+ *  The crop itself has no pair — two frames of different shape cannot be
+ *  wiped against each other.
  *  Plain words, no pass glyphs: all four with glyphs overflow a 390 px
  *  phone next to the ✕, and the last one ("Alles") was the one cut off. */
 const comparePairs = (img) => {
   if (!img) return [];
   const orig = { url: img.url, w: img.width, h: img.height };
+  const up = img.upscaled
+    ? { url: img.upscaled_url, w: img.upscale_width, h: img.upscale_height } : null;
   const top = deliveredSize(img);
   const at = (url) => ({ url, w: top.w, h: top.h });
+  // What the wand was rendered from — the same framing as everything above it.
+  const base = img.cropped ? at(img.cropped_url) : (up || orig);
   const pairs = [];
-  if (img.upscaled) {
-    pairs.push({ key: 'upscale', label: 'Vergrößern', before: orig, after: at(img.upscaled_url) });
+  if (up) {
+    pairs.push({ key: 'upscale', label: 'Vergrößern', before: orig, after: up });
   }
   if (img.enhanced) {
-    pairs.push({ key: 'enhance', label: 'Verbessern',
-      before: img.upscaled ? at(img.upscaled_url) : orig, after: at(img.enhanced_url) });
+    pairs.push({ key: 'enhance', label: 'Verbessern', before: base, after: at(img.enhanced_url) });
   }
   if (img.grained) {
     pairs.push({ key: 'grain', label: 'Korn',
-      before: img.enhanced ? at(img.enhanced_url) : img.upscaled ? at(img.upscaled_url) : orig,
-      after: at(img.primary_url) });
+      before: img.enhanced ? at(img.enhanced_url) : base, after: at(img.primary_url) });
   }
   if (pairs.length > 1) {
-    pairs.push({ key: 'all', label: 'Alles', before: orig, after: at(img.primary_url) });
+    // Across a crop the untouched original is a different frame, so it is
+    // shown through the crop's window (`vb`, fractions of the file) — the
+    // whole stack still lines up pixel for pixel.
+    pairs.push({ key: 'all', label: 'Alles',
+      before: img.cropped && img.crop ? { ...orig, vb: img.crop } : orig,
+      after: at(img.primary_url) });
   }
   return pairs;
 };
@@ -3104,8 +3664,10 @@ function renderComparePairs() {
     <button class="chip-btn ${p === c.pair ? 'on' : ''}" type="button"
             onclick="cmpSelectPair('${p.key}')">${ArtRium.escHtml(p.label)}</button>`).join('');
   // Sizes only where they differ — i.e. across an upscale, where "before" is
-  // being stretched and that is worth knowing while looking at it.
-  const { before: b, after: a } = c.pair;
+  // being stretched and that is worth knowing while looking at it. A side
+  // seen through a window is as big as the window, not as its file.
+  const seen = (s) => s.vb ? { w: Math.round(s.w * s.vb.w), h: Math.round(s.h * s.vb.h) } : s;
+  const b = seen(c.pair.before), a = seen(c.pair.after);
   const dims = b.w !== a.w || b.h !== a.h;
   $('cmp-label-before').innerHTML = `Vorher${dims ? `<small>${b.w}×${b.h}</small>` : ''}`;
   $('cmp-label-after').innerHTML = `Nachher${dims ? `<small>${a.w}×${a.h}</small>` : ''}`;
@@ -3180,11 +3742,24 @@ function cmpRender() {
   // Real layout size, not a scale() transform: the browser then rasterises
   // (and decodes) at the size actually shown, instead of magnifying a bitmap
   // made at the fitted size — which is blur, the one thing this must not add.
-  for (const id of ['cmp-before', 'cmp-after']) {
+  for (const [id, side] of [['cmp-before', c.pair.before], ['cmp-after', c.pair.after]]) {
     const el = $(id);
-    el.style.width = `${w}px`;
-    el.style.height = `${h}px`;
-    el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+    const vb = side.vb;
+    if (!vb) {
+      el.style.width = `${w}px`;
+      el.style.height = `${h}px`;
+      el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+      el.style.clipPath = '';
+      continue;
+    }
+    // Only the window is the picture: the whole file is laid out so that the
+    // window fills the box, and the rest of it is clipped away.
+    const fw = w / vb.w, fh = h / vb.h;
+    const ox = vb.x * fw, oy = vb.y * fh;
+    el.style.width = `${fw}px`;
+    el.style.height = `${fh}px`;
+    el.style.transform = `translate3d(${x - ox}px, ${y - oy}px, 0)`;
+    el.style.clipPath = `inset(${oy}px ${fw - ox - w}px ${fh - oy - h}px ${ox}px)`;
   }
   // The visible part of the picture. The line and the labels stay on it
   // rather than wandering into the margin beside a portrait frame.
@@ -3259,8 +3834,10 @@ async function cmpSwap(pair, tier, beforeUrl, afterUrl) {
 function cmpLoadFitted() {
   const c = cmpState;
   const pair = c.pair;
-  const px = Math.max(c.fit.w, c.fit.h) * cmpDpr();
-  cmpSwap(pair, 1, previewUrlAt(pair.before.url, px), previewUrlAt(pair.after.url, px))
+  // A windowed side is drawn larger than the box by the window's share.
+  const px = (s) => Math.max(c.fit.w / (s.vb ? s.vb.w : 1), c.fit.h / (s.vb ? s.vb.h : 1)) * cmpDpr();
+  cmpSwap(pair, 1, previewUrlAt(pair.before.url, px(pair.before)),
+          previewUrlAt(pair.after.url, px(pair.after)))
     .catch(() => {
       if (pair === c.pair && c.open) ArtRium.toast('Vergleich konnte nicht geladen werden', true);
     });
@@ -5178,11 +5755,11 @@ function makeCullInfo(img) {
   chips.className = 'cull-chips';
   const loraChips = (img.loras || []).map(l =>
     `${loraLabelByFilename[l.name] || l.name} ${Number(l.strength).toFixed(2)}`);
+  const shown = deliveredSize(img);
   const bits = [
     img.rating ? { t: '★'.repeat(img.rating), cls: 'star' } : null,
-    img.upscaled && img.upscale_width
-      ? { t: `${img.upscale_width}×${img.upscale_height} ⤢` }
-      : (img.width && img.height ? { t: `${img.width}×${img.height}` } : null),
+    shown.w && shown.h ? { t: `${shown.w}×${shown.h}${img.upscaled ? ' ⤢' : ''}` } : null,
+    img.cropped ? { t: '✂︎' } : null,
     img.enhanced ? { t: '🪄' } : null,
     img.grained ? { t: '🎞' } : null,
     img.workflow_name ? { t: img.workflow_name } : null,
@@ -5426,7 +6003,9 @@ async function commitCull() {
 // KEYBOARD
 // ══════════════════════════════════════════════════════════
 document.addEventListener('keydown', e => {
-  // The compare covers everything, the modal it came from included.
+  // The compare and the crop editor cover everything, the modal they came
+  // from included.
+  if (cropState.open) { onCropKey(e); return; }
   if (cmpState.open) { onCompareKey(e); return; }
   // The suggestions overlay sits on top of the modal, so it owns the keys
   // while it is open — Escape must close it, not the image behind it.
@@ -5470,6 +6049,7 @@ window.addEventListener('load', () => {
   initUpscaleControls();
   initModalSwipe();
   initCompare();
+  initCrop();
   fetchImages(true);
   loadLoraLabels();
   if ('serviceWorker' in navigator) {

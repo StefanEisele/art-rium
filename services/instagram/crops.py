@@ -27,7 +27,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
 from core.models import Image, InstagramPost, InstagramPostMedia, Video
-from services.image.rendition import primary_filename, primary_filepath, resolve_image_path
+from services.image.rendition import (
+    delivered_size,
+    primary_filename,
+    primary_filepath,
+    resolve_image_path,
+)
 from services.instagram.framing import (
     crop_rendition_name,
     frame_ratio,
@@ -43,11 +48,21 @@ def _child_ratio(
     images: dict[uuid.UUID, Image],
     videos: dict[uuid.UUID, Video],
 ) -> float | None:
-    """Aspect ratio of one carousel child, or None when it isn't recorded."""
-    row = images.get(m.image_id) if m.kind == "image" else videos.get(m.video_id)
-    if not row or not row.width or not row.height:
+    """Aspect ratio of one carousel child, or None when it isn't recorded.
+
+    For a picture that is the shape it is *published* in — a gallery crop can
+    turn a 9:16 render into a 5:4 one, and framing the post on the generated
+    size would then crop the crop.
+    """
+    if m.kind == "image":
+        img = images.get(m.image_id)
+        w, h = delivered_size(img) if img else (None, None)
+    else:
+        vid = videos.get(m.video_id)
+        w, h = (vid.width, vid.height) if vid else (None, None)
+    if not w or not h:
         return None
-    return row.width / row.height
+    return w / h
 
 
 async def _load_children(
@@ -93,10 +108,11 @@ async def ensure_post_crops(post: InstagramPost, db: AsyncSession) -> float:
 
     for m in items:
         img = images.get(m.image_id) if m.kind == "image" else None
+        shown_w, shown_h = delivered_size(img) if img else (0, 0)
         # Videos can't be cropped here (that means re-encoding), and an image
         # that is already the frame's shape needs no second file.
         if (m.kind != "image" or m.crop_mode != "fill" or not img
-                or not needs_crop(img.width or 0, img.height or 0, target)):
+                or not needs_crop(shown_w or 0, shown_h or 0, target)):
             m.crop_filename = None
             m.crop_filepath = None
             continue

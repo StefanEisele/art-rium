@@ -1,14 +1,15 @@
 """
-Image gallery API — list, search, tag, rate, delete, auto-enhance and grain
-ingested images.
+Image gallery API — list, search, tag, rate, delete, crop, auto-enhance and
+grain ingested images.
 
-The auto-enhance ("Zauberstab") and film-grain endpoints follow the same shape
-as the video tool's post-passes: a sibling file rendered from the rendition
-below it, a live preview so the strength can be judged before committing, and
-a delete that puts the previous state back. See services/image/enhance.py and
-services/image/grain.py for what they do to the pixels, and
-services/image/rendition.py for the order they stack in and who gets which
-rendition afterwards.
+The crop ("Zuschnitt"), auto-enhance ("Zauberstab") and film-grain endpoints
+follow the same shape as the video tool's post-passes: a sibling file rendered
+from the rendition below it, and a delete that puts the previous state back.
+The wand and the grain add a live preview so a strength can be judged before
+committing; the crop needs none, its editor draws the box over the picture.
+See services/image/crop.py, enhance.py and grain.py for what they do to the
+pixels, and services/image/rendition.py for the order they stack in and who
+gets which rendition afterwards.
 """
 import asyncio
 import logging
@@ -20,7 +21,7 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,6 +35,7 @@ from core.thumbnail import make_thumbnail, thumb_rel_path
 from services.comfy.client import poll_history, post_workflow, upload_image
 from services.comfy.progress import attach_live_stage
 from workers.comfy_listener import get_listener
+from services.image import crop as crop_service
 from services.image import grain as grain_service
 from services.image import preview as image_preview
 from services.image.enhance import (
@@ -45,12 +47,17 @@ from services.image.enhance import (
 )
 from services.image import upscale as upscale_service
 from services.image.rendition import (
+    crop_source_path,
+    cropped_path,
+    cropped_rel_path,
+    delivered_size,
     enhance_source_path,
     enhanced_path,
     enhanced_rel_path,
     grain_source_path,
     grained_path,
     grained_rel_path,
+    is_cropped,
     is_enhanced,
     is_grained,
     is_upscaled,
@@ -82,6 +89,16 @@ class EnhanceRequest(BaseModel):
 
 class GrainRequest(BaseModel):
     strength: int = grain_service.STRENGTH_DEFAULT
+
+
+class CropRequest(BaseModel):
+    # Fractions of the rendition the crop is cut from (the upscale when there
+    # is one) — the editor draws on exactly that picture.
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    w: float = Field(gt=0, le=1)
+    h: float = Field(gt=0, le=1)
+    aspect: str = crop_service.ASPECT_FREE
 
 
 class UpscaleRequest(BaseModel):
@@ -197,6 +214,28 @@ async def _refresh_thumbnail(img: Image) -> None:
     src = settings.storage_dir / primary_filepath(img)
     if src.exists():
         await make_thumbnail(src, settings.storage_dir / thumb_rel_path(img.filename))
+
+
+async def _rerender_crop(img: Image) -> None:
+    """Re-cut the crop after the rendition underneath it changed.
+
+    The crop is cut from the upscale when there is one, so finishing an
+    upscale — or removing it again — re-cuts the same framing from the new
+    source: the box is fractions, so it lands in the same place at any size.
+    Always call it *before* `_rerender_enhancement`, which reads its output.
+    """
+    if not img.crop_box:
+        return
+    src = crop_source_path(img)
+    if not src.exists():
+        return
+    rel, name = cropped_rel_path(img)
+    box = crop_service.CropBox.from_dict(img.crop_box)
+    exact, w, h = await crop_service.crop_file(src, settings.storage_dir / rel, box)
+    img.crop_box = exact.as_dict()
+    img.cropped_filename = name
+    img.cropped_filepath = rel
+    img.crop_width, img.crop_height = w, h
 
 
 async def _rerender_enhancement(img: Image) -> None:
@@ -452,6 +491,93 @@ async def _clear_grain(img: Image, db: AsyncSession) -> dict:
     return _serialize(img)
 
 
+# ── Zuschnitt (crop) ─────────────────────────────────────────────────────────
+# One layer above the upscale and below the wand: setting or clearing it
+# re-renders the two Pillow passes on top, the same way an upscale landing
+# does, so the delivered picture is always the framing with the tone on it.
+
+
+@router.post("/{image_id}/crop")
+async def crop_image_endpoint(
+    image_id: uuid.UUID,
+    body: CropRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Cut (or re-cut) the cropped rendition of this image.
+
+    Always from the rendition *below* it, so re-framing replaces the previous
+    crop instead of cropping the crop. A box that keeps the whole frame is no
+    crop at all and is routed to the same teardown the DELETE performs — one
+    way to end up uncropped, not two.
+    """
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    src = crop_source_path(img)
+    if not src.exists():
+        raise HTTPException(status_code=404, detail="Source image missing on disk")
+
+    box = crop_service.normalize(body.x, body.y, body.w, body.h, body.aspect)
+    src_w, src_h = await asyncio.to_thread(_png_size, src)
+    if crop_service.is_full_frame(src_w, src_h, box):
+        return await _clear_crop(img, db) if img.crop_box else _serialize(img)
+    if crop_service.is_too_small(src_w, src_h, box):
+        raise HTTPException(status_code=400, detail="Ausschnitt ist zu klein")
+
+    rel, name = cropped_rel_path(img)
+    exact, w, h = await crop_service.crop_file(src, settings.storage_dir / rel, box)
+
+    img.crop_box = exact.as_dict()
+    img.cropped_filename = name
+    img.cropped_filepath = rel
+    img.crop_width, img.crop_height = w, h
+    await _rerender_enhancement(img)
+    await _rerender_grain(img)
+    await _refresh_thumbnail(img)
+    await db.commit()
+    logger.info("Cropped image %s to %dx%d (%s)", image_id, w, h, box.aspect)
+    return _serialize(img)
+
+
+@router.delete("/{image_id}/crop")
+async def remove_crop(image_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Drop the cropped rendition and put the full frame back."""
+    img = await db.get(Image, image_id)
+    if not img:
+        raise HTTPException(status_code=404, detail="Image not found")
+    if not img.crop_box:
+        # Nothing to take off — and no reason to re-render the wand and the
+        # grain, which on an upscale is seconds each.
+        return _serialize(img)
+    return await _clear_crop(img, db)
+
+
+async def _clear_crop(img: Image, db: AsyncSession) -> dict:
+    """Delete the rendition file, null the columns, re-render what sat on it."""
+    path = cropped_path(img)
+    if path and path.exists():
+        try:
+            path.unlink()
+        except OSError as exc:
+            # Not fatal: the row decides which rendition is served.
+            logger.warning("Could not delete cropped rendition %s: %s", path, exc)
+
+    img.crop_box = None
+    img.cropped_filename = None
+    img.cropped_filepath = None
+    img.crop_width = None
+    img.crop_height = None
+    # The wand and the grain were rendered from the crop; without it they
+    # have to come from the full frame again, or the gallery would go on
+    # serving the old framing under a row that says it is gone.
+    await _rerender_enhancement(img)
+    await _rerender_grain(img)
+    await _refresh_thumbnail(img)
+    await db.commit()
+    return _serialize(img)
+
+
 # ── Diffusion upscale (Z-Image Turbo + Ultimate SD Upscale) ──────────────────
 # Unlike the wand and the grain, this one is GPU minutes rather than
 # milliseconds, so it runs as a background task with a polled progress entry —
@@ -651,10 +777,11 @@ async def _run_image_upscale(
                 img.upscale_denoise = denoise
                 img.upscale_model = model
                 img.upscale_width, img.upscale_height = out_w, out_h
-                # Both Pillow passes live on top of this and were rendered from
+                # The Pillow passes live on top of this and were rendered from
                 # the smaller source; re-run them in stack order so the delivery
                 # file carries them at the new size instead of dropping back to
                 # a stale small one.
+                await _rerender_crop(img)
                 await _rerender_enhancement(img)
                 await _rerender_grain(img)
                 await _refresh_thumbnail(img)
@@ -712,10 +839,11 @@ async def _clear_upscale(img: Image, db: AsyncSession) -> dict:
     img.upscale_width = None
     img.upscale_height = None
     _upscale_progress.pop(str(img.id), None)
-    # Both Pillow passes were rendered on top of the upscale; without it they
+    # The Pillow passes were rendered on top of the upscale; without it they
     # have to come from the original again, or the gallery would serve a 4K
     # rendition of a picture that is back to 1K. This is the one path that is
     # *meant* to take the image back to its original size.
+    await _rerender_crop(img)
     await _rerender_enhancement(img)
     await _rerender_grain(img)
     await _refresh_thumbnail(img)
@@ -765,7 +893,7 @@ def _delete_files(img: Image) -> None:
     disk (best-effort)."""
     rels = [
         img.filepath, img.enhanced_filepath, img.upscaled_filepath,
-        img.grained_filepath, img.thumbnail_path,
+        img.cropped_filepath, img.grained_filepath, img.thumbnail_path,
     ]
     for rel in filter(None, rels):
         path = settings.storage_dir / rel
@@ -780,7 +908,8 @@ def _delete_files(img: Image) -> None:
     # nothing points at them — but the ones belonging to a picture that no
     # longer exists should go with it.
     for rel in filter(None, [
-        img.filepath, img.enhanced_filepath, img.upscaled_filepath, img.grained_filepath,
+        img.filepath, img.enhanced_filepath, img.upscaled_filepath,
+        img.cropped_filepath, img.grained_filepath,
     ]):
         image_preview.purge(settings.previews_dir, Path(rel).stem)
 
@@ -794,12 +923,15 @@ def _serialize(img: Image) -> dict:
     # compare, and `primary_url` is the one that means "what viewers get".
     # The upscale goes into the marker too: it replaces the primary file and
     # re-cuts the thumbnail, so a cached copy of either would otherwise survive
-    # the change.
+    # the change. So does the crop — by its box, since re-framing rewrites
+    # every file above it under unchanged names.
     version = (
         f"?v=e{img.enhance_strength or 0}g{img.grain_strength or 0}u{img.upscale_scale or 0}"
-        if (is_enhanced(img) or is_grained(img) or is_upscaled(img))
+        f"c{crop_service.token(img.crop_box)}"
+        if (is_enhanced(img) or is_grained(img) or is_upscaled(img) or is_cropped(img))
         else ""
     )
+    shown_w, shown_h = delivered_size(img)
     return {
         "id": str(img.id),
         "filename": img.filename,
@@ -834,6 +966,20 @@ def _serialize(img: Image) -> dict:
         "upscaled_url": (
             f"/api/image/{img.upscaled_filename}{version}" if is_upscaled(img) else None
         ),
+        "cropped": is_cropped(img),
+        # Fractions of the rendition it was cut from (the upscale when there
+        # is one) plus the aspect it was drawn at — what the editor reopens on.
+        "crop": img.crop_box if is_cropped(img) else None,
+        "crop_width": img.crop_width,
+        "crop_height": img.crop_height,
+        "cropped_url": (
+            f"/api/image/{img.cropped_filename}{version}" if is_cropped(img) else None
+        ),
+        # The shape viewers get — `width`/`height` below stay the generated
+        # size, which the recipe and the upscale need. Anything laying the
+        # picture out (a frame, a preview request) wants these.
+        "delivered_width": shown_w,
+        "delivered_height": shown_h,
         "title": img.title,
         "prompt": img.prompt,
         "seed": img.seed,

@@ -6,9 +6,9 @@ the original, exactly as the video post-passes do. So every consumer has to
 decide which file it means, and the decision must be made in one place or the
 answers drift apart.
 
-There are four files at most, in a fixed order:
+There are five files at most, in a fixed order:
 
-    original  →  _upscaled  →  _enhanced  →  _grain
+    original  →  _upscaled  →  _crop  →  _enhanced  →  _grain
 
 Each pass reads the one before it. The order follows from what each pass is
 for, and from what it costs:
@@ -16,13 +16,18 @@ for, and from what it costs:
 - **The upscale reads the original, always.** It is a diffusion pass: handing
   it a tone-corrected or grained picture makes the model repaint the correction
   and reinterpret the noise as texture. It wants the rawest pixels there are.
-- **The two Pillow passes sit on top of it**, because they are cheap enough to
-  be re-rendered whenever anything below them moves — milliseconds against the
+- **The Pillow passes sit on top of it**, because they are cheap enough to be
+  re-rendered whenever anything below them moves — milliseconds against the
   upscale's GPU minutes. That asymmetry is the whole reason for this order: the
   expensive pass must never be invalidated by a cheap one. Playing with the
   wand or the grain slider on an upscaled image therefore re-renders *those*
   files at the upscale's resolution and leaves the upscale alone. Only removing
   the upscale itself takes the picture back to its original size.
+- **The crop is the first of them**, because it is geometry: the wand should
+  measure, and the grain should land on, the framing viewers actually get
+  (services/image/crop.py). It is also the only pass that changes the
+  picture's *shape* — `delivered_size` is what anything laying the picture
+  out has to ask, not `width`/`height`.
 - **Grain lands last**, at delivery resolution, and never reads its own output —
   so changing the strength replaces the grain instead of stacking a second
   field onto the first.
@@ -73,6 +78,11 @@ def is_grained(image: Image) -> bool:
     return bool(image.grained_filepath and image.grained_filename)
 
 
+def is_cropped(image: Image) -> bool:
+    """True when a cropped rendition exists for this image."""
+    return bool(image.cropped_filepath and image.cropped_filename and image.crop_box)
+
+
 def primary_filename(image: Image) -> str:
     """The bare filename of the rendition viewers should get.
 
@@ -83,6 +93,8 @@ def primary_filename(image: Image) -> str:
         return image.grained_filename
     if is_enhanced(image):
         return image.enhanced_filename
+    if is_cropped(image):
+        return image.cropped_filename
     return image.upscaled_filename if is_upscaled(image) else image.filename
 
 
@@ -92,7 +104,24 @@ def primary_filepath(image: Image) -> str:
         return image.grained_filepath
     if is_enhanced(image):
         return image.enhanced_filepath
+    if is_cropped(image):
+        return image.cropped_filepath
     return image.upscaled_filepath if is_upscaled(image) else image.filepath
+
+
+def delivered_size(image: Image) -> tuple[int | None, int | None]:
+    """Pixel size of the rendition viewers get — the shape to lay it out in.
+
+    Not `width`/`height`: those stay the size the picture was *generated* at,
+    which is what the recipe and the upscale need. The crop decides the shape
+    once there is one; the upscale only the scale. None where a pre-metadata
+    row never recorded a size.
+    """
+    if is_cropped(image) and image.crop_width and image.crop_height:
+        return image.crop_width, image.crop_height
+    if is_upscaled(image) and image.upscale_width and image.upscale_height:
+        return image.upscale_width, image.upscale_height
+    return image.width, image.height
 
 
 def resolve_image_path(image: Image) -> Path:
@@ -123,13 +152,14 @@ def enhanced_path(image: Image) -> Path | None:
 def enhance_source_path(image: Image) -> Path:
     """Absolute path of the file the enhance pass must read.
 
-    The upscaled rendition when there is one, the original otherwise — and
-    never a previous enhancement, so re-running at a new strength replaces the
-    correction instead of stacking it. Reading the upscale is what keeps the
-    wand from quietly dropping the image back to its generated size: the
-    correction is simply re-rendered at the larger resolution.
+    The crop when there is one, else the upscaled rendition, else the
+    original — and never a previous enhancement, so re-running at a new
+    strength replaces the correction instead of stacking it. Reading the
+    upscale is what keeps the wand from quietly dropping the image back to its
+    generated size, and reading the crop is what keeps it from undoing the
+    framing.
     """
-    return upscaled_path(image) or original_path(image)
+    return cropped_path(image) or upscaled_path(image) or original_path(image)
 
 
 def enhanced_rel_path(image: Image) -> tuple[str, str]:
@@ -177,13 +207,40 @@ def grained_path(image: Image) -> Path | None:
 def grain_source_path(image: Image) -> Path:
     """Absolute path of the file the grain pass must read.
 
-    The topmost rendition below it — enhanced, else upscaled, else the
-    original — but never the grain pass's own output, so changing the strength
-    replaces the grain instead of stacking a second field on top of the first.
-    Reading the enhanced/upscaled file is what keeps grain at delivery
-    resolution rather than leaving a small grained file to be stretched later.
+    The topmost rendition below it — enhanced, else cropped, else upscaled,
+    else the original — but never the grain pass's own output, so changing the
+    strength replaces the grain instead of stacking a second field on top of
+    the first. Reading the enhanced/upscaled file is what keeps grain at
+    delivery resolution rather than leaving a small grained file to be
+    stretched later.
     """
-    return enhanced_path(image) or upscaled_path(image) or original_path(image)
+    return (enhanced_path(image) or cropped_path(image)
+            or upscaled_path(image) or original_path(image))
+
+
+def cropped_path(image: Image) -> Path | None:
+    """Absolute path of the cropped rendition, or None if there isn't one."""
+    if not is_cropped(image):
+        return None
+    return settings.storage_dir / image.cropped_filepath
+
+
+def crop_source_path(image: Image) -> Path:
+    """Absolute path of the file the crop is cut from: the upscale when there
+    is one, the original otherwise — never a toned or grained rendition, which
+    are rendered from the crop rather than under it."""
+    return upscaled_path(image) or original_path(image)
+
+
+def cropped_rel_path(image: Image) -> tuple[str, str]:
+    """(storage-relative path, bare filename) the cropped rendition should use.
+
+    Named off the original like the others, so there is one crop file per
+    image however often it is re-framed or the upscale under it changes.
+    """
+    original = Path(image.filepath)
+    name = f"{original.stem}_crop.png"
+    return str(original.with_name(name)).replace("\\", "/"), name
 
 
 def grained_rel_path(image: Image) -> tuple[str, str]:

@@ -22,7 +22,7 @@ from core.db import get_db
 from core.models import InstagramPost, Image, Video
 from core.scheduling import companion_at
 from core.tasks import safe_create_task
-from services.image.rendition import primary_filename
+from services.image.rendition import delivered_size, primary_filename
 from services.instagram.collaborators import (
     DEFAULT_COLLABORATORS,
     MAX_COLLABORATORS,
@@ -276,6 +276,8 @@ def _serialize(
             }
             if m.kind == "image" and (images or {}).get(m.image_id):
                 img = images[m.image_id]
+                # The shape that gets published: a gallery crop changes it.
+                shown_w, shown_h = delivered_size(img)
                 item.update({
                     "id": str(img.id),
                     "filename": img.filename,
@@ -285,8 +287,8 @@ def _serialize(
                     # so the preview judges the framing on the real picture.
                     "primary_url": f"/api/image/{primary_filename(img)}",
                     "thumb_url": f"/api/image/{img.filename}/thumb",
-                    "width": img.width,
-                    "height": img.height,
+                    "width": shown_w,
+                    "height": shown_h,
                 })
             elif m.kind == "video" and (videos or {}).get(m.video_id):
                 vid = videos[m.video_id]

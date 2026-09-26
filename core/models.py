@@ -86,6 +86,16 @@ class Image(Base):
     upscaled_filepath: Mapped[str | None] = mapped_column(Text)         # relative to storage_dir
     upscale_width: Mapped[int | None] = mapped_column(Integer)
     upscale_height: Mapped[int | None] = mapped_column(Integer)
+    # Zuschnitt (services/image/crop.py) — cut from the upscale when there is
+    # one, the original otherwise, and read by the wand and the grain: geometry
+    # first, then tone. The box is fractions of that source, so it survives
+    # the upscale coming and going; crop_width/height are the file it produced,
+    # which is the shape the picture is delivered in.
+    crop_box: Mapped[dict | None] = mapped_column(JSONB)                # {x, y, w, h, aspect}; null = not cropped
+    cropped_filename: Mapped[str | None] = mapped_column(String(512))   # basename, sibling of `filename`
+    cropped_filepath: Mapped[str | None] = mapped_column(Text)          # relative to storage_dir
+    crop_width: Mapped[int | None] = mapped_column(Integer)
+    crop_height: Mapped[int | None] = mapped_column(Integer)
     # Film grain (services/image/grain.py) — the last derived rendition: it
     # renders on top of the enhancement / upscale when there is one (grain
     # belongs at the delivery resolution), as the video pass does too.

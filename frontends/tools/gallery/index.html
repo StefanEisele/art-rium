@@ -1015,6 +1015,125 @@
       text-decoration: none; text-align: center;
     }
 
+    /* ══ Vorher / Nachher — the split compare ═══════════════════════════
+       Full screen rather than inside the modal's picture box: what an
+       upscale changes only shows zoomed in, and the modal gives the picture
+       60 % of a phone. Two renditions share one box — "after" whole, "before"
+       on top of it clipped to everything left of the line. */
+    .cmp-open-btn {
+      height: 34px; padding: 0 13px 0 11px;
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--surface2); color: var(--text);
+      border: 1.5px solid var(--border-strong); border-radius: var(--radius-pill);
+      font-family: inherit; font-size: 13px; font-weight: 700;
+      cursor: pointer; -webkit-tap-highlight-color: transparent;
+      transition: border-color .12s;
+    }
+    .cmp-open-btn:hover { border-color: var(--accent-border); }
+    .cmp-open-btn .glyph { color: var(--accent); font-size: 15px; line-height: 1; }
+
+    .cmp {
+      position: fixed; inset: 0; z-index: 150;
+      /* Opaque, not a dim overlay: anything ghosting through behind the
+         picture is noise in exactly the thing being judged. */
+      background: var(--bg);
+      display: none; flex-direction: column;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      overscroll-behavior: contain;
+    }
+    .cmp.open { display: flex; }
+    .cmp-bar {
+      flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+      padding: 10px 12px;
+    }
+    .cmp-bar.bottom { justify-content: space-between; }
+    .cmp-pairs {
+      flex: 1; min-width: 0; display: flex; gap: 6px;
+      overflow-x: auto; scrollbar-width: none;
+    }
+    .cmp-pairs::-webkit-scrollbar { display: none; }
+    .cmp-pairs .chip-btn { flex-shrink: 0; }
+    #cmp-zoom { min-width: 66px; font-variant-numeric: tabular-nums; }
+    /* Full resolution on its way — a pulse on the control that asked for it. */
+    #cmp-zoom.busy { animation: wand-pulse .9s ease-in-out infinite; }
+
+    .cmp-stage {
+      position: relative; flex: 1 1 auto; min-height: 0;
+      overflow: hidden; contain: layout paint;
+      touch-action: none; overscroll-behavior: contain;
+      user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    }
+    /* `touch-action` is not inherited, and the browser asks the element under
+       the finger — the line, a label — not the stage. */
+    .cmp-stage * { touch-action: none; }
+    .cmp-stage.zoomed { cursor: grab; }
+    .cmp-stage.zoomed:active { cursor: grabbing; }
+    .cmp-img {
+      position: absolute; left: 0; top: 0;
+      max-width: none; transform-origin: 0 0;
+      pointer-events: none; -webkit-user-drag: none;
+      transition: opacity .15s;
+    }
+    /* A pair that has not arrived yet: the previous one stays as a dim
+       placeholder rather than passing itself off as the new comparison. */
+    .cmp-stage.stale .cmp-img { opacity: .25; }
+    .cmp-clip { position: absolute; inset: 0; pointer-events: none; }
+    .cmp-line {
+      position: absolute; left: 0; top: 0;
+      width: 2px; margin-left: -1px;
+      background: #fff;
+      box-shadow: 0 0 0 1px rgba(0,0,0,.35), 0 0 12px rgba(0,0,0,.45);
+      cursor: ew-resize;
+    }
+    /* A 2 px line is not something a thumb can hit — the grab zone is 48. */
+    .cmp-line::before {
+      content: ''; position: absolute; top: 0; bottom: 0; left: -23px; width: 48px;
+    }
+    .cmp-knob {
+      position: absolute; top: 50%; left: 50%;
+      width: 42px; height: 42px; margin: -21px 0 0 -21px;
+      border-radius: 50%; border: 2px solid #fff;
+      background: rgba(10,10,12,.72); color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px; font-weight: 800; letter-spacing: 3px; text-indent: 3px;
+      box-shadow: 0 2px 10px rgba(0,0,0,.5);
+      backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    }
+    /* Each label lives on its own side of the line — "before" inside the
+       clip, "after" underneath it — so the wipe cuts them off with the
+       picture instead of either one floating over the wrong half. */
+    .cmp-label {
+      position: absolute; left: 0; top: 0;
+      padding: 4px 9px; border-radius: var(--radius-pill);
+      background: rgba(10,10,12,.68); color: #fff;
+      font-size: 11px; font-weight: 700; letter-spacing: .3px;
+      white-space: nowrap; pointer-events: none;
+    }
+    .cmp-label small { font-size: 10px; font-weight: 500; color: rgba(255,255,255,.72); margin-left: 5px; }
+    .cmp-note {
+      position: absolute; left: 50%; bottom: 16px;
+      transform: translateX(-50%);
+      max-width: calc(100% - 32px);
+      padding: 7px 13px; border-radius: var(--radius-pill);
+      background: rgba(10,10,12,.78); color: var(--text);
+      font-size: 12px; font-weight: 600; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
+      pointer-events: none; opacity: 0; transition: opacity .3s;
+    }
+    .cmp-note.show { opacity: 1; }
+    .cmp-note.loading { top: 50%; bottom: auto; transform: translate(-50%, -50%); }
+    .cmp-note.loading.show { animation: wand-pulse 1.1s ease-in-out infinite; }
+    /* Only for the jumps (double-tap, the Vorher/Nachher buttons) — during a
+       drag or a pinch everything is written directly, with nothing in the way. */
+    .cmp-stage.animating .cmp-img {
+      transition: width .24s cubic-bezier(.2,.8,.3,1), height .24s cubic-bezier(.2,.8,.3,1),
+                  transform .24s cubic-bezier(.2,.8,.3,1), opacity .15s;
+    }
+    .cmp-stage.animating .cmp-clip  { transition: clip-path .24s cubic-bezier(.2,.8,.3,1); }
+    .cmp-stage.animating .cmp-line,
+    .cmp-stage.animating .cmp-label { transition: transform .24s cubic-bezier(.2,.8,.3,1); }
+
     /* ══ Aussortieren — the swipe deck ══════════════════════════════════
        A full-screen card stack for going through the library quickly: drag
        right to mark for deletion, left to keep. Everything that moves during
@@ -1283,7 +1402,15 @@
       <button class="nav-btn" id="nav-prev" onclick="navigate(-1)" title="Previous">‹</button>
       <button class="nav-btn" id="nav-next" onclick="navigate(1)"  title="Next">›</button>
     </div>
-    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-nav">
+      <!-- Only for a picture that has a pass to compare against; the label
+           stays "Vergleich" whatever the pass, the viewer names the pair. -->
+      <button class="cmp-open-btn" id="cmp-open-btn" type="button" onclick="openCompare()"
+              title="Vorher / Nachher vergleichen" style="display:none">
+        <span class="glyph">◧</span><span>Vergleich</span>
+      </button>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
   </div>
 
   <div class="modal-image-wrap" id="modal-image-wrap">
@@ -1340,7 +1467,11 @@
       <div class="fx-row">
         <button class="wand-btn" id="upscale-btn" onclick="onUpscaleClick()" title="Bild vergrößern">⤢</button>
         <span class="fx-pct" id="upscale-size"></span>
-        <button class="compare-btn" id="upscale-compare-btn" style="display:none">Klein halten</button>
+        <!-- Not a hold-to-compare like the other two passes: at modal size an
+             upscale and its original are the same picture. The difference
+             is in the pixels, so this opens the zoomable split compare. -->
+        <button class="compare-btn" id="upscale-compare-btn" style="display:none"
+                onclick="openCompare('upscale')">◧ Vergleichen</button>
       </div>
       <div class="fx-chips" id="upscale-chips"></div>
       <div class="us-panel" id="upscale-panel" style="display:none">
@@ -1454,6 +1585,40 @@
       <button class="btn primary" id="save-btn" onclick="saveModal()">Save</button>
     </div>
 
+  </div>
+</div>
+
+<!-- ── Vorher / Nachher ──
+     Above the picture modal it is opened from. Nothing in here changes or
+     deletes anything: it is a place to look, so there is no swipe verdict
+     to trip over while dragging the line. -->
+<div class="cmp" id="cmp" aria-hidden="true">
+  <div class="cmp-bar">
+    <div class="cmp-pairs" id="cmp-pairs"></div>
+    <button class="modal-close" onclick="closeCompare()" title="Schließen (Esc)">✕</button>
+  </div>
+  <div class="cmp-stage" id="cmp-stage">
+    <img class="cmp-img" id="cmp-after" alt="Nachher" draggable="false">
+    <div class="cmp-label" id="cmp-label-after"></div>
+    <div class="cmp-clip" id="cmp-clip">
+      <img class="cmp-img" id="cmp-before" alt="Vorher" draggable="false">
+      <div class="cmp-label" id="cmp-label-before"></div>
+    </div>
+    <div class="cmp-line" id="cmp-line"><div class="cmp-knob">‹›</div></div>
+    <div class="cmp-note loading" id="cmp-loading">lädt…</div>
+    <div class="cmp-note" id="cmp-hint"></div>
+  </div>
+  <div class="cmp-bar bottom">
+    <!-- Tapping these back and forth is a blink comparison — often the
+         quicker way to spot what changed than wiping. -->
+    <div class="chip-group" id="cmp-seg">
+      <button class="chip-btn" type="button" data-show="before" onclick="cmpShow('before')">Vorher</button>
+      <button class="chip-btn" type="button" data-show="split" onclick="cmpShow('split')"
+              title="Geteilt">◧</button>
+      <button class="chip-btn" type="button" data-show="after" onclick="cmpShow('after')">Nachher</button>
+    </div>
+    <button class="chip-btn" id="cmp-zoom" type="button" onclick="cmpZoomToggle()"
+            title="Pixelgenau (100 %) ↔ Einpassen"></button>
   </div>
 </div>
 
@@ -1654,7 +1819,10 @@ async function loadLoraLabels() {
 // The existing query is preserved, not dropped: it carries the `?v=` rendition
 // marker, and these responses are cached `immutable`, so without it a
 // re-enhanced picture would keep showing the browser's copy of the old one.
-const previewUrlAt = (rawUrl, devicePx) => {
+//
+// `hq` asks for the detail tier (q95 instead of q58) — only the zoomed
+// before/after wants it; see services/image/preview.py for why.
+const previewUrlAt = (rawUrl, devicePx, { hq = false } = {}) => {
   if (!rawUrl) return '';
   const [path, query] = rawUrl.split('?');
   // Both shapes: the plain rendition URL (`primary_url`, `enhanced_url`) and
@@ -1665,7 +1833,7 @@ const previewUrlAt = (rawUrl, devicePx) => {
   const m = /^\/api\/image\/([^/]+)(?:\/preview)?$/.exec(path);
   if (!m) return withAuth(rawUrl);
   const w = Math.max(1, Math.round(devicePx));
-  return withAuth(`/api/image/${m[1]}/preview?${query ? query + '&' : ''}w=${w}`);
+  return withAuth(`/api/image/${m[1]}/preview?${query ? query + '&' : ''}w=${w}${hq ? '&hq=1' : ''}`);
 };
 
 // CSS pixels are not device pixels: 390 px at dpr 3 needs 1170 real ones, or
@@ -2254,6 +2422,9 @@ const renderFxBar = (img) => {
     btn.classList.toggle('on', openFxPass === kind);
     $(`fx-panel-${kind}`).classList.toggle('open', openFxPass === kind);
   }
+  // Every pass change comes through here, so the compare button cannot
+  // outlive the last pass it had something to compare.
+  $('cmp-open-btn').style.display = comparePairs(img).length ? '' : 'none';
 };
 
 const toggleFxPass = (kind) => {
@@ -2340,18 +2511,19 @@ const previewEnhance = (strength) => {
  *   original → upscaled → enhanced → grained
  * (services/image/rendition.py), so each compare button names the layer
  * directly *below* its own pass:
- *   unupscaled — the untouched original
  *   unenhanced — the upscale if there is one, the original otherwise
  *   ungrained  — enhanced, else upscaled, else the original
  *   primary    — what viewers actually get, i.e. the top of the stack
+ * The upscale has no hold here: at modal size it and the original are the
+ * same picture, so its button opens the split compare instead (comparePairs
+ * follows the same one-layer-below rule).
  */
 const showRendition = (which) => {
   const img = state.modal.image;
   if (!img) return;
   // Showing the layer directly below a pass is what makes the comparison read
   // as that one pass's contribution — not the whole stack undone.
-  const src = which === 'unupscaled' ? img.url
-            : which === 'unenhanced' ? (img.upscaled_url || img.url)
+  const src = which === 'unenhanced' ? (img.upscaled_url || img.url)
             : which === 'ungrained'  ? (img.enhanced_url || img.upscaled_url || img.url)
             : (img.primary_url || img.url);
   // Through the preview endpoint like everything else on screen: a compare
@@ -2526,7 +2698,7 @@ const renderUpscaleUI = (img) => {
   $('upscale-hint').textContent = running
     ? ''
     : on
-      ? 'Doppeltippen zoomt in voller Auflösung hinein. '
+      ? '◧ Vergleichen legt Original und Vergrößerung übereinander — reinzoomen, Linie ziehen. '
         + '⤢ entfernt die Vergrößerung wieder — Zauberstab und Korn bleiben erhalten.'
       : 'Vergrößert das Originalbild und zeichnet dabei echte Details nach (Z-Image, kachelweise). '
         + 'Zauberstab und Korn werden danach neu darüber gelegt. Dauert Minuten.';
@@ -2730,7 +2902,7 @@ const pollUpscale = async (imageId) => {
         refreshGridItem(state.modal.index, updated);
       }
     } catch (e) { /* the toast already said what happened */ }
-    if (p.phase === 'done') ArtRium.toast('Vergrößert ✓');
+    if (p.phase === 'done') ArtRium.toast('Vergrößert ✓ — ◧ Vergleich zeigt Vorher/Nachher');
   }
 };
 
@@ -2755,15 +2927,577 @@ const initUpscaleControls = () => {
     // The band line and the ETA both depend on it, so the whole readout.
     renderUpscalePanel();
   });
-  // Hold to see the picture at its original size — the comparison that matters
-  // is the detail the pass painted, so it goes against the rendition below.
-  const cmp = $('upscale-compare-btn');
-  cmp.addEventListener('pointerdown', (e) => { e.preventDefault(); showRendition('unupscaled'); });
-  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
-    cmp.addEventListener(ev, () => showRendition('primary'))
-  );
-  cmp.addEventListener('contextmenu', (e) => e.preventDefault());
+  // Its compare button is a plain click into the split view (openCompare),
+  // not a hold like the wand's and the grain's — see the markup.
 };
+
+// ══════════════════════════════════════════════════════════
+// VORHER / NACHHER — the split compare
+// ══════════════════════════════════════════════════════════
+// Two renditions of the open picture in one box: "after" whole, "before" on
+// top of it, clipped to everything left of a line. Dragging the line wipes
+// between them; pinch, double-tap and the wheel zoom both at once.
+//
+// Three decisions worth keeping:
+// - The line lives in SCREEN space. Zooming and panning move the picture
+//   under it, never the line, so moving on to the next detail keeps the
+//   comparison where it was put.
+// - Both halves always show the same tier of file. Zooming in fetches both at
+//   native size from the detail tier (q95 — the ordinary q58 preview
+//   measurably smooths away the grain an upscale is judged on) and swaps them
+//   in together. A sharp "after" next to a still-soft "before" would flatter
+//   the pass, which is the one thing a compare must not do.
+// - "Before" is stretched to the "after"'s box by the browser — what zooming
+//   into the original would show. For an upscale that is the honest
+//   reference: the pass has to beat plain enlargement, not a thumbnail.
+
+const CMP_LINE_GRAB = 24;       // px either side of the line that pick it up
+const CMP_DRAG_SLOP = 6;        // px a drag off the line travels before it moves it
+const CMP_DETAIL_AT = 1.25;     // zoom past which the native-size files are fetched
+const CMP_ANIM_MS = 260;
+
+const cmpState = {
+  open: false,
+  pairs: [],
+  pair: null,
+  split: 0.5,                   // where the line is, as a fraction of the stage width
+  lineX: 0,                     // …and where it was drawn, after clamping to the picture
+  s: 1, tx: 0, ty: 0,           // zoom relative to the fitted size; pan in stage px
+  W: 0, H: 0,                   // stage size
+  fit: { x: 0, y: 0, w: 0, h: 0 },
+  rect: null,                   // stage's client rect, taken when a gesture starts
+  token: 0,                     // bumps on open/close/pair change; older loads drop out
+  shown: { key: null, tier: 0 },  // what is on screen: pair key, 1 = fitted, 2 = native
+  detailFor: null,              // pair key whose native-size files have been asked for
+  pointers: new Map(),
+  mode: null,                   // 'split' | 'pan' | 'pinch' | 'idle'
+  drag: null,
+  pinch: null,
+  lastTap: null,
+  raf: 0,
+  animTimer: null,
+  hintTimer: null,
+};
+
+/** The comparisons a picture offers: one per pass it has, each against the
+ *  layer directly below it (the same rule as the hold-to-compare buttons),
+ *  plus the whole stack when there is more than one. Every rendition above
+ *  the original is at the delivered size; only the original is not.
+ *  Plain words, no pass glyphs: all four with glyphs overflow a 390 px
+ *  phone next to the ✕, and the last one ("Alles") was the one cut off. */
+const comparePairs = (img) => {
+  if (!img) return [];
+  const orig = { url: img.url, w: img.width, h: img.height };
+  const top = deliveredSize(img);
+  const at = (url) => ({ url, w: top.w, h: top.h });
+  const pairs = [];
+  if (img.upscaled) {
+    pairs.push({ key: 'upscale', label: 'Vergrößern', before: orig, after: at(img.upscaled_url) });
+  }
+  if (img.enhanced) {
+    pairs.push({ key: 'enhance', label: 'Verbessern',
+      before: img.upscaled ? at(img.upscaled_url) : orig, after: at(img.enhanced_url) });
+  }
+  if (img.grained) {
+    pairs.push({ key: 'grain', label: 'Korn',
+      before: img.enhanced ? at(img.enhanced_url) : img.upscaled ? at(img.upscaled_url) : orig,
+      after: at(img.primary_url) });
+  }
+  if (pairs.length > 1) {
+    pairs.push({ key: 'all', label: 'Alles', before: orig, after: at(img.primary_url) });
+  }
+  return pairs;
+};
+
+const cmpDpr = () => Math.min(window.devicePixelRatio || 1, 3);
+const cmpZoomed = () => cmpState.s > 1.01;
+
+// Enough headroom to see an upscale's pixels as blocks — twice its own size
+// in CSS pixels — but never less than 4x.
+const cmpMaxScale = () => {
+  const a = cmpState.pair.after;
+  return Math.min(16, Math.max(4, 2 * a.w / (cmpState.fit.w || 1)));
+};
+
+// The zoom at which one pixel of the "after" file is one device pixel: 100 %.
+const cmpScale100 = () => cmpState.pair.after.w / ((cmpState.fit.w || 1) * cmpDpr());
+
+/** Where the modal is looking, if it is zoomed: the picture point in the
+ *  middle of its box (0..1) and how wide the whole picture is on screen —
+ *  so the compare opens on the same detail, at the same size. */
+function modalView() {
+  if (!isZoomed()) return null;
+  const el = $('modal-img');
+  const w = el.clientWidth, h = el.clientHeight;
+  if (!w || !h) return null;
+  return {
+    nx: 0.5 - zoom.tx / (zoom.scale * w),
+    ny: 0.5 - zoom.ty / (zoom.scale * h),
+    shownW: w * zoom.scale,
+  };
+}
+
+function openCompare(key) {
+  const img = state.modal.image;
+  const pairs = comparePairs(img);
+  if (!pairs.length) return;
+  // Read before the viewer covers the modal.
+  const from = modalView();
+
+  const c = cmpState;
+  c.token++;
+  c.pairs = pairs;
+  c.pair = pairs.find(p => p.key === key) || pairs[0];
+  c.split = 0.5;
+  c.shown = { key: null, tier: 0 };
+  c.detailFor = null;
+  c.pointers.clear();
+  c.mode = null; c.drag = null; c.lastTap = null;
+  c.open = true;
+  // Shown before it is measured — a display:none stage is 0 x 0.
+  $('cmp').classList.add('open');
+  $('cmp').setAttribute('aria-hidden', 'false');
+  cmpMeasure();
+  if (from) cmpCentreOn(from.nx, from.ny, from.shownW / c.fit.w);
+  else { c.s = 1; c.tx = 0; c.ty = 0; cmpClamp(); }
+
+  renderComparePairs();
+  cmpRender();
+  cmpLoadFitted();
+  if (c.s >= CMP_DETAIL_AT) cmpEnsureDetail();
+  cmpShowHint();
+}
+
+function closeCompare() {
+  const c = cmpState;
+  c.open = false;
+  c.token++;
+  c.pointers.clear();
+  c.mode = null; c.drag = null;
+  cmpHideHint();
+  $('cmp').classList.remove('open');
+  $('cmp').setAttribute('aria-hidden', 'true');
+  // Dropped rather than kept decoded behind a closed viewer: at native size
+  // these are tens of megapixels each.
+  $('cmp-before').removeAttribute('src');
+  $('cmp-after').removeAttribute('src');
+}
+
+function cmpSelectPair(key) {
+  const c = cmpState;
+  const next = c.pairs.find(p => p.key === key);
+  if (!next || next === c.pair) return;
+  c.token++;
+  c.pair = next;
+  c.detailFor = null;
+  // The view stays put — the same detail under a different pass is the
+  // whole point of switching here instead of closing and reopening.
+  cmpRelayout();
+  renderComparePairs();
+  cmpLoadFitted();
+  if (c.s >= CMP_DETAIL_AT) cmpEnsureDetail();
+}
+
+function renderComparePairs() {
+  const c = cmpState;
+  $('cmp-pairs').innerHTML = c.pairs.map(p => `
+    <button class="chip-btn ${p === c.pair ? 'on' : ''}" type="button"
+            onclick="cmpSelectPair('${p.key}')">${ArtRium.escHtml(p.label)}</button>`).join('');
+  // Sizes only where they differ — i.e. across an upscale, where "before" is
+  // being stretched and that is worth knowing while looking at it.
+  const { before: b, after: a } = c.pair;
+  const dims = b.w !== a.w || b.h !== a.h;
+  $('cmp-label-before').innerHTML = `Vorher${dims ? `<small>${b.w}×${b.h}</small>` : ''}`;
+  $('cmp-label-after').innerHTML = `Nachher${dims ? `<small>${a.w}×${a.h}</small>` : ''}`;
+}
+
+// ── Geometry ────────────────────────────────────────────────────────────────
+// The picture's box is `fit` (contain-fitted into the stage) scaled by `s`
+// about its top-left corner and shifted by (tx, ty). Both images get exactly
+// this box; the "after" file's aspect decides it.
+
+function cmpMeasure() {
+  const c = cmpState;
+  const st = $('cmp-stage');
+  c.W = st.clientWidth; c.H = st.clientHeight;
+  const a = c.pair.after;
+  const aw = a.w || 1, ah = a.h || 1;
+  const k = Math.min(c.W / aw, c.H / ah);
+  const w = aw * k, h = ah * k;
+  c.fit = { x: (c.W - w) / 2, y: (c.H - h) / 2, w, h };
+}
+
+// Smaller than the stage on an axis: centred on it. Bigger: no gap at
+// either edge.
+function cmpClamp() {
+  const c = cmpState;
+  const w = c.fit.w * c.s, h = c.fit.h * c.s;
+  c.tx = w <= c.W ? (c.W - w) / 2 - c.fit.x
+                  : Math.min(-c.fit.x, Math.max(c.W - w - c.fit.x, c.tx));
+  c.ty = h <= c.H ? (c.H - h) / 2 - c.fit.y
+                  : Math.min(-c.fit.y, Math.max(c.H - h - c.fit.y, c.ty));
+}
+
+// Scale about a stage point, so what is under the finger stays under it.
+function cmpZoomAbout(px, py, next) {
+  const c = cmpState;
+  const lx = (px - c.fit.x - c.tx) / c.s;
+  const ly = (py - c.fit.y - c.ty) / c.s;
+  c.s = Math.max(1, Math.min(cmpMaxScale(), next));
+  c.tx = px - c.fit.x - lx * c.s;
+  c.ty = py - c.fit.y - ly * c.s;
+  cmpClamp();
+  if (c.s >= CMP_DETAIL_AT) cmpEnsureDetail();
+}
+
+// Put picture point (nx, ny) — fractions of the picture — in the middle.
+function cmpCentreOn(nx, ny, s) {
+  const c = cmpState;
+  c.s = Math.max(1, Math.min(cmpMaxScale(), s));
+  c.tx = c.W / 2 - c.fit.x - nx * c.fit.w * c.s;
+  c.ty = c.H / 2 - c.fit.y - ny * c.fit.h * c.s;
+  cmpClamp();
+}
+
+// A rotated phone or a resized window: same picture point in the middle, at
+// the same size on screen.
+function cmpRelayout() {
+  const c = cmpState;
+  const nx = (c.W / 2 - c.fit.x - c.tx) / (c.fit.w * c.s);
+  const ny = (c.H / 2 - c.fit.y - c.ty) / (c.fit.h * c.s);
+  const shownW = c.fit.w * c.s;
+  cmpMeasure();
+  cmpCentreOn(nx, ny, shownW / (c.fit.w || 1));
+  cmpRender();
+}
+
+function cmpRender() {
+  const c = cmpState;
+  c.raf = 0;
+  if (!c.open) return;
+  const x = c.fit.x + c.tx, y = c.fit.y + c.ty;
+  const w = c.fit.w * c.s, h = c.fit.h * c.s;
+  // Real layout size, not a scale() transform: the browser then rasterises
+  // (and decodes) at the size actually shown, instead of magnifying a bitmap
+  // made at the fitted size — which is blur, the one thing this must not add.
+  for (const id of ['cmp-before', 'cmp-after']) {
+    const el = $(id);
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+    el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  }
+  // The visible part of the picture. The line and the labels stay on it
+  // rather than wandering into the margin beside a portrait frame.
+  const left = Math.max(0, x), right = Math.min(c.W, x + w);
+  const top = Math.max(0, y), bottom = Math.min(c.H, y + h);
+  c.lineX = Math.max(left, Math.min(right, c.split * c.W));
+  $('cmp-clip').style.clipPath = `inset(0 ${c.W - c.lineX}px 0 0)`;
+  const line = $('cmp-line');
+  line.style.top = `${top}px`;
+  line.style.height = `${bottom - top}px`;
+  line.style.transform = `translate3d(${c.lineX}px, 0, 0)`;
+  $('cmp-label-before').style.transform = `translate3d(${left + 10}px, ${top + 10}px, 0)`;
+  $('cmp-label-after').style.transform =
+    `translate3d(${right - 10}px, ${top + 10}px, 0) translateX(-100%)`;
+
+  $('cmp-stage').classList.toggle('zoomed', cmpZoomed());
+  $('cmp-stage').classList.toggle('stale', c.shown.key !== c.pair.key);
+  $('cmp-loading').classList.toggle('show', c.shown.key !== c.pair.key);
+  $('cmp-zoom').textContent = `${Math.round(c.s / cmpScale100() * 100)} %`;
+  $('cmp-zoom').classList.toggle('busy', cmpDetailPending());
+  const seg = c.lineX >= right - 0.5 ? 'before' : c.lineX <= left + 0.5 ? 'after' : 'split';
+  $('cmp-seg').querySelectorAll('.chip-btn').forEach(b =>
+    b.classList.toggle('on', b.dataset.show === seg));
+}
+
+const cmpSchedule = () => {
+  if (!cmpState.raf) cmpState.raf = requestAnimationFrame(cmpRender);
+};
+
+// The jumps get a transition; drags and pinches never do.
+function cmpAnimate() {
+  const st = $('cmp-stage');
+  st.classList.add('animating');
+  clearTimeout(cmpState.animTimer);
+  cmpState.animTimer = setTimeout(() => st.classList.remove('animating'), CMP_ANIM_MS);
+}
+
+// ── Loading ─────────────────────────────────────────────────────────────────
+
+const cmpFetch = (url) => new Promise((resolve, reject) => {
+  const im = new window.Image();
+  im.decoding = 'async';
+  im.onload = () => Promise.resolve(im.decode ? im.decode() : null)
+    .catch(() => {}).then(() => resolve(im));
+  im.onerror = () => reject(new Error('Bild konnte nicht geladen werden'));
+  im.src = url;
+});
+
+/** Load one tier of both halves and put them on screen together — or not at
+ *  all, if the viewer has moved on, or something better already landed. The
+ *  decoded elements themselves go into the page, so the swap cannot flash. */
+async function cmpSwap(pair, tier, beforeUrl, afterUrl) {
+  const token = cmpState.token;
+  const [b, a] = await Promise.all([cmpFetch(beforeUrl), cmpFetch(afterUrl)]);
+  const c = cmpState;
+  if (token !== c.token) return false;
+  if (c.shown.key === pair.key && c.shown.tier >= tier) return false;
+  for (const [id, im] of [['cmp-before', b], ['cmp-after', a]]) {
+    const old = $(id);
+    im.id = id;
+    im.className = old.className;
+    im.alt = old.alt;
+    im.draggable = false;
+    old.replaceWith(im);
+  }
+  c.shown = { key: pair.key, tier };
+  cmpRender();
+  return true;
+}
+
+// Sized for the fitted box in device pixels — each file snaps to its own rung.
+function cmpLoadFitted() {
+  const c = cmpState;
+  const pair = c.pair;
+  const px = Math.max(c.fit.w, c.fit.h) * cmpDpr();
+  cmpSwap(pair, 1, previewUrlAt(pair.before.url, px), previewUrlAt(pair.after.url, px))
+    .catch(() => {
+      if (pair === c.pair && c.open) ArtRium.toast('Vergleich konnte nicht geladen werden', true);
+    });
+}
+
+// Each file at its own native size, from the detail tier. Asked for once per
+// pair and kept after zooming back out: zooming in again is then instant.
+function cmpEnsureDetail() {
+  const c = cmpState;
+  const pair = c.pair;
+  if (!pair || c.detailFor === pair.key) return;
+  c.detailFor = pair.key;
+  const native = (side) => previewUrlAt(side.url, Math.max(side.w, side.h), { hq: true });
+  cmpSchedule();   // the zoom button starts pulsing
+  cmpSwap(pair, 2, native(pair.before), native(pair.after))
+    .catch(() => {
+      // Worth another try on the next zoom; the fitted pair is still up.
+      if (pair === c.pair) c.detailFor = null;
+      if (c.open) ArtRium.toast('Volle Auflösung konnte nicht geladen werden', true);
+      cmpSchedule();
+    });
+}
+
+// Asked for and not on screen yet — derived, so a pair switch mid-load can
+// never leave the button pulsing for a request nobody is waiting on.
+const cmpDetailPending = () => {
+  const c = cmpState;
+  return c.detailFor === c.pair.key && !(c.shown.key === c.pair.key && c.shown.tier >= 2);
+};
+
+// ── Controls ────────────────────────────────────────────────────────────────
+
+/** Vorher / ◧ / Nachher: all of one, or back to the middle. */
+function cmpShow(which) {
+  cmpState.split = which === 'before' ? 1 : which === 'after' ? 0 : 0.5;
+  cmpHideHint();
+  cmpAnimate();
+  cmpRender();
+}
+
+/** Fitted ↔ 100 % (one file pixel per screen pixel). On a screen that
+ *  already shows the file at 100 % fitted, there is nothing to jump to, so
+ *  it goes to 2.5x — about where the modal's own double-tap lands. */
+function cmpZoomToggle(px = cmpState.W / 2, py = cmpState.H / 2) {
+  const s100 = cmpScale100();
+  cmpZoomAbout(px, py, cmpZoomed() ? 1 : (s100 >= 1.25 ? s100 : 2.5));
+  cmpHideHint();
+  cmpAnimate();
+  cmpRender();
+}
+
+function cmpShowHint() {
+  const hint = $('cmp-hint');
+  hint.textContent = matchMedia('(pointer: coarse)').matches
+    ? 'Linie ziehen · mit zwei Fingern zoomen'
+    : 'Linie ziehen · Mausrad zoomt · Doppelklick';
+  hint.classList.add('show');
+  clearTimeout(cmpState.hintTimer);
+  cmpState.hintTimer = setTimeout(cmpHideHint, 2600);
+}
+
+function cmpHideHint() {
+  clearTimeout(cmpState.hintTimer);
+  $('cmp-hint').classList.remove('show');
+}
+
+// ── Gestures ────────────────────────────────────────────────────────────────
+//   1 finger on the line     moves the line
+//   1 finger elsewhere, 1x   moves the line too (nothing to pan yet)
+//   1 finger elsewhere, >1x  pans
+//   2 fingers                pinch — the point between them stays between
+//                            them, so pinching and moving pans as well
+//   double-tap               fitted ↔ 100 %
+
+const cmpPoint = (e) => ({ x: e.clientX - cmpState.rect.left, y: e.clientY - cmpState.rect.top });
+
+function initCompare() {
+  const st = $('cmp-stage');
+  st.addEventListener('pointerdown', onCmpPointerDown);
+  st.addEventListener('pointermove', onCmpPointerMove);
+  st.addEventListener('pointerup', onCmpPointerUp);
+  st.addEventListener('pointercancel', onCmpPointerUp);
+  st.addEventListener('wheel', onCmpWheel, { passive: false });
+  // iOS Safari still starts its own page zoom on some pinches that
+  // `touch-action: none` should have stopped.
+  st.addEventListener('gesturestart', e => e.preventDefault());
+  window.addEventListener('resize', () => { if (cmpState.open) cmpRelayout(); });
+}
+
+function onCmpPointerDown(e) {
+  const c = cmpState;
+  if (e.target.closest('button')) return;
+  e.currentTarget.setPointerCapture(e.pointerId);
+  if (!c.pointers.size) c.rect = e.currentTarget.getBoundingClientRect();
+  const p = cmpPoint(e);
+  c.pointers.set(e.pointerId, p);
+  cmpHideHint();
+
+  if (c.pointers.size === 2) {
+    const [a, b] = [...c.pointers.values()];
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    c.mode = 'pinch';
+    c.drag = null;
+    c.pinch = {
+      d0: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      s0: c.s,
+      // The picture point between the fingers, in fitted units.
+      lx: (mid.x - c.fit.x - c.tx) / c.s,
+      ly: (mid.y - c.fit.y - c.ty) / c.s,
+    };
+    return;
+  }
+  if (c.pointers.size > 2) return;
+
+  const onLine = Math.abs(p.x - c.lineX) <= CMP_LINE_GRAB;
+  c.mode = onLine || !cmpZoomed() ? 'split' : 'pan';
+  c.drag = {
+    id: e.pointerId, x0: p.x, y0: p.y, t0: performance.now(),
+    tx0: c.tx, ty0: c.ty, moved: 0, onLine,
+    // Grabbed a little beside the line: it keeps that offset rather than
+    // jumping under the finger.
+    off: onLine ? c.lineX - p.x : 0,
+  };
+}
+
+function onCmpPointerMove(e) {
+  const c = cmpState;
+  const held = c.pointers.get(e.pointerId);
+  if (!held) return;
+  const p = cmpPoint(e);
+  held.x = p.x; held.y = p.y;
+
+  if (c.mode === 'pinch') {
+    if (c.pointers.size < 2) return;
+    const [a, b] = [...c.pointers.values()];
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const k = c.pinch;
+    c.s = Math.max(1, Math.min(cmpMaxScale(), k.s0 * Math.hypot(a.x - b.x, a.y - b.y) / k.d0));
+    c.tx = mid.x - c.fit.x - k.lx * c.s;
+    c.ty = mid.y - c.fit.y - k.ly * c.s;
+    cmpClamp();
+    if (c.s >= CMP_DETAIL_AT) cmpEnsureDetail();
+    cmpSchedule();
+    return;
+  }
+
+  const d = c.drag;
+  if (!d || d.id !== e.pointerId) return;
+  const dx = p.x - d.x0, dy = p.y - d.y0;
+  d.moved = Math.max(d.moved, Math.hypot(dx, dy));
+
+  if (c.mode === 'pan') {
+    c.tx = d.tx0 + dx;
+    c.ty = d.ty0 + dy;
+    cmpClamp();
+    cmpSchedule();
+    return;
+  }
+  // Off the line, only a real drag moves it — a tap, or the first half of a
+  // double-tap, leaves it where it was.
+  if (!d.onLine && d.moved < CMP_DRAG_SLOP) return;
+  c.split = Math.max(0, Math.min(1, (p.x + d.off) / c.W));
+  cmpSchedule();
+}
+
+function onCmpPointerUp(e) {
+  const c = cmpState;
+  if (!c.pointers.delete(e.pointerId)) return;
+
+  if (c.mode === 'pinch' || c.mode === 'idle') {
+    // Pinched back to (almost) fitted: settle exactly there.
+    if (c.mode === 'pinch' && c.s < 1.03) {
+      c.s = 1; cmpClamp(); cmpAnimate(); cmpSchedule();
+    }
+    // The finger still down after a pinch does nothing until it lifts too —
+    // otherwise ending a pinch would suddenly drag the line or the picture.
+    c.mode = c.pointers.size ? 'idle' : null;
+    c.drag = null;
+    return;
+  }
+
+  const d = c.drag;
+  if (!d || d.id !== e.pointerId) return;
+  c.drag = null;
+  c.mode = null;
+  if (e.type === 'pointercancel') return;
+
+  // A tap, not a drag: two in quick succession toggle the zoom.
+  if (d.moved < 10 && performance.now() - d.t0 < 400) {
+    const p = cmpPoint(e);
+    const now = performance.now();
+    const prev = c.lastTap;
+    if (prev && now - prev.t < DOUBLE_TAP_MS
+        && Math.hypot(p.x - prev.x, p.y - prev.y) < DOUBLE_TAP_SLOP) {
+      c.lastTap = null;
+      cmpZoomToggle(p.x, p.y);
+      return;
+    }
+    c.lastTap = { t: now, x: p.x, y: p.y };
+  }
+}
+
+// A mouse wheel notch and a trackpad pinch (which arrives as a wheel event
+// with ctrlKey) both zoom about the cursor; the pinch reports far smaller
+// deltas far more often, hence its own rate.
+function onCmpWheel(e) {
+  e.preventDefault();
+  const c = cmpState;
+  c.rect = e.currentTarget.getBoundingClientRect();
+  const p = cmpPoint(e);
+  const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  cmpZoomAbout(p.x, p.y, c.s * Math.exp(-dy * (e.ctrlKey ? 0.01 : 0.002)));
+  cmpHideHint();
+  cmpSchedule();
+}
+
+/** Keys while the compare is open. It sits on top of everything, so it
+ *  takes them all — an arrow must not page the modal underneath. */
+function onCompareKey(e) {
+  const c = cmpState;
+  if (e.key === 'Escape') { closeCompare(); return; }
+  const handled = {
+    ArrowLeft:  () => { c.split = Math.max(0, c.lineX / c.W - 0.05); },
+    ArrowRight: () => { c.split = Math.min(1, c.lineX / c.W + 0.05); },
+    '+': () => cmpZoomAbout(c.W / 2, c.H / 2, c.s * 1.5),
+    '=': () => cmpZoomAbout(c.W / 2, c.H / 2, c.s * 1.5),
+    '-': () => cmpZoomAbout(c.W / 2, c.H / 2, c.s / 1.5),
+    '0': () => cmpZoomAbout(c.W / 2, c.H / 2, 1),
+    '1': () => cmpZoomAbout(c.W / 2, c.H / 2, cmpScale100()),
+  }[e.key];
+  if (!handled) return;
+  e.preventDefault();
+  handled();
+  cmpHideHint();
+  cmpAnimate();
+  cmpRender();
+}
 
 // ══════════════════════════════════════════════════════════
 // TITLE SUGGESTIONS (Titler)
@@ -4692,6 +5426,8 @@ async function commitCull() {
 // KEYBOARD
 // ══════════════════════════════════════════════════════════
 document.addEventListener('keydown', e => {
+  // The compare covers everything, the modal it came from included.
+  if (cmpState.open) { onCompareKey(e); return; }
   // The suggestions overlay sits on top of the modal, so it owns the keys
   // while it is open — Escape must close it, not the image behind it.
   if ($('titler-modal').classList.contains('show')) {
@@ -4733,6 +5469,7 @@ window.addEventListener('load', () => {
   initGrainControls();
   initUpscaleControls();
   initModalSwipe();
+  initCompare();
   fetchImages(true);
   loadLoraLabels();
   if ('serviceWorker' in navigator) {

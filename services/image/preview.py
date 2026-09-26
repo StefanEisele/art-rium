@@ -45,6 +45,25 @@ speed=6 is the knee. Below it the encoder spends five times as long to save
 7 %, and above it the files grow faster than the time saved is worth — the
 encode happens once and is cached, while the bytes are paid on every view by
 every device.
+
+**The detail tier** (`detail=True`, `?hq=1`) exists for one viewer: the
+gallery's before/after compare, zoomed in on an upscale. "Visually
+indistinguishable" above was judged at screen size; at native size q58 is
+not. Measured 2026-09-26 as high-frequency energy (luma minus a 1.5 px blur)
+kept against the PNG, whole frame, native resolution:
+
+                          q58     q85     q90     q95     PNG
+    3240x5760 upscale     75 %    79 %    89 %    99.5 %  20 MB
+                         390 KB  1.1 MB  1.6 MB  2.9 MB
+    2160x3840 upscale      —       —     99 %    99 %    13 MB
+                                         1.8 MB  2.6 MB
+    1080x1920 original    84 %    97 %    99 %    99 %    3 MB
+
+q58 throws away a quarter of exactly what an upscale is made of — and less
+of the original's, so a compare at q58 is also tilted *against* the upscale.
+AVIF only lets go of fine grain late: q85 barely beats q58 on the smooth
+SeedVR2 result, q95 is the first setting that keeps it everywhere measured.
+Still 3-7x smaller than the PNG, and nothing but that one viewer asks for it.
 """
 from __future__ import annotations
 
@@ -62,16 +81,19 @@ logger = logging.getLogger(__name__)
 # a dense screen, 1024 a tablet, 1600 a phone at 3x, 2200 a desktop viewing
 # full-bleed. A request between two rungs gets the one above it.
 #
-# The top two are for zooming, not for fitting on a screen. An upscale is
+# The top three are for zooming, not for fitting on a screen. An upscale is
 # 2160x3840 and the point of it is detail; capping previews at 2200 meant a
 # zoomed upscale showed 57 % of the linear resolution its GPU minutes bought,
-# which is precisely the thing you zoom in to check. Nothing requests these
-# unless it is asking for a picture's native size, and nothing is ever
-# upscaled to reach them.
-PREVIEW_WIDTHS = (640, 1024, 1600, 2200, 3200, 4600)
+# which is precisely the thing you zoom in to check. 7680 is the long edge of
+# the largest upscale the gallery can make (4x of 1920, inside the 40 MP
+# budget), so a 3x or 4x one is reachable at its own size too instead of
+# being shrunk to 4600. Nothing requests these unless it is asking for a
+# picture's native size, and nothing is ever upscaled to reach them.
+PREVIEW_WIDTHS = (640, 1024, 1600, 2200, 3200, 4600, 7680)
 DEFAULT_WIDTH = 1600
 
 QUALITY = 58
+QUALITY_DETAIL = 95   # the detail tier — see the second table above
 SPEED = 6          # see the table in the module docstring
 MEDIA_TYPE = "image/avif"
 SUFFIX = ".avif"
@@ -128,10 +150,16 @@ def cache_dir_for(cache_root: Path, stem: str) -> Path:
     return cache_root / stem[:2].lower() / stem
 
 
-def cache_path(cache_root: Path, src: Path, width: int) -> Path:
-    """Absolute path of the cached preview for `src` at `width`."""
+def cache_path(cache_root: Path, src: Path, width: int, detail: bool = False) -> Path:
+    """Absolute path of the cached preview for `src` at `width`.
+
+    The detail tier gets its own name, beside the ordinary one rather than
+    instead of it: both are wanted for the same picture — the fitted view and
+    the zoomed compare — and neither may be served as the other.
+    """
     stem = src.stem
-    return cache_dir_for(cache_root, stem) / f"{width}_{fingerprint(src)}{SUFFIX}"
+    tier = "hq" if detail else ""
+    return cache_dir_for(cache_root, stem) / f"{width}{tier}_{fingerprint(src)}{SUFFIX}"
 
 
 def purge(cache_root: Path, stem: str) -> None:
@@ -150,7 +178,7 @@ def purge(cache_root: Path, stem: str) -> None:
         logger.warning(f"Could not purge previews for {stem}: {exc}")
 
 
-def _render_sync(src: Path, dest: Path, width: int) -> None:
+def _render_sync(src: Path, dest: Path, width: int, quality: int) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     with PILImage.open(src) as img:
         img = img.convert("RGB")
@@ -161,23 +189,27 @@ def _render_sync(src: Path, dest: Path, width: int) -> None:
         # Written beside the target and moved into place, so a reader that
         # arrives mid-encode never sees a half-written file.
         tmp = dest.with_suffix(dest.suffix + ".part")
-        img.save(tmp, "AVIF", quality=QUALITY, speed=SPEED)
+        img.save(tmp, "AVIF", quality=quality, speed=SPEED)
         tmp.replace(dest)
 
 
-async def render(cache_root: Path, src: Path, width: int) -> Path:
+async def render(cache_root: Path, src: Path, width: int, detail: bool = False) -> Path:
     """Path to the preview of `src` at `width`, rendering it if needed.
+
+    `detail` encodes at `QUALITY_DETAIL` instead — for looking at the pixels
+    themselves, not at the picture (see the module docstring).
 
     Cheap and idempotent once warm: the common case is a `stat` on the source
     and an `exists` on the cache entry.
     """
-    dest = cache_path(cache_root, src, width)
+    dest = cache_path(cache_root, src, width, detail)
     if dest.exists():
         return dest
 
+    quality = QUALITY_DETAIL if detail else QUALITY
     async with _locks.setdefault(dest, asyncio.Lock()):
         # Whoever held the lock before us may have just rendered it.
         if not dest.exists():
-            await asyncio.to_thread(_render_sync, src, dest, width)
+            await asyncio.to_thread(_render_sync, src, dest, width, quality)
             logger.debug(f"Preview rendered: {dest.name} ({dest.stat().st_size // 1024} KB)")
     return dest

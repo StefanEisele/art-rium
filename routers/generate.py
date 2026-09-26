@@ -794,7 +794,7 @@ async def get_image_thumb(filename: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/api/image/{filename}/preview", dependencies=[Depends(require_auth)])
-async def get_image_preview(filename: str, w: int | None = None):
+async def get_image_preview(filename: str, w: int | None = None, hq: bool = False):
     """Serve a cached AVIF preview — what viewers should be shown.
 
     The stored PNG stays the master and is what `/api/image/{filename}` hands
@@ -804,6 +804,9 @@ async def get_image_preview(filename: str, w: int | None = None):
     `w` is advisory: it is snapped to `PREVIEW_WIDTHS` so the on-disk cache
     cannot grow one entry per viewport anyone ever used, and it never
     upscales, so a small source comes back at its own size.
+
+    `hq` asks for the detail tier — the gallery's zoomed before/after, where
+    the ordinary encode would smooth away the grain being compared.
     """
     safe_name = _validate_share_filename(filename)
     candidate = _find_image_on_disk(safe_name)
@@ -812,7 +815,7 @@ async def get_image_preview(filename: str, w: int | None = None):
 
     try:
         preview = await image_preview.render(
-            settings.previews_dir, candidate, image_preview.clamp_width(w)
+            settings.previews_dir, candidate, image_preview.clamp_width(w), detail=hq
         )
     except Exception as exc:
         # A preview is an optimisation, never the only way to see a picture.

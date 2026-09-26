@@ -18,6 +18,7 @@ from services.image.preview import (
     DEFAULT_WIDTH,
     PREVIEW_WIDTHS,
     QUALITY,
+    QUALITY_DETAIL,
     SUFFIX,
     cache_dir_for,
     cache_path,
@@ -68,6 +69,14 @@ def test_the_ladder_reaches_an_upscale_native_size():
     GPU minutes bought — exactly the detail you zoom in to check."""
     assert clamp_width(3840) >= 3840
     assert PREVIEW_WIDTHS[-1] >= 4600
+
+
+@pytest.mark.parametrize("native", [3840, 5760, 7680])
+def test_every_upscale_the_gallery_can_make_is_reachable_at_native_size(native):
+    """2x, 3x and 4x of a 1920 render. Below the top of the ladder a 3x or 4x
+    upscale was shrunk to 4600 on the way to the zoom — 80 % and 60 % of the
+    resolution the compare exists to show."""
+    assert clamp_width(native) >= native
 
 
 def test_asking_for_a_native_size_never_interpolates_it_up(tmp_path):
@@ -196,6 +205,54 @@ def test_quality_stays_in_the_measured_band():
     """The encoder settings are chosen against measurements in the module
     docstring; drifting them silently would change every cached file's size."""
     assert 40 <= QUALITY <= 75
+    # Measured: below 95 a smooth upscale loses 10-25 % of its fine detail,
+    # which is the whole thing the detail tier is asked for.
+    assert QUALITY_DETAIL >= 95
+
+
+# ── The detail tier ──────────────────────────────────────────────────────────
+
+
+def test_detail_tier_has_its_own_cache_entry(tmp_path):
+    """The fitted view and the zoomed compare want different encodes of the
+    same picture at the same width; one must never be served as the other."""
+    src = write_png(tmp_path / "a.png")
+    plain = cache_path(tmp_path / "c", src, 1024)
+    detail = cache_path(tmp_path / "c", src, 1024, detail=True)
+    assert plain != detail
+    assert plain.parent == detail.parent, "purge must still take both"
+    assert detail.name.startswith("1024hq_")
+
+
+def noisy_png(path, size=(512, 512)):
+    """Fine per-pixel texture — the thing a low-quality AVIF smooths away."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    PILImage.effect_noise(size, 40).convert("RGB").save(path)
+    return path
+
+
+def test_detail_tier_keeps_more_of_the_texture(tmp_path):
+    """What it is for, end to end: more of the fine structure survives. File
+    size stands in for detail — noise is incompressible, so the encode that
+    kept more of it is the bigger one."""
+    src = noisy_png(tmp_path / "grain.png")
+    cache = tmp_path / "cache"
+    plain = asyncio.run(render(cache, src, 640))
+    detail = asyncio.run(render(cache, src, 640, detail=True))
+    assert plain != detail
+    assert detail.stat().st_size > plain.stat().st_size * 1.5
+    with PILImage.open(detail) as im:
+        assert im.format == "AVIF"
+        assert im.size == (512, 512), "the detail tier never upscales either"
+
+
+def test_purge_takes_the_detail_tier_too(tmp_path):
+    src = write_png(tmp_path / "a.png")
+    cache = tmp_path / "cache"
+    asyncio.run(render(cache, src, 640))
+    asyncio.run(render(cache, src, 640, detail=True))
+    purge(cache, "a")
+    assert not cache_dir_for(cache, "a").exists()
 
 
 # ── Purging ──────────────────────────────────────────────────────────────────

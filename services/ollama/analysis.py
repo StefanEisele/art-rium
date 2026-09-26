@@ -223,6 +223,51 @@ async def generate_video_titles(
     return _clean_titles(parsed, n=n)
 
 
+async def generate_series_titles(
+    jpgs: list[bytes],
+    *,
+    n: int = 5,
+    timeout: float = 180.0,
+) -> list[str]:
+    """
+    Generate *n* title suggestions for a *series* — several separate works
+    that belong together and get posted as one package.
+
+    The framing is the whole difference from `generate_video_titles`: those
+    frames are one work seen over time, and a title for them describes a
+    single piece. These are distinct pictures, and the title has to name what
+    they have in common — it will be the carousel's caption and the article's
+    subject, so it needs to hold for every member rather than describe the
+    first one.
+
+    Callers sample a handful of members rather than sending all of them; see
+    the cap in routers/titler.py.
+    """
+    if not jpgs:
+        raise RuntimeError("generate_series_titles requires at least one image")
+
+    user_text = (
+        f"The {len(jpgs)} images below are separate artworks from one series, "
+        f"in the order the artist arranged them. They are not frames of a "
+        f"single piece. Suggest {n} short, evocative titles for the series as "
+        f"a whole — what these works share, not what any one of them shows. "
+        f"Each title: 2 to 6 words, Title Case, no trailing punctuation, "
+        f"no surrounding quotes, no numbering, no commentary.\n\n"
+        f'Return STRICT JSON: {{"titles": ["title one", "title two", ...]}}'
+    )
+    parsed = await _chat_json(
+        model=settings.ollama_titler_model,
+        system=_TITLER_SYSTEM,
+        user_text=user_text,
+        jpgs=jpgs,
+        options={"temperature": 0.8},
+        keep_alive=_TITLER_KEEP_ALIVE,
+        timeout=timeout,
+        label="generate_series_titles",
+    )
+    return _clean_titles(parsed, n=n)
+
+
 # ── Transition prompts — Wan2.2 FLF2V key-frame sequence ─────────────────────
 
 

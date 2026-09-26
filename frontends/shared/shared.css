@@ -423,7 +423,12 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex: 1; 
 }
 .picker-cell.selected .sel-overlay { display: flex; }
 .picker-cell.selected { outline: 3px solid var(--accent); outline-offset: -3px; }
-.picker-cell .order-badge {
+/* The numbered pick marker. Shape only — where it sits and when it shows is
+   the consumer's business, because the picker puts it over a cell and the
+   gallery puts it over a grid tile that already has a rating badge in that
+   corner. Both mean the same thing: this is the Nth thing you chose, and
+   that order is the order it will be used in. */
+.order-badge {
   position: absolute;
   top: 5px; left: 5px;
   background: var(--accent);

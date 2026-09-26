@@ -1026,6 +1026,50 @@ function renderError(msg) {
   list.innerHTML = `<div class="error-card">${_esc(msg)}</div>`;
 }
 
+// ── Series deep link ──────────────────────────────────────────────────────────
+// `?series=<id>` from the gallery's series sheet: the package arrives with its
+// order and its name already decided, which is the whole point of having made
+// it a series. Work mode, because a set of pictures posted together is a work
+// piece — it is the only mode whose parent-series and Singulart sections apply.
+//
+// The query param is wiped first, so a reload does not re-import over whatever
+// has been typed since.
+async function applySeriesDeepLink() {
+  const id = new URLSearchParams(location.search).get('series');
+  if (!id) return;
+  history.replaceState(null, '', location.pathname);
+
+  let series;
+  try {
+    const r = await api(`/api/series/${encodeURIComponent(id)}`);
+    series = await r.json();
+  } catch (e) {
+    ArtRium.toast('Serie konnte nicht geladen werden: ' + e.message, true);
+    return;
+  }
+
+  // The members arrive in the same shape the picker produces — both come out
+  // of the images serializer — so they go straight in. Position 0 stays
+  // first: the featured image is images[0] server-side.
+  const all = series.images || [];
+  state.selectedImages = all.slice(0, MAX_IMAGES);
+
+  const workChip = document.querySelector('#mode-chips .chip[data-mode="work"]');
+  if (workChip) setMode('work', workChip);
+
+  if (series.title) $('series-name-input').value = series.title;
+  // Only when empty: notes typed here are the user's own framing and must not
+  // be overwritten by a series description.
+  if (series.notes && !$('notes-input').value.trim()) $('notes-input').value = series.notes;
+
+  renderStrip();
+
+  const trimmed = all.length - state.selectedImages.length;
+  ArtRium.toast(trimmed > 0
+    ? `Serie „${series.title || 'Ohne Titel'}" — erste ${MAX_IMAGES} von ${all.length} Bildern (Artikel-Limit)`
+    : `Serie „${series.title || 'Ohne Titel'}" geladen — ${all.length} Bilder`);
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('load', () => {
   if (!state.apiKey) {
@@ -1037,6 +1081,7 @@ window.addEventListener('load', () => {
   renderSingulartRows();
   _refreshYoutubeStatus();
   _resumeIfActiveJob();
+  applySeriesDeepLink();
 });
 
 // Refresh the poll cadence when the tab returns from background. Mobile

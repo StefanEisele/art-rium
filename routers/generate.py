@@ -70,6 +70,10 @@ class GenerateRequest(BaseModel):
     # `width`/`height` are then ignored — the latent carries the source's size.
     source_image_id: uuid.UUID | None = None
     denoise: float | None = None  # variant only; clamped server-side
+    # ── Detail Daemon (Z-Image Turbo, both modes) ───────────────────────────
+    # How much material the sampler resolves. None/0 samples exactly as this
+    # tool always did; clamped server-side to the measured range.
+    detail: float | None = None
 
 
 class EnhancePromptsRequest(BaseModel):
@@ -198,6 +202,8 @@ async def generate(
     source_name = None
     out_width, out_height = req.width, req.height
     denoise, prompt_changed = zimage_service.DENOISE_DEFAULT, False
+    # Z-Image only — the SDXL and Ernie graphs have no Detail Daemon in them.
+    detail = zimage_service.clamp_detail(req.detail)
     if is_variant:
         src, out_width, out_height, source_prompt = await _resolve_variant_source(
             req.source_image_id, db,
@@ -224,7 +230,7 @@ async def generate(
         seed = (req.seed + i) if req.seed >= 0 else random.randint(0, 2**32 - 1)
         if is_variant:
             workflow = build_zimage_variant_workflow(
-                source_name, prompt_text, seed, denoise, loras,
+                source_name, prompt_text, seed, denoise, loras, detail,
             )
             workflow_name = ZIMAGE_VARIANT_WORKFLOW_NAME
         elif is_sdxl:
@@ -237,7 +243,9 @@ async def generate(
             workflow = build_ernie_workflow(prompt_text, seed, req.width, req.height)
             workflow_name = ERNIE_WORKFLOW_NAME
         else:
-            workflow = build_zimage_workflow(prompt_text, seed, req.width, req.height, loras)
+            workflow = build_zimage_workflow(
+                prompt_text, seed, req.width, req.height, loras, detail,
+            )
             workflow_name = ZIMAGE_WORKFLOW_NAME
 
         result = await post_prompt(workflow, listener.client_id)
@@ -257,6 +265,10 @@ async def generate(
             width=out_width,
             height=out_height,
             loras=loras,
+            # Only the Z-Image graphs carry the dial; recording it on an
+            # SDXL row would claim a setting that never touched the render.
+            detail_amount=(detail if workflow_name in (
+                ZIMAGE_WORKFLOW_NAME, ZIMAGE_VARIANT_WORKFLOW_NAME) else None),
             workflow_name=workflow_name,
         )
         # Node ids differ per model (Z-Image / SDXL / Ernie / variant), so the
@@ -275,21 +287,34 @@ async def generate(
             "prompt_changed": prompt_changed,
             **zimage_service.describe_denoise(denoise, prompt_changed=prompt_changed),
         }
+    if not is_sdxl and not is_ernie:
+        response |= {"detail": zimage_service.describe_detail(detail)}
     return response
 
 
 @router.get("/api/variant/options", dependencies=[Depends(require_auth)])
 async def variant_options():
-    """The denoise range for Z-Image Turbo variants, and what each part of it
-    does.
+    """The two sampler dials for Z-Image Turbo, and what each part of them does.
 
-    Server-side because the numbers are a property of this workflow — they were
-    measured off it (see services/comfy/zimage.py) and would drift the moment
-    the sampler or the shift is retuned. Both recommended bands are returned:
-    which one applies depends on whether the user edited the prompt, and the
-    client knows that before it submits.
+    Named for the variant denoise it was built for; it now also carries the
+    Detail Daemon range, which applies to Direct mode as well. One fetch, one
+    source — both sets of numbers are a property of this one workflow.
+
+    Server-side because the numbers were measured off it (see
+    services/comfy/zimage.py) and would drift the moment the sampler or the
+    shift is retuned. Both recommended denoise bands are returned: which one
+    applies depends on whether the user edited the prompt, and the client knows
+    that before it submits.
     """
     return {
+        "detail": {
+            "min": zimage_service.DETAIL_MIN,
+            "max": zimage_service.DETAIL_MAX,
+            "default": zimage_service.DETAIL_DEFAULT,
+            "recommended_min": zimage_service.DETAIL_SWEET_MIN,
+            "recommended_max": zimage_service.DETAIL_SWEET_MAX,
+            "bands": zimage_service.detail_bands(),
+        },
         "denoise_min": zimage_service.DENOISE_MIN,
         "denoise_max": zimage_service.DENOISE_MAX,
         "kept": {

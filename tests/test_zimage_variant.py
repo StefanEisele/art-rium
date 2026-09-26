@@ -43,7 +43,7 @@ def variant(**kw):
 class TestGraphShape:
     def test_the_latent_comes_from_the_source_image(self):
         wf = variant()
-        assert wf["44"]["inputs"]["latent_image"] == ["48", 0]
+        assert wf["55"]["inputs"]["latent_image"] == ["48", 0]
         assert wf["48"]["class_type"] == "VAEEncode"
         assert wf["48"]["inputs"]["pixels"] == ["49", 0]
         assert wf["49"]["inputs"]["image"] == "src.png"
@@ -54,12 +54,15 @@ class TestGraphShape:
         assert "41" not in variant()
 
     def test_sampler_matches_generation_except_for_denoise(self):
-        gen = build_zimage_workflow("a cat", 7, 1024, 1024, [])["44"]["inputs"]
-        var = variant()["44"]["inputs"]
-        for key in ("steps", "cfg", "sampler_name", "scheduler"):
-            assert var[key] == gen[key], key
-        assert gen["denoise"] == 1
-        assert var["denoise"] == 0.4
+        # The sampler is a chain now, so "the same sampler" is checked
+        # across the nodes it was split into rather than on one node.
+        gen, var = build_zimage_workflow("a cat", 7, 1024, 1024, []), variant()
+        assert var["53"]["inputs"] == gen["53"]["inputs"]          # sampler_name
+        assert var["51"]["inputs"]["cfg"] == gen["51"]["inputs"]["cfg"]
+        for key in ("steps", "scheduler"):
+            assert var["52"]["inputs"][key] == gen["52"]["inputs"][key], key
+        assert gen["52"]["inputs"]["denoise"] == 1
+        assert var["52"]["inputs"]["denoise"] == 0.4
 
     def test_model_stack_matches_generation(self):
         gen = build_zimage_workflow("a cat", 7, 1024, 1024, [])
@@ -72,21 +75,21 @@ class TestGraphShape:
         wf = variant()
         assert wf["42"]["class_type"] == "ConditioningZeroOut"
         assert wf["42"]["inputs"]["conditioning"] == ["45", 0]
-        assert wf["44"]["inputs"]["negative"] == ["42", 0]
+        assert wf["51"]["inputs"]["negative"] == ["42", 0]
 
     def test_prompt_and_seed_land_where_they_belong(self):
         wf = variant(prompt="a dog on a roof", seed=99)
         assert wf["45"]["inputs"]["text"] == "a dog on a roof"
-        assert wf["44"]["inputs"]["seed"] == 99
+        assert wf["50"]["inputs"]["noise_seed"] == 99
 
     def test_negative_seed_is_randomised(self):
-        seeds = {variant(seed=-1)["44"]["inputs"]["seed"] for _ in range(5)}
+        seeds = {variant(seed=-1)["50"]["inputs"]["noise_seed"] for _ in range(5)}
         assert len(seeds) > 1
         assert all(0 <= s < 2**32 for s in seeds)
 
     def test_denoise_is_clamped_on_the_way_into_the_graph(self):
-        assert variant(denoise=5.0)["44"]["inputs"]["denoise"] == DENOISE_MAX
-        assert variant(denoise=0.0)["44"]["inputs"]["denoise"] == DENOISE_MIN
+        assert variant(denoise=5.0)["52"]["inputs"]["denoise"] == DENOISE_MAX
+        assert variant(denoise=0.0)["52"]["inputs"]["denoise"] == DENOISE_MIN
 
 
 class TestLoraChain:

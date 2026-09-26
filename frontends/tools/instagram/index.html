@@ -429,6 +429,17 @@
       font-size: 12px; color: var(--text-dim);
     }
 
+    /* Which package this post came from, and how much of it fit. */
+    .series-banner {
+      font-size: 12px; font-weight: 600;
+      color: var(--accent);
+      background: var(--accent-soft);
+      border: 1px solid var(--accent-border);
+      border-radius: var(--radius-sm);
+      padding: 7px 10px;
+      margin-bottom: 8px;
+    }
+
     /* Caption */
     textarea#caption-input {
       width: 100%; resize: none;
@@ -824,6 +835,10 @@
 
       <!-- Selected media strip (feed mode) — mixed images + videos -->
       <div id="feed-images-wrap">
+        <!-- Only after a ?series= import: says which package this is and how
+             much of it made it into the carousel, since the cap is 10 and a
+             series may be longer. -->
+        <div class="series-banner" id="series-banner" style="display:none"></div>
         <div class="selected-images-strip" id="selected-images-strip">
           <button class="add-image-btn" id="add-image-btn" onclick="openPicker()" title="Add image">+ Bild</button>
           <button class="add-image-btn" id="add-video-btn" onclick="openVideoPicker('feed-media')" title="Add video">+ Video</button>
@@ -1645,9 +1660,21 @@ async function loadFramingDefaults() {
     const { auto, ...pinned } = d.frames || {};
     if (Object.keys(pinned).length) IG_FRAMES = pinned;
     state.aiLabel = !!d.ai_label_default;
+    if (Array.isArray(d.collaborator_presets) && d.collaborator_presets.length) {
+      COLLAB_PRESETS = d.collaborator_presets;
+    }
+    if (Array.isArray(d.collaborator_defaults)) {
+      COLLAB_DEFAULTS = d.collaborator_defaults;
+    }
   } catch (e) { /* keep the built-in fallbacks */ }
   const box = $('ai-label-toggle');
   if (box) box.checked = state.aiLabel;
+  // Both the chips and the prefill read the two lists above, so they are
+  // drawn here rather than at parse time — the module-level call would use
+  // the fallbacks and then never be corrected.
+  renderCollabChips('collab-chips', 'collab-input');
+  renderCollabChips('detail-collab-chips', 'detail-collab');
+  restoreCollaborators();
 }
 
 const mediaRatio = (m) => (m && m.width && m.height) ? m.width / m.height : null;
@@ -2844,11 +2871,19 @@ function formatCollaborators(list) {
 // Quick-pick chips for accounts we tag often. Clicking a chip toggles that
 // username in the input (respecting the same 3-max / de-dupe rules as free
 // typing); typing manually keeps the chips in sync via the 'input' listener.
-// Corrected 2026-08-22: this list said 'iiii.ai', which has never appeared on
-// a published post. Every post that carries this partner carries 'iiiil.ai'
-// (four i's, then an l) and Instagram reports it as Accepted, so the chip was
-// inviting an account that either does not exist or is not the intended one.
-const COLLAB_PRESETS = ['iiiil.ai', 'epicworldaiart', 'art.ai.future', 'aicccreatorshub', 'echoesmag.ai'];
+//
+// The handles now come from /framing-defaults, and the values below are only
+// the fallback for a server that did not answer. The reason they moved is the
+// correction of 2026-08-22: this list said 'iiii.ai', an account that either
+// does not exist or is not the intended one, while every published post
+// carrying this partner carries 'iiiil.ai' (four i's, then an l). A wrong
+// handle fails silently — the post goes out, the collaboration does not — so
+// it is written in exactly one place now:
+// services/instagram/collaborators.py.
+let COLLAB_PRESETS = ['iiiil.ai', 'epicworldaiart', 'art.ai.future', 'aicccreatorshub', 'echoesmag.ai'];
+
+// Pre-selected on a new post when nothing is remembered. Also server-fed.
+let COLLAB_DEFAULTS = ['iiiil.ai', 'echoesmag.ai', 'art.ai.future'];
 
 // Collaborators are the same handful of partners on almost every post, and the
 // window to set them is tiny: a cloud-scheduled post is handed to the Pi within
@@ -2869,9 +2904,18 @@ function rememberedCollaborators() {
   try { return localStorage.getItem(COLLAB_MEMORY_KEY) || ''; } catch (e) { return ''; }
 }
 
-/** Prefill the create form from the last post's partners. */
+/** Prefill the create form's partners.
+ *
+ *  The remembered list wins when there is one: it is what you last chose
+ *  deliberately, and overriding a deliberate choice every load would be worse
+ *  than the empty box this replaced. With nothing remembered the standard
+ *  trio goes in, so a new post is never created with no partners by accident
+ *  — which is the failure this whole mechanism exists for, and which cannot
+ *  be repaired after the fact on the cloud path.
+ */
 function restoreCollaborators() {
-  $('collab-input').value = rememberedCollaborators();
+  const remembered = rememberedCollaborators();
+  $('collab-input').value = remembered || formatCollaborators(COLLAB_DEFAULTS);
   syncCollabChips('collab-chips', $('collab-input').value);
   updateCollabWarning();
 }
@@ -2918,13 +2962,13 @@ function toggleCollabPreset(inputId, chipsId, btnEl) {
   if (inputId === 'collab-input') updateCollabWarning();
 }
 
-renderCollabChips('collab-chips', 'collab-input');
-renderCollabChips('detail-collab-chips', 'detail-collab');
+// The chips themselves and the prefill are drawn by loadFramingDefaults(),
+// once the server's handle list is in hand — see the note there. Only the
+// listeners are wired at parse time.
 $('collab-input').addEventListener('input', () => {
   syncCollabChips('collab-chips', $('collab-input').value);
   updateCollabWarning();
 });
-restoreCollaborators();
 $('detail-collab').addEventListener('input', () => syncCollabChips('detail-collab-chips', $('detail-collab').value));
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -2986,7 +3030,59 @@ window.addEventListener('load', async () => {
     loadTimeline(), loadLastPost(), loadAllVideos(), probeOutpost(),
     loadFramingDefaults(),
   ]);
+
+  // After loadFramingDefaults(), which is what fills the collaborator chips
+  // and the prefill this wants to sit on top of — and after the session
+  // restore above, which the series is allowed to overwrite: an explicitly
+  // imported package beats a half-finished draft.
+  await applySeriesDeepLink();
 });
+
+/** `?series=<id>` from the gallery's series sheet.
+ *
+ *  The whole package becomes one carousel, in series order, with the series
+ *  title as the caption — which is the form these go out in anyway, and the
+ *  reason for grouping them in the first place.
+ */
+async function applySeriesDeepLink() {
+  const id = new URLSearchParams(location.search).get('series');
+  if (!id) return;
+  // First, so a reload does not re-import over an edited caption.
+  history.replaceState(null, '', location.pathname);
+
+  let series;
+  try {
+    const r = await api(`/api/series/${encodeURIComponent(id)}`);
+    series = await r.json();
+  } catch (e) {
+    ArtRium.toast('Serie konnte nicht geladen werden: ' + e.message, true);
+    return;
+  }
+
+  const all = series.images || [];
+  if (!all.length) { ArtRium.toast('Diese Serie hat keine Bilder', true); return; }
+
+  setMode('feed');
+  state.selectedMedia = all.slice(0, MAX_CAROUSEL).map(img => ({
+    kind: 'image', id: img.id, filename: img.filename, title: img.title,
+    thumb_url: img.thumb_url, url: img.url,
+    width: img.width, height: img.height,
+  }));
+  // The series wins over the session cache on purpose: arriving here from a
+  // named package and finding the previous draft's caption would be the
+  // import not having happened.
+  $('caption-input').value = series.title || '';
+
+  const banner = $('series-banner');
+  banner.textContent = `◈ Serie „${series.title || 'Ohne Titel'}" · ${state.selectedMedia.length} Bilder`
+    + (all.length > state.selectedMedia.length ? ` (von ${all.length} — Karussell fasst ${MAX_CAROUSEL})` : '');
+  banner.style.display = '';
+
+  renderSelectedStrip();
+  if (all.length > MAX_CAROUSEL) {
+    ArtRium.toast(`Serie hat ${all.length} Bilder — die ersten ${MAX_CAROUSEL} übernommen`);
+  }
+}
 
 async function probeOutpost() {
   try {

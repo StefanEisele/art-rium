@@ -4848,6 +4848,73 @@ function pollSoundtrackMux(videoId, songId) {
   }, 2000);
 }
 
+// ── Series deep link ──────────────────────────────────────────────────────────
+/** `?series=<id>` from the gallery's series sheet: the package becomes the
+ *  key frames, in the order it was curated in.
+ *
+ *  Two things here are easy to get wrong and both throw rather than degrade:
+ *
+ *  - The caps are per mode, not global (i2v_multi 10, minimax_i2v 6,
+ *    flf2v 20, minimax_flf 7). A link landing in a session-restored
+ *    minimax_i2v would otherwise drop half a series without saying so, so
+ *    the trim names the mode it happened in.
+ *  - The two prompt suggesters read different DOM: suggestTransitionPrompts
+ *    walks `.per-transition-row` elements, which exist only in transition
+ *    modes, and suggestI2vPrompts dereferences #suggest-i2v-btn, which
+ *    exists only in the per-image ones. Calling the wrong one is a TypeError
+ *    on null, not a bad suggestion.
+ */
+async function applySeriesDeepLink() {
+  const id = new URLSearchParams(location.search).get('series');
+  if (!id) return;
+  history.replaceState(null, '', location.pathname);
+
+  let series;
+  try {
+    const r = await api(`/api/series/${encodeURIComponent(id)}`);
+    series = await r.json();
+  } catch (e) {
+    ArtRium.toast('Serie konnte nicht geladen werden: ' + e.message, true);
+    return;
+  }
+
+  const all = series.images || [];
+  if (all.length < 1) { ArtRium.toast('Diese Serie hat keine Bilder', true); return; }
+
+  const cap = maxImagesForMode();
+  state.selectedImages = all.slice(0, cap).map(img => ({
+    id: img.id, filename: img.filename, url: img.url, thumb_url: img.thumb_url,
+  }));
+  // Prompt rows are rebuilt from the new strip, so anything keyed to the old
+  // pictures would linger as rows nobody can see.
+  state.perImageSettings.clear();
+  state.transitionSettings.clear();
+  renderStrip();
+
+  // The series' own words as context for the writer — the same field the
+  // story panel uses, and /suggest-transitions already takes it.
+  const context = [series.title, series.notes].filter(Boolean).join(' — ');
+  const storyEl = $('story-text');
+  if (context && storyEl && !storyEl.value.trim()) storyEl.value = context;
+
+  ArtRium.toast(all.length > cap
+    ? `Serie „${series.title || 'Ohne Titel'}" — ${cap} von ${all.length} Bildern (${state.mode} fasst ${cap})`
+    : `Serie „${series.title || 'Ohne Titel'}" geladen — ${all.length} Bilder`);
+
+  // Prompts straight away, as asked — but announced, because the per-image
+  // path is one VLM call per picture behind a polled job and a link that
+  // silently occupies the GPU for a minute is a surprise.
+  if (isTransitionMode()) {
+    if (state.selectedImages.length >= 2) {
+      ArtRium.toast('VLM schreibt die Übergangs-Prompts…');
+      suggestTransitionPrompts();
+    }
+  } else {
+    ArtRium.toast('VLM schreibt die Bewegungs-Prompts…');
+    suggestI2vPrompts();
+  }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
   // Before the first paint: every render below reads `state`, so restoring
@@ -4869,6 +4936,11 @@ window.addEventListener('load', async () => {
   // racing them.
   await Promise.all([loadWanLoras(), loadStoryLoras(), loadStoryStyles()]);
   _reapplyServerFedSelections(saved);
+  // After the restore and the server-fed lists, before the autosaver starts:
+  // an explicitly imported series is meant to replace whatever was left in
+  // the form, and the first thing saved should be the series, not the draft
+  // it displaced.
+  await applySeriesDeepLink();
   videoSession.start();
   // Songs name the soundtrack on each card, so they have to be in hand BEFORE
   // the cards render — and it has to be this one render, because loadVideos()

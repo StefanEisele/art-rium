@@ -261,7 +261,13 @@
       font-size: 14px;
       font-weight: 600;
       color: var(--text-dim);
+      flex-shrink: 0;
     }
+
+    /* Two actions now, so they share the right-hand side rather than the bar
+       being a label and one button. */
+    .bulk-actions { display: flex; gap: 8px; align-items: center; }
+    .bulk-actions .btn { flex: 0 0 auto; }
 
     /* ════════════════════════════════════════
        MODAL
@@ -628,6 +634,8 @@
       display: flex; justify-content: space-between;
       font-size: 10px; color: var(--text-dim); margin-top: -4px;
     }
+    .us-band { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+    .us-band b { color: var(--text); font-weight: 700; }
     .us-actions { justify-content: space-between; }
     .us-eta { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
     .us-progress { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; }
@@ -692,6 +700,195 @@
     @media (min-width: 860px) {
       #titler-modal { align-items: center; }
       .titler-sheet { border-radius: 16px; border-bottom: 1.5px solid var(--border); padding-bottom: 18px; }
+    }
+
+    /* ════════════════════════════════════════
+       SERIES
+    ════════════════════════════════════════ */
+
+    /* The pick number, on a grid tile. `.order-badge`'s shape comes from
+       shared.css; only where it sits and when it shows belong here — the
+       top-right corner is already the rating badge's. */
+    .grid-item .order-badge { top: 7px; left: 7px; z-index: 2; }
+    .grid-item.selected .order-badge { display: flex; }
+
+    /* "This picture is already in a stack", said without leaving the picture
+       grid. Members deliberately stay here: the series grid is a second view
+       of them, not a place they move to. */
+    .series-badge {
+      position: absolute; bottom: 7px; right: 7px;
+      background: rgba(0,0,0,0.65);
+      color: var(--accent-2);
+      border-radius: 8px; padding: 2px 6px;
+      font-size: 11px; font-weight: 600;
+      pointer-events: none;
+    }
+
+    /* ── Stack tile ──
+       Two cards fanned out behind the cover, so a stack reads as several
+       pictures at a glance rather than as one picture with a number on it. */
+    .series-grid-item {
+      display: flex; flex-direction: column; gap: 6px;
+      cursor: pointer; -webkit-tap-highlight-color: transparent;
+    }
+    .series-grid-item .stack {
+      position: relative;
+      aspect-ratio: 1;
+      /* Room for the fan to lean out without being clipped by the grid gap. */
+      padding: 6px 8px 8px 6px;
+    }
+    .stack-card {
+      position: absolute; inset: 6px 8px 8px 6px;
+      border-radius: 10px; overflow: hidden;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+    }
+    .stack-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .stack-card.back { transform: rotate(3deg) translate(5px, -4px); opacity: 0.75; }
+    .stack-card.back.far { transform: rotate(6deg) translate(10px, -8px); opacity: 0.5; }
+    .stack-card.cover {
+      outline: 2.5px solid transparent;
+      transition: outline-color 0.15s;
+      box-shadow: var(--shadow-card);
+    }
+    .stack-card.cover.empty {
+      display: flex; align-items: center; justify-content: center;
+      font-size: 34px; color: var(--text-faint);
+    }
+    .series-grid-item.selected .stack-card.cover { outline-color: var(--accent); }
+    .stack-count {
+      position: absolute; bottom: 7px; right: 7px;
+      background: rgba(0,0,0,0.7); color: var(--text);
+      border-radius: 8px; padding: 2px 7px;
+      font-size: 12px; font-weight: 700;
+    }
+
+    /* ── Series sheets (create + detail) ──
+       Same bottom-sheet shape as the Titler overlay, but *below* the picture
+       modal (z-index 100), because a member is opened from inside this sheet:
+       above it, the modal would open behind the sheet that summoned it.
+       Closing the picture brings the sheet back, still scrolled where it was.
+       The Titler overlay stays highest at 210, above all three. */
+    #series-modal, #series-create-modal {
+      display: none; position: fixed; inset: 0; z-index: 90;
+      background: rgba(0,0,0,0.78);
+      align-items: flex-end; justify-content: center;
+      padding-top: env(safe-area-inset-top);
+    }
+    #series-modal.show, #series-create-modal.show { display: flex; }
+    .series-sheet {
+      width: 100%; max-width: 520px;
+      background: var(--surface);
+      border: 1.5px solid var(--border); border-bottom: none;
+      border-radius: 18px 18px 0 0;
+      padding: 18px 18px calc(env(safe-area-inset-bottom) + 20px);
+      display: flex; flex-direction: column; gap: 16px;
+      max-height: 92dvh; overflow-y: auto;
+    }
+    .sd-head { display: flex; align-items: center; gap: 10px; }
+    .sd-head h2 { font-size: 16px; font-weight: 700; flex: 1; }
+    .sd-head .title-input { flex: 1; min-width: 0; }
+    .sd-sub { font-size: 13px; color: var(--text-dim); }
+
+    .sd-members {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+      gap: 10px;
+    }
+    .sd-member { display: flex; flex-direction: column; gap: 4px; }
+    .sd-member-img {
+      position: relative; aspect-ratio: 1;
+      border-radius: 9px; overflow: hidden;
+      background: var(--surface2);
+      border: 1.5px solid var(--border);
+      cursor: pointer;
+    }
+    .sd-member.is-cover .sd-member-img { border-color: var(--accent); }
+    .sd-member-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .sd-pos {
+      position: absolute; top: 4px; left: 4px;
+      background: rgba(0,0,0,0.7); color: var(--text);
+      border-radius: 50%; width: 19px; height: 19px;
+      font-size: 11px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .sd-cover-tag {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      background: var(--accent); color: var(--on-accent);
+      font-size: 9px; font-weight: 700; letter-spacing: 0.5px;
+      text-transform: uppercase; text-align: center; padding: 2px 0;
+    }
+    /* Arrows rather than drag-and-drop: HTML5 drag does not fire on touch at
+       all, and this gallery is used on a phone first. */
+    .sd-member-bar { display: flex; gap: 3px; }
+    .sd-member-bar button {
+      flex: 1; background: var(--surface2);
+      border: 1px solid var(--border); border-radius: 6px;
+      color: var(--text); font-family: inherit; font-size: 13px;
+      padding: 3px 0; cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .sd-member-bar button:disabled { opacity: 0.3; cursor: default; }
+    .sd-member-bar button.rm:active { background: var(--red); border-color: var(--red); }
+    .sd-add-row { display: flex; }
+
+    /* The shared .pass-bar is built for three buttons; a fourth at phone
+       width truncates the longest word, and "Instag…" is not a label. Two
+       rows of two until there is room for one row of four. */
+    #sd-jumps { flex-wrap: wrap; }
+    #sd-jumps .pass-btn { flex: 1 1 calc(50% - 5px); }
+    @media (min-width: 560px) {
+      #sd-jumps .pass-btn { flex: 1 1 0; }
+    }
+
+    /* What each tool will actually receive, next to the button that sends it
+       there — so trimming is something you see before pressing, not a toast
+       afterwards. */
+    .sd-caps {
+      display: flex; flex-wrap: wrap; gap: 6px;
+      margin-top: 8px;
+      font-size: 11px; color: var(--text-faint);
+    }
+    .sd-cap {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius-pill); padding: 2px 8px;
+    }
+    .sd-cap.over { color: var(--yellow); border-color: var(--yellow); }
+
+    /* ── Create sheet ── */
+    .sc-strip {
+      display: flex; gap: 8px; overflow-x: auto;
+      padding-bottom: 4px; -webkit-overflow-scrolling: touch;
+    }
+    .sc-thumb {
+      position: relative; flex: 0 0 auto;
+      width: 66px; height: 66px;
+      border-radius: 9px; overflow: hidden;
+      border: 1.5px solid var(--border); background: var(--surface2);
+    }
+    .sc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .sc-thumb span {
+      position: absolute; top: 3px; left: 3px;
+      background: var(--accent); color: var(--on-accent);
+      border-radius: 50%; width: 18px; height: 18px;
+      font-size: 10px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .sc-select {
+      width: 100%;
+      background: var(--surface2); color: var(--text);
+      border: 1.5px solid var(--border); border-radius: 10px;
+      font-family: inherit; font-size: 15px; padding: 11px 12px;
+    }
+
+    @media (min-width: 860px) {
+      #series-modal, #series-create-modal { align-items: center; }
+      .series-sheet {
+        border-radius: 16px; border-bottom: 1.5px solid var(--border);
+        padding-bottom: 18px;
+      }
+      .series-sheet.wide { max-width: 760px; }
+      .sd-members { grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); }
     }
 
     /* ── Action buttons ── */
@@ -1023,7 +1220,8 @@
     <button class="filter-chip" data-rating="4" onclick="setRatingFilter(this)">★ 4+</button>
     <button class="filter-chip" data-rating="3" onclick="setRatingFilter(this)">★ 3+</button>
     <button class="filter-chip" data-rating="unrated" onclick="setRatingFilter(this)">Unrated</button>
-    <button class="filter-chip" id="videos-chip" data-rating="" onclick="toggleVideoMode(this)">▶ Videos</button>
+    <button class="filter-chip" id="videos-chip" data-grid-mode="videos" onclick="setGridMode('videos', this)">▶ Videos</button>
+    <button class="filter-chip" id="series-chip" data-grid-mode="series" onclick="setGridMode('series', this)">◈ Serien</button>
   </div>
 
   <div class="count-bar" id="count-bar"></div>
@@ -1035,10 +1233,17 @@
     </div>
   </div>
 
-  <!-- Bulk action bar — shown in select mode -->
+  <!-- Bulk action bar — shown in select mode.
+       The order the pictures were tapped in is the order the series gets, and
+       the numbered badges on the tiles are what makes that visible, so this
+       bar says so rather than leaving it to be discovered. -->
   <div class="bulk-bar" id="bulk-bar">
     <span id="bulk-count">0 selected</span>
-    <button class="btn danger" id="bulk-delete-btn" onclick="bulkDelete()" disabled>Delete</button>
+    <div class="bulk-actions">
+      <button class="btn" id="bulk-series-btn" onclick="openSeriesCreate()" disabled
+              title="Aus der Auswahl eine Serie bauen — in der Reihenfolge, in der du sie angetippt hast">◈ Serie</button>
+      <button class="btn danger" id="bulk-delete-btn" onclick="bulkDelete()" disabled>Delete</button>
+    </div>
   </div>
 
 </div>
@@ -1148,13 +1353,17 @@
           <span class="fx-chips" id="upscale-models"></span>
         </div>
         <div class="us-row">
-          <span class="us-label">Stil</span>
-          <input type="range" id="upscale-denoise" min="10" max="45" step="1" value="25">
-          <span class="fx-pct" id="upscale-denoise-val">0.25</span>
+          <span class="us-label">Kreativ</span>
+          <input type="range" id="upscale-denoise" min="0" max="60" step="1" value="0">
+          <span class="fx-pct" id="upscale-denoise-val">0.00</span>
         </div>
         <div class="us-scale-ends">
-          <span>← Mehr Konsistenz</span><span>Mehr Kreativität →</span>
+          <span>← Originaltreu</span><span>Neu deuten →</span>
         </div>
+        <!-- What the slider position does, in words — measured, see
+             services/image/upscale.py. The number alone says nothing about
+             where "sharper" ends and "a different picture" begins. -->
+        <div class="us-band" id="upscale-band"></div>
         <div class="us-row us-actions">
           <span class="us-eta" id="upscale-eta"></span>
           <button class="chip-btn apply" id="upscale-run" onclick="runUpscale()">Vergrößern</button>
@@ -1282,7 +1491,96 @@
     </div>
     <div id="titler-body"></div>
     <div class="titler-actions">
-      <button class="btn" id="titler-regen-btn" onclick="runTitler()">↻ Neue Vorschläge</button>
+      <button class="btn" id="titler-regen-btn" onclick="rerunTitler()">↻ Neue Vorschläge</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Serie anlegen ──
+     Opened over a selection in the picture grid. The strip shows the order
+     that selection will become, because tap order is series order and there
+     is no undoing a package built back to front without noticing. -->
+<div id="series-create-modal" onclick="closeSeriesCreate(event)">
+  <div class="series-sheet" onclick="event.stopPropagation()">
+    <div class="sd-head">
+      <h2>Serie anlegen</h2>
+      <button class="modal-close" onclick="closeSeriesCreate()">✕</button>
+    </div>
+    <div class="sd-sub" id="sc-count"></div>
+    <div class="sc-strip" id="sc-strip"></div>
+
+    <div>
+      <div class="section-label">Ziel</div>
+      <select class="sc-select" id="sc-target" onchange="onSeriesTargetChange()"></select>
+    </div>
+
+    <div id="sc-title-row">
+      <div class="section-label">Titel (optional)</div>
+      <input class="title-input" id="sc-title" placeholder="z.B. Rostküste"
+             autocomplete="off" autocorrect="off" spellcheck="false">
+    </div>
+
+    <div class="action-row">
+      <button class="btn" onclick="closeSeriesCreate()">Abbrechen</button>
+      <button class="btn primary" id="sc-save" onclick="submitSeriesCreate()">Anlegen</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Serien-Detail ──
+     Its own id, not the picture modal's: `initModalSwipe`, `scheduleDelete`
+     and the keydown chain all target #modal by name. -->
+<div id="series-modal" onclick="closeSeriesDetail(event)">
+  <div class="series-sheet wide" onclick="event.stopPropagation()">
+    <div class="sd-head">
+      <input class="title-input" id="sd-title" placeholder="Serie ohne Titel…"
+             autocomplete="off" autocorrect="off" spellcheck="false"
+             oninput="seriesState.dirty = true">
+      <button class="wand-btn" id="sd-titler-btn" onclick="suggestSeriesTitle()"
+              title="Titel für die ganze Serie vorschlagen lassen">✨</button>
+      <button class="modal-close" onclick="closeSeriesDetail()">✕</button>
+    </div>
+    <div class="sd-sub" id="sd-sub"></div>
+
+    <div class="sd-members" id="sd-members"></div>
+    <div class="sd-add-row">
+      <button class="chip-btn" onclick="openSeriesAdd()">+ Bilder hinzufügen</button>
+    </div>
+
+    <div>
+      <div class="section-label">Notizen</div>
+      <textarea class="notes-textarea" id="sd-notes" placeholder="Worum geht es in dieser Serie?"
+                oninput="seriesState.dirty = true"></textarea>
+    </div>
+
+    <!-- The four handoffs. Each opens its tool with this series already
+         loaded; the caps line under them says what will actually arrive. -->
+    <div>
+      <div class="section-label">Weitergeben</div>
+      <div class="pass-bar" id="sd-jumps">
+        <button class="pass-btn" type="button" onclick="sendSeriesTo('titler')"
+                title="Die Serie durchgehen und jedes Bild betiteln">
+          <span class="glyph">✨</span><span class="txt">Titler</span>
+        </button>
+        <button class="pass-btn" type="button" onclick="sendSeriesTo('video')"
+                title="Als Keyframes ins Video-Tool, mit VLM-Prompts">
+          <span class="glyph">🎬</span><span class="txt">Video</span>
+        </button>
+        <button class="pass-btn" type="button" onclick="sendSeriesTo('articles')"
+                title="Als Grundlage für einen WordPress-Artikel">
+          <span class="glyph">📝</span><span class="txt">Artikel</span>
+        </button>
+        <button class="pass-btn" type="button" onclick="sendSeriesTo('instagram')"
+                title="Als Karussell mit dem Serientitel als Beitragstext">
+          <span class="glyph">📸</span><span class="txt">Instagram</span>
+        </button>
+      </div>
+      <div class="sd-caps" id="sd-caps"></div>
+    </div>
+
+    <div class="action-row">
+      <button class="btn danger" onclick="deleteSeries()">Serie löschen</button>
+      <button class="btn primary" id="sd-save" onclick="saveSeriesDetail()">Speichern</button>
     </div>
   </div>
 </div>
@@ -1324,6 +1622,9 @@ const state = {
     rating: null,
     tags:   [],
     dirty:  false,
+    // When set, the list `‹ ›` walks instead of the loaded gallery page —
+    // a series, so stepping through a package stays inside it.
+    scope:  null,
   },
 };
 
@@ -1502,6 +1803,10 @@ const makeGridItem = (img, idx) => {
   div.className = 'grid-item';
   div.dataset.idx = idx;
   div.dataset.id  = img.id;
+  // Re-applied on every render: a grid rebuilt while select mode is on (a
+  // reload, a delete that left survivors) must not silently drop the marks —
+  // which matters far more now that the marks carry an order.
+  if (state.selectMode && state.selection.has(img.id)) div.classList.add('selected');
   div.onclick = () => {
     if (state.selectMode) {
       toggleSelect(div, img.id);
@@ -1530,10 +1835,26 @@ const makeGridItem = (img, idx) => {
   selCheck.className = 'sel-check';
   selCheck.textContent = '✓';
 
+  // The click order is the series order, so it has to be readable while
+  // picking — a row of identical ticks cannot say which picture is first.
+  const order = document.createElement('div');
+  order.className = 'order-badge';
+
   wrap.appendChild(image);
   wrap.appendChild(overlay);
   wrap.appendChild(badge);
+  // Says "this one already belongs to a stack" without leaving the picture
+  // grid. Members stay here on purpose: the series grid is a second view of
+  // them, not a place they move to.
+  if (img.series_ids && img.series_ids.length) {
+    const sb = document.createElement('div');
+    sb.className = 'series-badge';
+    sb.textContent = '◈' + img.series_ids.length;
+    sb.title = img.series_ids.length === 1 ? 'In einer Serie' : `In ${img.series_ids.length} Serien`;
+    wrap.appendChild(sb);
+  }
   wrap.appendChild(selCheck);
+  wrap.appendChild(order);
   div.appendChild(wrap);
 
   const titleEl = document.createElement('div');
@@ -1570,10 +1891,11 @@ const toggleSelectMode = () => {
   $('select-btn').textContent = state.selectMode ? 'Cancel' : 'Select';
   $('bulk-bar').classList.toggle('show', state.selectMode);
 
-  // Clear selected styling from all items — pictures and videos alike, since
-  // the same button drives both grids.
-  $('grid').querySelectorAll('.grid-item, .video-grid-item')
+  // Clear selected styling from all items — pictures, videos and series
+  // alike, since the same button drives all three grids.
+  $('grid').querySelectorAll('.grid-item, .video-grid-item, .series-grid-item')
     .forEach(el => el.classList.remove('selected'));
+  $('grid').classList.toggle('picking', state.selectMode);
   updateBulkBar();
 };
 
@@ -1588,13 +1910,42 @@ const toggleSelect = (el, id) => {
   updateBulkBar();
 };
 
+const NOUN_BY_MODE = { images: 'image', videos: 'video', series: 'series' };
+
 const updateBulkBar = () => {
   const n = state.selection.size;
-  const noun = videoMode ? 'video' : 'image';
-  $('bulk-count').textContent = n === 0
-    ? `0 ${noun}s selected`
-    : `${n} ${noun}${n === 1 ? '' : 's'} selected`;
+  const noun = NOUN_BY_MODE[gridMode] || 'image';
+  // "series" is already plural; the others take an -s.
+  const plural = noun === 'series' ? 'series' : noun + 's';
+  $('bulk-count').textContent = n === 1
+    ? `1 ${noun} selected`
+    : `${n} ${plural} selected`;
   $('bulk-delete-btn').disabled = n === 0;
+  // Grouping is a picture operation: a stack of stacks is not a thing, and a
+  // video cannot go into an image series.
+  const seriesBtn = $('bulk-series-btn');
+  if (seriesBtn) {
+    seriesBtn.style.display = gridMode === 'images' ? '' : 'none';
+    seriesBtn.disabled = n < 2;
+  }
+  renumberSelection();
+};
+
+/** Keep the order badges agreeing with the click order.
+ *
+ *  `state.selection` is a Set, and a Set keeps insertion order — so the
+ *  numbers here are exactly the order the series will be built in. Re-ticking
+ *  a picture moves it to the end, which is how you correct the order without
+ *  starting over. */
+const renumberSelection = () => {
+  const order = [...state.selection];
+  $('grid').querySelectorAll('.grid-item, .video-grid-item, .series-grid-item')
+    .forEach(el => {
+      const badge = el.querySelector('.order-badge');
+      if (!badge) return;
+      const i = order.indexOf(el.dataset.id);
+      badge.textContent = i >= 0 ? String(i + 1) : '';
+    });
 };
 
 const bulkDeleteVideosApi = async (ids) => {
@@ -1644,7 +1995,10 @@ const bulkDeleteVideos = async () => {
 };
 
 const bulkDelete = async () => {
-  if (videoMode) return bulkDeleteVideos();
+  // Each mode has its own delete endpoint and its own id space. Falling
+  // through would hand series ids to the picture endpoint.
+  if (gridMode === 'videos') return bulkDeleteVideos();
+  if (gridMode === 'series') return bulkDeleteSeries();
   const ids = [...state.selection];
   if (ids.length === 0) return;
   if (!confirm(`Delete ${ids.length} image${ids.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
@@ -1683,6 +2037,11 @@ const bulkDelete = async () => {
 // ══════════════════════════════════════════════════════════
 // FILTERS
 // ══════════════════════════════════════════════════════════
+// Searching redraws the *active* mode. It used to call fetchImages()
+// unconditionally, which repainted pictures into the grid while leaving the
+// mode flag on videos — so the bulk bar counted "videos" over a grid of
+// pictures, and Delete routed to the video endpoint. With a third mode that
+// stops being cosmetic.
 let searchTimer;
 const onSearchInput = () => {
   const val = $('search-input').value.trim();
@@ -1690,7 +2049,7 @@ const onSearchInput = () => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
     state.filters.search = val;
-    fetchImages(true);
+    refreshGrid();
   }, 400);
 };
 
@@ -1698,11 +2057,17 @@ const clearSearch = () => {
   $('search-input').value = '';
   $('search-clear').classList.remove('show');
   state.filters.search = '';
-  fetchImages(true);
+  refreshGrid();
 };
 
 const setRatingFilter = (btn) => {
-  if (videoMode) { videoMode = false; $('vd-player') && ($('vd-player').src = ''); }
+  // Ratings are a picture property, so picking one is also a way back to
+  // pictures from either of the other grids.
+  if (gridMode !== 'images') {
+    gridMode = 'images';
+    const p = $('vd-player'); if (p) p.src = '';
+    if (state.selectMode) { state.selection.clear(); updateBulkBar(); }
+  }
   document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
   btn.classList.add('active');
   state.filters.ratingMin = btn.dataset.rating;
@@ -1711,12 +2076,18 @@ const setRatingFilter = (btn) => {
 
 const loadMore = () => {
   $('load-more-btn').disabled = true;
+  if (gridMode === 'series') return fetchSeries(false);
   fetchImages(false);
 };
 
 // ══════════════════════════════════════════════════════════
 // MODAL
 // ══════════════════════════════════════════════════════════
+/** The list `‹ ›` walks. Normally the loaded gallery page; when the modal was
+ *  opened from a series, that series — so stepping through a package stays
+ *  inside it instead of wandering off into whatever else was loaded. */
+const modalList = () => state.modal.scope || state.images;
+
 const openModal = (idx) => {
   state.modal.index = idx;
   // Shown before it is filled, deliberately: while the modal is `display:none`
@@ -1725,7 +2096,7 @@ const openModal = (idx) => {
   // window — a rung or two more than the modal can show. Both run in the same
   // task, so nothing is painted in between.
   $('modal').classList.add('open');
-  populateModal(state.images[idx]);
+  populateModal(modalList()[idx]);
   document.body.style.overflow = 'hidden';
 };
 
@@ -1734,14 +2105,17 @@ const closeModal = async () => {
     await saveModal(true);
   }
   $('modal').classList.remove('open');
-  document.body.style.overflow = '';
+  // The series sheet is still underneath when the modal was opened from it,
+  // so the scroll lock has to stay on until that closes too.
+  if (!state.modal.scope) document.body.style.overflow = '';
   state.modal.dirty = false;
+  state.modal.scope = null;
 };
 
 const navigate = (dir) => {
   if (state.modal.dirty) saveModal(true);
   const next = state.modal.index + dir;
-  if (next < 0 || next >= state.images.length) return;
+  if (next < 0 || next >= modalList().length) return;
   state.modal.dirty = false;
   openModal(next);
 };
@@ -1800,6 +2174,10 @@ const populateModal = (img) => {
     shown.upscaled ? `Original ${img.width}×${img.height}` : null,
     img.seed !== null && img.seed !== undefined ? `seed ${img.seed}` : null,
     ...loraChips,
+    // Only when it was actually turned: 0 sampled identically to every
+    // picture made before the dial existed, so a "Detail 0" chip on half the
+    // library would be noise claiming to be information.
+    img.detail_amount ? `Detail ${img.detail_amount > 0 ? '+' : ''}${img.detail_amount}` : null,
     img.workflow_name || null,
     formatDate(img.created_at),
   ].filter(Boolean);
@@ -1819,7 +2197,7 @@ const populateModal = (img) => {
   $('modal-notes').oninput = () => { state.modal.dirty = true; };
 
   $('nav-prev').disabled = state.modal.index <= 0;
-  $('nav-next').disabled = state.modal.index >= state.images.length - 1;
+  $('nav-next').disabled = state.modal.index >= modalList().length - 1;
 };
 
 // ══════════════════════════════════════════════════════════
@@ -2112,10 +2490,11 @@ const initGrainControls = () => {
 // result when it lands. So it can be started whatever else is switched on, and
 // nothing above it can cost the GPU minutes it took.
 //
-// The slider is the whole point of the UI. It is the sampler's denoise, named
-// after what it decides: low keeps the picture and only sharpens it, high lets
-// each tile repaint its contents. The range comes from the server
-// (/upscale/options) so it cannot drift from services/image/upscale.py.
+// The slider is Kreativität: the redraw's start noise. 0 only enlarges; up to
+// 0.6 Z-Image repaints more and more of every tile. The range, the band
+// labels and each enlarger's own default come from the server
+// (/upscale/options) so they cannot drift from services/image/upscale.py,
+// where the measurements behind them are.
 const usState = {
   options: null,      // /upscale/options for the open image
   scale: null,
@@ -2154,7 +2533,9 @@ const renderUpscaleUI = (img) => {
   renderFxBar(img);
 };
 
-const UPSCALE_MODEL_LABELS = { nomos8ksc: '4x Nomos8kSC', realesrgan: 'RealESRGAN 4x+' };
+const UPSCALE_MODEL_LABELS = {
+  seedvr2: 'SeedVR2', nomos8ksc: 'Nomos8kSC', realesrgan: 'RealESRGAN',
+};
 
 // What the upscale actually did, in the terms the decision was made in: how
 // much bigger, from what, with which model, and how far it was allowed to
@@ -2166,7 +2547,12 @@ const upscaleFactChips = (img) => {
     `von ${img.width}×${img.height}`,
     `${megapixels(d.w, d.h).toFixed(1)} MP`,
     UPSCALE_MODEL_LABELS[img.upscale_model] || img.upscale_model,
-    `Stil ${Number(img.upscale_denoise).toFixed(2)}`,
+    // Rows from before 2026-09-26 were drawn with the old AuraFlow-shifted
+    // denoise, so their number is not on today's scale — it is still what
+    // was asked for, which is all a chip claims.
+    Number(img.upscale_denoise) > 0
+      ? `Kreativität ${Number(img.upscale_denoise).toFixed(2)}`
+      : 'nur vergrößert',
   ].filter(Boolean);
 };
 
@@ -2208,12 +2594,34 @@ const loadUpscaleOptions = async (img) => {
   }
   const o = usState.options;
   usState.scale = usState.scale || o.scale_default;
-  usState.model = usState.model || o.default_model;
-  usState.denoise = o.denoise_default;
+  // A model the server no longer offers (Nomos was the old default, "4x+" the
+  // old label) falls back rather than being submitted and silently swapped.
+  if (!o.models.some(m => m.key === usState.model)) usState.model = o.default_model;
   $('upscale-denoise').min = Math.round(o.denoise_min * 100);
   $('upscale-denoise').max = Math.round(o.denoise_max * 100);
-  $('upscale-denoise').value = Math.round(usState.denoise * 100);
+  setUpscaleDenoise(modelDefaultDenoise(usState.model));
   renderUpscalePanel();
+};
+
+const modelDefaultDenoise = (key) => {
+  const m = (usState.options?.models || []).find(x => x.key === key);
+  return m ? m.default_denoise : (usState.options?.denoise_default ?? 0);
+};
+
+const setUpscaleDenoise = (v) => {
+  usState.denoise = v;
+  $('upscale-denoise').value = Math.round(v * 100);
+};
+
+/** The ETA follows both choices: SeedVR2 without a redraw is under a minute,
+ *  the same with one is several — the slider is what moves between them. */
+const upscaleEta = (scaleEntry) => {
+  const t = scaleEntry?.timing;
+  if (!t) return scaleEntry?.seconds;
+  const enlarge = t.enlarge[usState.model] ?? 0;
+  if (usState.denoise <= 0) return enlarge;
+  // ESRGAN runs inside the redraw node, so only SeedVR2 adds its own time.
+  return (usState.model === 'seedvr2' ? enlarge : 0) + t.redraw;
 };
 
 const renderUpscalePanel = () => {
@@ -2231,16 +2639,28 @@ const renderUpscalePanel = () => {
             onclick="pickUpscaleModel('${m.key}')" title="${m.hint}">${m.label}</button>`).join('');
   $('upscale-denoise-val').textContent = usState.denoise.toFixed(2);
 
+  const band = (o.denoise_bands || []).find(b => usState.denoise < b.to)
+    || (o.denoise_bands || []).slice(-1)[0];
+  $('upscale-band').innerHTML = band
+    ? `<b>${ArtRium.escHtml(band.band)}</b> — ${ArtRium.escHtml(band.effect)}` : '';
+
   const chosen = o.scales.find(s => s.scale === usState.scale);
+  const tiles = usState.denoise > 0 && chosen ? ` · ${chosen.tiles} Kacheln` : '';
   $('upscale-eta').textContent = chosen
-    ? `${chosen.width}×${chosen.height} · ${chosen.tiles} Kacheln · ca. ${fmtUsEta(chosen.seconds)}`
+    ? `${chosen.width}×${chosen.height}${tiles} · ca. ${fmtUsEta(upscaleEta(chosen))}`
     : '';
 };
 
 const fmtUsEta = (sec) => sec < 90 ? `${Math.round(sec)} s` : `${Math.round(sec / 60)} min`;
 
 const pickUpscaleScale = (s) => { usState.scale = s; renderUpscalePanel(); };
-const pickUpscaleModel = (m) => { usState.model = m; renderUpscalePanel(); };
+// Each enlarger has its own sensible Kreativität: SeedVR2 is best left alone,
+// an ESRGAN file on its own has painted nothing and wants a light redraw.
+const pickUpscaleModel = (m) => {
+  usState.model = m;
+  setUpscaleDenoise(modelDefaultDenoise(m));
+  renderUpscalePanel();
+};
 
 const runUpscale = async () => {
   const img = state.modal.image;
@@ -2332,7 +2752,8 @@ const initUpscaleControls = () => {
   const slider = $('upscale-denoise');
   slider.addEventListener('input', () => {
     usState.denoise = parseInt(slider.value, 10) / 100;
-    $('upscale-denoise-val').textContent = usState.denoise.toFixed(2);
+    // The band line and the ETA both depend on it, so the whole readout.
+    renderUpscalePanel();
   });
   // Hold to see the picture at its original size — the comparison that matters
   // is the detail the pass painted, so it goes against the rendition below.
@@ -2350,7 +2771,30 @@ const initUpscaleControls = () => {
 // The standalone /tools/titler page runs the same endpoint; here it is an
 // overlay on the title field so a title can be picked without leaving the
 // image being looked at.
-const titlerState = { imageId: null, busy: false };
+// `onPick` is what makes this overlay reusable: the title field and the
+// series sheet run different endpoints but choose from the list the same
+// way, and `rerun` is whatever "↻ Neue Vorschläge" should call this time.
+const titlerState = { imageId: null, busy: false, onPick: null, rerun: null };
+
+/** Show suggestions in the overlay and call back with whichever is picked. */
+const openTitlerChoices = (titles, onPick, rerun = null) => {
+  titlerState.onPick = onPick;
+  titlerState.rerun = rerun;
+  $('titler-regen-btn').style.display = rerun ? '' : 'none';
+  $('titler-modal').classList.add('show');
+  renderTitleSuggestions(titles);
+};
+
+/** Same overlay, opened before the model has answered, so the wait is
+ *  visible where the answer will appear. */
+const openTitlerBusy = (message, rerun = null) => {
+  titlerState.rerun = rerun;
+  $('titler-regen-btn').style.display = rerun ? '' : 'none';
+  $('titler-modal').classList.add('show');
+  setTitlerStatus(message, 'busy');
+};
+
+const rerunTitler = () => { if (titlerState.rerun) titlerState.rerun(); };
 
 // Hand off to the generator tool with this image pre-picked. Not an in-gallery
 // pass: it produces new Image rows of its own, so it belongs where generation
@@ -2374,6 +2818,9 @@ const continueInGenerator = () => {
 const openTitler = () => {
   const img = state.modal.image;
   if (!img) return;
+  titlerState.onPick = null;          // the default: into the title field
+  titlerState.rerun = runTitler;
+  $('titler-regen-btn').style.display = '';
   $('titler-modal').classList.add('show');
   // Suggestions belong to one image: reopening on another must not show the
   // previous image's titles while the new ones are still being generated.
@@ -2386,6 +2833,8 @@ const openTitler = () => {
 const closeTitler = (e) => {
   if (e && e.target !== $('titler-modal')) return;
   $('titler-modal').classList.remove('show');
+  titlerState.onPick = null;
+  titlerState.rerun = null;
 };
 
 const setTitlerStatus = (text, kind = '') => {
@@ -2439,11 +2888,17 @@ const renderTitleSuggestions = (titles) => {
   body.appendChild(list);
 };
 
-/** Put a suggestion into the title field. Saved with the rest of the modal. */
+/** Take a suggestion. Whoever opened the overlay decides where it lands;
+ *  with no callback it goes into the image title field, saved with the rest
+ *  of the modal. */
 const useTitle = (title) => {
-  $('modal-title').value = title;
-  state.modal.dirty = true;
+  const onPick = titlerState.onPick;
   closeTitler();
+  if (onPick) onPick(title);
+  else {
+    $('modal-title').value = title;
+    state.modal.dirty = true;
+  }
   ArtRium.toast('Titel übernommen — noch speichern');
 };
 
@@ -2563,7 +3018,21 @@ const confirmDelete = async () => {
   const btn = $('delete-btn');
   btn.disabled = true;
   try {
-    await deleteImageApi(state.modal.image.id);
+    const deletedId = state.modal.image.id;
+    await deleteImageApi(deletedId);
+
+    // Opened from a series: `state.modal.index` counts members, so the grid
+    // surgery below would remove whatever happens to sit at that position in
+    // the gallery page instead. Reload the sheet and let it re-read.
+    if (state.modal.scope) {
+      const seriesId = seriesState.active && seriesState.active.id;
+      await closeModal();
+      if (seriesId) await openSeriesDetail(seriesId);
+      ArtRium.toast('Bild gelöscht');
+      btn.disabled = false;
+      return;
+    }
+
     // The modal stays open on the *next* image, so the button has to come back
     // — re-enabling only in the catch left it dead for every image after the
     // first successful delete.
@@ -2633,31 +3102,49 @@ const refreshGridItem = (idx, img) => {
 };
 
 // ══════════════════════════════════════════════════════════
-// VIDEO MODE
+// GRID MODE — pictures, videos, series
 // ══════════════════════════════════════════════════════════
-let videoMode = false;
+// One variable rather than a flag per mode: with two booleans the grid can be
+// told it is showing videos *and* series, and every consumer downstream
+// (the bulk bar's noun, which delete endpoint runs, whether the cull deck may
+// open) then answers a different one of them.
+let gridMode = 'images';        // 'images' | 'videos' | 'series'
 let videos = [];
 let activeVideo = null;
 
-async function toggleVideoMode(btn) {
-  videoMode = !videoMode;
-  // Pictures and videos are different id spaces, so a selection cannot survive
-  // the switch — carrying it over would delete whatever happened to share an
-  // id on the other side.
+/** Redraw the active mode from scratch — the one entry point filters and
+ *  search use, so neither has to know which grid is on screen. */
+const refreshGrid = () => {
+  if (gridMode === 'videos')  return renderVideoGrid();
+  if (gridMode === 'series')  return fetchSeries(true);
+  return fetchImages(true);
+};
+
+async function setGridMode(mode, btn) {
+  const same = gridMode === mode;
+  // Clicking the active chip returns to pictures, which is what the video
+  // chip did when it was a toggle.
+  gridMode = same ? 'images' : mode;
+
+  // Pictures, videos and series are different id spaces, so a selection
+  // cannot survive the switch — carrying it over would delete whatever
+  // happened to share an id on the other side.
   if (state.selectMode) {
     state.selection.clear();
     updateBulkBar();
   }
-  // De-activate all rating chips when entering video mode
+  if (gridMode !== 'videos') { const p = $('vd-player'); if (p) p.src = ''; }
+
   document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-  if (videoMode) {
-    btn.classList.add('active');
-    await loadVideos();
-  } else {
-    // Return to images mode
+  if (gridMode === 'images') {
     document.querySelector('.filter-chip[data-rating=""]').classList.add('active');
     state.filters.ratingMin = '';
     fetchImages(true);
+  } else {
+    if (btn && !same) btn.classList.add('active');
+    else document.querySelector(`.filter-chip[data-grid-mode="${gridMode}"]`)?.classList.add('active');
+    if (gridMode === 'videos') await loadVideos();
+    else await fetchSeries(true);
   }
 }
 
@@ -2675,20 +3162,31 @@ function renderVideoGrid() {
   const grid = $('grid');
   grid.innerHTML = '';
   $('grid-footer').style.display = 'none';
-  $('count-bar').textContent = videos.length
-    ? `${videos.length} video${videos.length === 1 ? '' : 's'}`
+
+  // The whole list arrives in one request, so the search box filters it here
+  // rather than round-tripping. Title and prompt, which is what the box
+  // means for pictures too.
+  const q = (state.filters.search || '').toLowerCase();
+  const shown = q
+    ? videos.filter(v => `${v.title || ''} ${v.prompt || ''}`.toLowerCase().includes(q))
+    : videos;
+
+  $('count-bar').textContent = shown.length
+    ? `${shown.length} video${shown.length === 1 ? '' : 's'}`
     : '';
 
-  if (!videos.length) {
+  if (!shown.length) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
     empty.style.gridColumn = '1/-1';
-    empty.innerHTML = '<div class="emoji">🎬</div><p>No videos yet.<br>Generate some in the Video tool.</p>';
+    empty.innerHTML = q
+      ? '<div class="emoji">🎬</div><p>No videos match this search.</p>'
+      : '<div class="emoji">🎬</div><p>No videos yet.<br>Generate some in the Video tool.</p>';
     grid.appendChild(empty);
     return;
   }
 
-  for (const v of videos) {
+  for (const v of shown) {
     grid.appendChild(makeVideoGridItem(v));
   }
 }
@@ -2910,6 +3408,452 @@ async function deleteActiveVideo() {
     await loadVideos();
   } catch(e) {
     ArtRium.toast('Delete failed: ' + e.message, true);
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// SERIES — the package a set of pictures is posted as
+// ══════════════════════════════════════════════════════════
+// A series lives alongside the picture grid rather than folding into it:
+// nothing disappears from `state.images`, so the modal's index, the
+// pagination cursor and the cull deck all keep working untouched, and a
+// picture is free to sit in more than one series.
+
+const SERIES_PAGE = 50;
+
+// What each tool can actually take, so the handoff row can say so *before*
+// the button is pressed instead of trimming with a toast afterwards.
+// Video is per mode (i2v_multi 10, minimax_i2v 6, flf2v 20, minimax_flf 7),
+// so it gets a range.
+const SERIES_CAPS = {
+  titler:    { label: 'Titler',    max: Infinity },
+  video:     { label: 'Video',     max: 20, note: '6–20 je Modus' },
+  articles:  { label: 'Artikel',   max: 6 },
+  instagram: { label: 'Instagram', max: 10 },
+};
+
+const seriesState = {
+  list: [],
+  offset: 0,
+  hasMore: false,
+  loading: false,
+  active: null,       // the series open in the detail sheet
+  dirty: false,
+  addingTo: null,     // series id the next "◈ Serie" press should append to
+};
+
+// ── Fetching ──────────────────────────────────────────────
+
+const fetchSeries = async (reset = false) => {
+  if (seriesState.loading) return;
+  seriesState.loading = true;
+  if (reset) {
+    seriesState.list = [];
+    seriesState.offset = 0;
+    $('grid').innerHTML = '';
+    $('grid-footer').style.display = 'none';
+  }
+  try {
+    const p = new URLSearchParams({ limit: SERIES_PAGE, offset: seriesState.offset });
+    if (state.filters.search) p.set('search', state.filters.search);
+    const r = await apiFetch('/api/series?' + p.toString());
+    const data = await r.json();
+    seriesState.list.push(...data);
+    seriesState.offset += data.length;
+    seriesState.hasMore = data.length === SERIES_PAGE;
+    renderSeriesGrid(data, reset);
+    $('grid-footer').style.display = seriesState.hasMore ? 'flex' : 'none';
+    $('load-more-btn').disabled = false;
+  } catch (e) {
+    ArtRium.toast('Serien konnten nicht geladen werden: ' + e.message, true);
+  } finally {
+    seriesState.loading = false;
+  }
+};
+
+const renderSeriesGrid = (batch, reset) => {
+  const grid = $('grid');
+  $('count-bar').textContent = seriesState.list.length
+    ? `${seriesState.list.length} Serie${seriesState.list.length === 1 ? '' : 'n'}`
+    : '';
+  if (reset && !seriesState.list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.style.gridColumn = '1/-1';
+    empty.innerHTML = state.filters.search
+      ? '<div class="emoji">◈</div><p>Keine Serie mit diesem Namen.</p>'
+      : '<div class="emoji">◈</div><p>Noch keine Serien.<br>Wähle im Bild-Raster mehrere Bilder aus und tippe ◈ Serie.</p>';
+    grid.appendChild(empty);
+    return;
+  }
+  for (const s of batch) grid.appendChild(makeSeriesGridItem(s));
+};
+
+/** A stack tile: the cover with two cards peeking out behind it.
+ *
+ *  Deliberately not `.grid-item`, and deliberately without `data-idx` —
+ *  those belong to the picture grid, where `reindexGrid` rewrites them and
+ *  the modal navigates by them. */
+const makeSeriesGridItem = (s) => {
+  const div = document.createElement('div');
+  div.className = 'series-grid-item';
+  div.dataset.id = s.id;
+  if (state.selectMode && state.selection.has(s.id)) div.classList.add('selected');
+  div.onclick = () => {
+    if (state.selectMode) toggleSelect(div, s.id);
+    else openSeriesDetail(s.id);
+  };
+
+  const stack = document.createElement('div');
+  stack.className = 'stack';
+
+  // Back cards first so the cover paints on top. Two at most: a third is
+  // indistinguishable at tile size and just costs a fetch.
+  const thumbs = s.preview_thumbs || [];
+  thumbs.slice(1, 3).reverse().forEach((t, i) => {
+    const card = document.createElement('div');
+    card.className = 'stack-card back' + (i === 0 ? ' far' : '');
+    const im = document.createElement('img');
+    im.src = withAuth(t); im.loading = 'lazy'; im.alt = '';
+    card.appendChild(im);
+    stack.appendChild(card);
+  });
+
+  const cover = document.createElement('div');
+  cover.className = 'stack-card cover';
+  if (thumbs.length) {
+    const im = document.createElement('img');
+    im.src = withAuth(thumbs[0]); im.loading = 'lazy'; im.alt = s.title || '';
+    cover.appendChild(im);
+  } else {
+    // An emptied series is kept rather than swept up, so it needs a face.
+    cover.classList.add('empty');
+    cover.textContent = '◈';
+  }
+  const count = document.createElement('div');
+  count.className = 'stack-count';
+  count.textContent = s.item_count;
+  cover.appendChild(count);
+
+  const selCheck = document.createElement('div');
+  selCheck.className = 'sel-check';
+  selCheck.textContent = '✓';
+  cover.appendChild(selCheck);
+
+  stack.appendChild(cover);
+  div.appendChild(stack);
+
+  const titleEl = document.createElement('div');
+  titleEl.className = 'grid-title' + (s.title ? '' : ' placeholder');
+  titleEl.textContent = s.title || 'Ohne Titel';
+  div.appendChild(titleEl);
+  return div;
+};
+
+const bulkDeleteSeries = async () => {
+  const ids = [...state.selection];
+  if (!ids.length) return;
+  if (!confirm(
+    `${ids.length} Serie${ids.length === 1 ? '' : 'n'} löschen?\n\n`
+    + 'Nur die Serien selbst — die Bilder bleiben in der Galerie.'
+  )) return;
+  const btn = $('bulk-delete-btn');
+  btn.disabled = true;
+  try {
+    for (const id of ids) {
+      await apiFetch(`/api/series/${id}`, { method: 'DELETE' });
+    }
+    ArtRium.toast(`${ids.length} Serie${ids.length === 1 ? '' : 'n'} gelöscht — Bilder unverändert`);
+    toggleSelectMode();
+    await fetchSeries(true);
+  } catch (e) {
+    ArtRium.toast('Löschen fehlgeschlagen: ' + e.message, true);
+    btn.disabled = false;
+  }
+};
+
+// ── Creating, from the picture grid's selection ────────────
+
+/** Open the create sheet over the current selection.
+ *
+ *  The order is the tap order — `state.selection` is a Set, and a Set keeps
+ *  insertion order — which is why the tiles carry numbers while picking. */
+async function openSeriesCreate() {
+  const ids = [...state.selection];
+  if (ids.length < 2) {
+    ArtRium.toast('Eine Serie braucht mindestens 2 Bilder', true);
+    return;
+  }
+  const byId = Object.fromEntries(state.images.map(i => [i.id, i]));
+  $('sc-count').textContent = `${ids.length} Bilder, in dieser Reihenfolge:`;
+  $('sc-strip').innerHTML = ids.map((id, i) => {
+    const img = byId[id];
+    return `<div class="sc-thumb"><img src="${img ? withAuth(img.thumb_url) : ''}" alt="" loading="lazy">`
+      + `<span>${i + 1}</span></div>`;
+  }).join('');
+
+  // Existing series are offered as append targets so a package can grow
+  // without being rebuilt.
+  let existing = [];
+  try {
+    const r = await apiFetch('/api/series?limit=50');
+    existing = await r.json();
+  } catch (_) { /* the "new series" option always works */ }
+  const target = $('sc-target');
+  target.innerHTML = '<option value="">Neue Serie</option>'
+    + existing.map(s =>
+        `<option value="${s.id}">${ArtRium.escHtml(s.title || 'Ohne Titel')} · ${s.item_count}</option>`
+      ).join('');
+  if (seriesState.addingTo && existing.some(s => s.id === seriesState.addingTo)) {
+    target.value = seriesState.addingTo;
+  }
+  onSeriesTargetChange();
+  $('sc-title').value = '';
+  $('series-create-modal').classList.add('show');
+}
+
+function onSeriesTargetChange() {
+  const isNew = !$('sc-target').value;
+  $('sc-title-row').style.display = isNew ? '' : 'none';
+  $('sc-save').textContent = isNew ? 'Anlegen' : 'Hinzufügen';
+}
+
+function closeSeriesCreate(e) {
+  if (e && e.target !== e.currentTarget) return;
+  $('series-create-modal').classList.remove('show');
+  seriesState.addingTo = null;
+}
+
+async function submitSeriesCreate() {
+  const ids = [...state.selection];
+  const targetId = $('sc-target').value;
+  const btn = $('sc-save');
+  btn.disabled = true;
+  try {
+    let series;
+    if (targetId) {
+      const r = await apiFetch(`/api/series/${targetId}/images`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_ids: ids }),
+      });
+      series = await r.json();
+      ArtRium.toast(`Zur Serie hinzugefügt — jetzt ${series.item_count} Bilder`);
+    } else {
+      const r = await apiFetch('/api/series', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: $('sc-title').value.trim(), image_ids: ids }),
+      });
+      series = await r.json();
+      ArtRium.toast(`Serie angelegt — ${series.item_count} Bilder`);
+    }
+    $('series-create-modal').classList.remove('show');
+    seriesState.addingTo = null;
+    if (state.selectMode) toggleSelectMode();
+    // The badges on the picture tiles are now out of date.
+    await fetchImages(true);
+    openSeriesDetail(series.id);
+  } catch (e) {
+    ArtRium.toast('Fehlgeschlagen: ' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── The detail sheet ──────────────────────────────────────
+
+async function openSeriesDetail(id) {
+  try {
+    const r = await apiFetch(`/api/series/${id}`);
+    seriesState.active = await r.json();
+  } catch (e) {
+    ArtRium.toast('Serie konnte nicht geladen werden: ' + e.message, true);
+    return;
+  }
+  seriesState.dirty = false;
+  $('series-modal').classList.add('show');
+  document.body.style.overflow = 'hidden';
+  renderSeriesDetail();
+}
+
+function closeSeriesDetail(e) {
+  if (e && e.target !== e.currentTarget) return;
+  if (seriesState.dirty) saveSeriesDetail({ quiet: true });
+  $('series-modal').classList.remove('show');
+  document.body.style.overflow = '';
+  seriesState.active = null;
+  if (gridMode === 'series') fetchSeries(true);
+}
+
+function renderSeriesDetail() {
+  const s = seriesState.active;
+  if (!s) return;
+  $('sd-title').value = s.title || '';
+  $('sd-notes').value = s.notes || '';
+  const n = s.images.length;
+  $('sd-sub').textContent = n === 1 ? '1 Bild' : `${n} Bilder`;
+
+  $('sd-members').innerHTML = s.images.map((img, i) => `
+    <div class="sd-member${i === 0 ? ' is-cover' : ''}" data-id="${img.id}">
+      <div class="sd-member-img" onclick="openSeriesMember(${i})">
+        <img src="${withAuth(img.thumb_url)}" alt="" loading="lazy">
+        <span class="sd-pos">${i + 1}</span>
+        ${i === 0 ? '<span class="sd-cover-tag">Cover</span>' : ''}
+      </div>
+      <div class="sd-member-bar">
+        <button type="button" onclick="moveSeriesMember(${i}, -1)" ${i === 0 ? 'disabled' : ''} title="Nach vorn">‹</button>
+        <button type="button" class="rm" onclick="removeSeriesMember('${img.id}')" title="Aus der Serie nehmen">×</button>
+        <button type="button" onclick="moveSeriesMember(${i}, 1)" ${i === n - 1 ? 'disabled' : ''} title="Nach hinten">›</button>
+      </div>
+    </div>`).join('');
+
+  renderSeriesCaps(n);
+}
+
+/** Say what each tool will actually receive, next to the button that sends
+ *  it there. Trimming a 12-picture series to 6 is a thing to know before
+ *  pressing, not a toast afterwards. */
+function renderSeriesCaps(n) {
+  $('sd-caps').innerHTML = Object.entries(SERIES_CAPS).map(([key, cap]) => {
+    const over = n > cap.max;
+    const note = cap.note || (cap.max === Infinity ? 'alle' : `max ${cap.max}`);
+    return `<span class="sd-cap${over ? ' over' : ''}">${cap.label}: `
+      + `${over ? `nur die ersten ${cap.max}` : note}</span>`;
+  }).join('');
+}
+
+/** Open a member in the ordinary picture modal, with ‹ › bounded to the
+ *  series rather than to the loaded gallery page. */
+function openSeriesMember(i) {
+  const s = seriesState.active;
+  if (!s) return;
+  state.modal.scope = s.images;
+  openModal(i);
+}
+
+function moveSeriesMember(i, dir) {
+  const imgs = seriesState.active.images;
+  const j = i + dir;
+  if (j < 0 || j >= imgs.length) return;
+  [imgs[i], imgs[j]] = [imgs[j], imgs[i]];
+  seriesState.dirty = true;
+  renderSeriesDetail();
+}
+
+async function removeSeriesMember(imageId) {
+  const s = seriesState.active;
+  if (!s) return;
+  try {
+    // Order changes are still local, so send them along rather than letting
+    // the server's copy overwrite them.
+    if (seriesState.dirty) await saveSeriesDetail({ quiet: true, keepOpen: true });
+    const r = await apiFetch(`/api/series/${s.id}/images/${imageId}`, { method: 'DELETE' });
+    seriesState.active = await r.json();
+    seriesState.dirty = false;
+    renderSeriesDetail();
+    ArtRium.toast('Aus der Serie genommen — das Bild bleibt');
+  } catch (e) {
+    ArtRium.toast('Fehlgeschlagen: ' + e.message, true);
+  }
+}
+
+/** Add more pictures using the grid you are already looking at — with its
+ *  search and filters — instead of a second, smaller picker. */
+function openSeriesAdd() {
+  const s = seriesState.active;
+  if (!s) return;
+  seriesState.addingTo = s.id;
+  closeSeriesDetail();
+  if (gridMode !== 'images') setGridMode('images', null);
+  if (!state.selectMode) toggleSelectMode();
+  ArtRium.toast('Bilder antippen, dann ◈ Serie — sie werden angehängt');
+}
+
+async function saveSeriesDetail(opts = {}) {
+  const s = seriesState.active;
+  if (!s) return;
+  const body = {
+    title: $('sd-title').value.trim(),
+    notes: $('sd-notes').value.trim(),
+    image_ids: s.images.map(i => i.id),
+  };
+  try {
+    const r = await apiFetch(`/api/series/${s.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    seriesState.active = await r.json();
+    seriesState.dirty = false;
+    if (!opts.quiet) ArtRium.toast('Serie gespeichert');
+    if (!opts.keepOpen && !opts.quiet) renderSeriesDetail();
+  } catch (e) {
+    ArtRium.toast('Speichern fehlgeschlagen: ' + e.message, true);
+  }
+}
+
+async function deleteSeries() {
+  const s = seriesState.active;
+  if (!s) return;
+  if (!confirm(
+    `Serie "${s.title || 'Ohne Titel'}" löschen?\n\n`
+    + `Nur die Serie — die ${s.images.length} Bilder bleiben in der Galerie.`
+  )) return;
+  try {
+    await apiFetch(`/api/series/${s.id}`, { method: 'DELETE' });
+    seriesState.dirty = false;
+    seriesState.active = null;
+    $('series-modal').classList.remove('show');
+    document.body.style.overflow = '';
+    ArtRium.toast('Serie gelöscht — Bilder unverändert');
+    if (gridMode === 'series') fetchSeries(true);
+    else fetchImages(true);
+  } catch (e) {
+    ArtRium.toast('Löschen fehlgeschlagen: ' + e.message, true);
+  }
+}
+
+/** Hand the series to another tool.
+ *
+ *  A query param and nothing else, the same shape as the two jumps out of
+ *  the picture modal — the receiving tool reads /api/series/{id} and wipes
+ *  the param, so a reload does not import twice. */
+async function sendSeriesTo(tool) {
+  const s = seriesState.active;
+  if (!s) return;
+  if (seriesState.dirty) await saveSeriesDetail({ quiet: true, keepOpen: true });
+  location.href = `/tools/${tool}/?series=${encodeURIComponent(s.id)}`;
+}
+
+/** A title for the series as a whole — the model sees several members at
+ *  once, not one picture. Where the picks land is the series title field. */
+async function suggestSeriesTitle() {
+  const s = seriesState.active;
+  if (!s || titlerState.busy) return;
+  const btn = $('sd-titler-btn');
+  btn.disabled = true;
+  btn.classList.add('busy');
+  titlerState.busy = true;
+  titlerState.onPick = (chosen) => {
+    $('sd-title').value = chosen;
+    seriesState.dirty = true;
+  };
+  openTitlerBusy('Die Serie wird angeschaut…', suggestSeriesTitle);
+  try {
+    const r = await apiFetch('/api/titler/run-series', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ series_id: s.id }),
+    });
+    const d = await r.json();
+    renderTitleSuggestions(d.titles || []);
+  } catch (e) {
+    setTitlerStatus(e.message || 'Der Titler hat nicht geantwortet.', 'error');
+  } finally {
+    titlerState.busy = false;
+    btn.disabled = false;
+    btn.classList.remove('busy');
   }
 }
 
@@ -3219,6 +4163,11 @@ function commitModalSwipe(verdict) {
   // Belt and braces: the router already sends drags to `pan` while zoomed,
   // but nothing else may quietly delete a picture the user is inspecting.
   if (isZoomed()) { resetModalSwipe(true); return; }
+  // Opened from a series: the verdict pair and the index bookkeeping behind
+  // it are both about the gallery backlog — `state.modal.index` here counts
+  // members, not grid tiles, so a delete would splice the wrong picture out
+  // of the grid. Inside a package, use the arrows.
+  if (state.modal.scope) { resetModalSwipe(true); return; }
   const img = $('modal-img');
   const idx = state.modal.index;
   const record = state.modal.image;
@@ -3364,7 +4313,12 @@ const cullPreviewUrl = (img) => previewSrc(
 // ── Opening and closing ──────────────────────────────────────────────────────
 
 function openCull() {
-  if (videoMode) { ArtRium.toast('Aussortieren gilt für Bilder, nicht für Videos'); return; }
+  // The deck is built from `state.images` and every card reads an image's
+  // preview URL, so it only makes sense over the picture grid.
+  if (gridMode !== 'images') {
+    ArtRium.toast('Aussortieren gilt für Bilder — wechsle zurück zum Bild-Raster');
+    return;
+  }
   if (!state.images.length) { ArtRium.toast('Keine Bilder zum Aussortieren'); return; }
 
   cull.queue = [...state.images];
@@ -3754,7 +4708,16 @@ document.addEventListener('keydown', e => {
     if (e.key === 'ArrowDown' || e.key === 'z') cullUndo();
     return;
   }
-  if (!$('modal').classList.contains('open')) return;
+  // The picture modal can be opened from inside the series sheet, so it keeps
+  // its turn here — but once it is closed, Escape has to reach the sheet
+  // rather than falling through to the grid behind both.
+  if (!$('modal').classList.contains('open')) {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key !== 'Escape') return;
+    if ($('series-create-modal').classList.contains('show')) return closeSeriesCreate();
+    if ($('series-modal').classList.contains('show')) return closeSeriesDetail();
+    return;
+  }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
   if (e.key === 'Escape')      closeModal();
   if (e.key === 'ArrowLeft')   navigate(-1);

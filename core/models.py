@@ -52,6 +52,11 @@ class Image(Base):
     # for Z-Image; SDXL/Ernie only ever populate 0 or 1 entry today).
     loras: Mapped[list[dict] | None] = mapped_column(JSONB)
     workflow_name: Mapped[str | None] = mapped_column(String(128))
+    # Detail Daemon dial this was sampled at (services/comfy/zimage.py), kept
+    # for the same reason `loras` is: "Weiterarbeiten" rebuilds the recipe, and
+    # a dial that silently reset to 0 would quietly change the next render.
+    # Null = not recorded or left at 0, which sample identically.
+    detail_amount: Mapped[float | None] = mapped_column(Float)
     batch_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
     thumbnail_path: Mapped[str | None] = mapped_column(Text)        # relative to storage_dir, JPEG 512 px
     title: Mapped[str | None] = mapped_column(String(512))          # chosen display title
@@ -102,6 +107,126 @@ class Image(Base):
 
     shop_listings: Mapped[list["ShopListing"]] = relationship(
         back_populates="image", cascade="all, delete-orphan", lazy="selectin"
+    )
+    # Which series this picture belongs to — it may be several. Every
+    # argument here earns its place, and each for a different reason:
+    #
+    #   cascade="all" (which includes `delete`): both delete paths use ORM
+    #     db.delete(img) (routers/images.py), and the bulk one has already
+    #     loaded this collection by the time it deletes. Without `delete` in
+    #     the cascade SQLAlchemy de-associates children the default way —
+    #     UPDATE ... SET image_id = NULL against a NOT NULL column — so every
+    #     delete of a series member would fail before the database's ON
+    #     DELETE CASCADE ever ran.
+    #
+    #   but NOT delete-orphan: ImageSeries.items already claims that, and a
+    #     row with two orphan-parents is only an orphan once it is detached
+    #     from *both*. Clearing a series' members would then leave items
+    #     alive here and try to null their series_id instead — the same crash
+    #     one table over.
+    #
+    #   passive_deletes=True: hands the work to the ON DELETE CASCADE rather
+    #     than emitting one DELETE per child when 50 pictures go at once.
+    #
+    #   selectin, not select: _serialize reads this, and it also runs inside
+    #     background tasks, where a lazy load is a MissingGreenlet rather
+    #     than a query. Same lesson as InstagramPost.media.
+    series_items: Mapped[list["ImageSeriesItem"]] = relationship(
+        cascade="all", passive_deletes=True, lazy="selectin"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Image series — the package a set of pictures is posted as
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ImageSeries(Base):
+    """A curated, ordered set of pictures that travels as one thing.
+
+    `batch_id` above records how pictures were *made*; this records how they
+    belong together, which is a decision rather than a fact about the
+    generator. The series is what gets handed to the titler, the video tool,
+    an article and an Instagram carousel — so its order is the post's order,
+    and position 0 is the cover.
+
+    A picture may sit in several series. The gallery shows series in their own
+    mode, so nothing vanishes from the picture grid and a second membership
+    costs nothing.
+    """
+    __tablename__ = "image_series"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    title: Mapped[str | None] = mapped_column(String(512))
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+    # Deliberately `select`, not `selectin`: the series router is the only
+    # thing that wants the members, and it says so with an explicit
+    # selectinload(). Eager-loading here as well would build a cycle with
+    # Image.series_items, which is eager in the other direction.
+    items: Mapped[list["ImageSeriesItem"]] = relationship(
+        order_by="ImageSeriesItem.position",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="select",
+    )
+
+
+class ImageSeriesItem(Base):
+    """One picture's place in one series.
+
+    `position` is allowed to have gaps: deleting a picture cascades its item
+    row away and leaves 0,1,3 behind. Members are read ORDER BY position and
+    numbered by their index in the answer — the same convention the video
+    clip strip uses — so a gap is invisible. What a gap does break is
+    appending at `len(items)`, which would land on an occupied position;
+    appending goes through MAX(position)+1.
+
+    There is deliberately no relationship to Image or back to ImageSeries
+    here — both would be lazy-loads waiting to happen on a row that arrived
+    through an eager load, which is how the Instagram reel earned its
+    MissingGreenlet. Everything that needs them has the plain FK columns:
+    the series router loads members with one
+    `select(Image).where(Image.id.in_(ids))` and re-orders them by position,
+    the way routers/video.py and services/instagram/media.py already resolve
+    id lists, and the gallery reads `series_id` straight off this row.
+    """
+    __tablename__ = "image_series_items"
+    __table_args__ = (
+        # The order is the post's order, so it has to be an order. This is
+        # also why reordering goes clear → flush → re-append rather than
+        # UPDATE-in-place: swapping two positions collides mid-flush.
+        UniqueConstraint("series_id", "position", name="uq_image_series_items_position"),
+        # The same picture twice in one carousel is always a mistake.
+        UniqueConstraint("series_id", "image_id", name="uq_image_series_items_image"),
+        Index("ix_image_series_items_series_id", "series_id"),
+        # The gallery asks "which series is this picture in?" per tile.
+        Index("ix_image_series_items_image_id", "image_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    series_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("image_series.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    image_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("images.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
     )
 
 

@@ -23,6 +23,11 @@ from core.models import InstagramPost, Image, Video
 from core.scheduling import companion_at
 from core.tasks import safe_create_task
 from services.image.rendition import primary_filename
+from services.instagram.collaborators import (
+    DEFAULT_COLLABORATORS,
+    MAX_COLLABORATORS,
+    PRESETS as COLLAB_PRESETS,
+)
 from services.instagram.collaborators import normalize as normalize_collaborators
 from services.instagram.companions import find_companion, get_or_create_companion
 from services.instagram.crops import ensure_post_crops
@@ -917,6 +922,14 @@ async def framing_defaults():
         "frames": {"auto": None, **FRAME_RATIOS},
         "feed_min_ratio": FEED_MIN_RATIO,
         "feed_max_ratio": FEED_MAX_RATIO,
+        # The partner handles travel with the constants for the same reason
+        # Meta's numbers do: one of these was wrong in the client for months,
+        # and a wrong handle fails silently — the post publishes without the
+        # collaboration. services/instagram/collaborators.py is the only
+        # place they are written.
+        "collaborator_presets": COLLAB_PRESETS,
+        "collaborator_defaults": DEFAULT_COLLABORATORS,
+        "max_collaborators": MAX_COLLABORATORS,
     }
 
 

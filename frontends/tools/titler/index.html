@@ -87,6 +87,74 @@
       display: flex; justify-content: center;
     }
 
+    /* ── Series mode ── */
+    /* A stack tile, same idea as the gallery's: cards fanned behind the cover
+       so a series reads as several pictures rather than one with a number. */
+    .picker-item .stack { position: relative; aspect-ratio: 1; padding: 5px 7px 7px 5px; }
+    .picker-item .stack-card {
+      position: absolute; inset: 5px 7px 7px 5px;
+      border-radius: 8px; overflow: hidden;
+      background: var(--surface2); border: 1px solid var(--border);
+    }
+    .picker-item .stack-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .picker-item .stack-card.back { transform: rotate(3deg) translate(4px, -3px); opacity: 0.75; }
+    .picker-item .stack-card.back.far { transform: rotate(6deg) translate(8px, -6px); opacity: 0.5; }
+    .picker-item .stack-count {
+      position: absolute; bottom: 6px; right: 6px;
+      background: rgba(0,0,0,0.7); color: var(--text);
+      border-radius: 7px; padding: 1px 6px;
+      font-size: 11px; font-weight: 700;
+    }
+
+    /* The filmstrip is what makes a series walk-through legible: where you
+       are, and which members already have a title. */
+    .queue-bar {
+      display: none; flex-direction: column; gap: 8px;
+      padding-bottom: 12px; border-bottom: 1px solid var(--border);
+      margin-bottom: 14px;
+    }
+    .queue-bar.show { display: flex; }
+    .queue-head { display: flex; align-items: center; gap: 8px; }
+    .queue-head .label { flex: 1; font-size: 12px; color: var(--text-dim); }
+    .queue-series-row { display: flex; gap: 8px; align-items: center; }
+    .queue-series-row input {
+      flex: 1; min-width: 0;
+      background: var(--surface2); color: var(--text);
+      border: 1.5px solid var(--border); border-radius: 9px;
+      font-family: inherit; font-size: 14px; padding: 9px 11px;
+    }
+    .queue-wand {
+      flex-shrink: 0; width: 38px; height: 38px;
+      background: var(--surface2); border: 1.5px solid var(--border);
+      border-radius: 9px; color: var(--text); font-size: 16px;
+      cursor: pointer; -webkit-tap-highlight-color: transparent;
+    }
+    .queue-wand:disabled { opacity: 0.45; }
+    .queue-strip {
+      display: flex; gap: 6px; overflow-x: auto;
+      padding-bottom: 4px; -webkit-overflow-scrolling: touch;
+    }
+    .queue-thumb {
+      position: relative; flex: 0 0 auto;
+      width: 54px; height: 54px; border-radius: 8px; overflow: hidden;
+      background: var(--surface2);
+      border: 2px solid transparent; cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .queue-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .queue-thumb.current { border-color: var(--accent); }
+    .queue-thumb.titled::after {
+      content: '✓';
+      position: absolute; top: 2px; right: 3px;
+      color: var(--green); font-size: 12px; font-weight: 700;
+      text-shadow: 0 0 3px #000;
+    }
+    .queue-thumb .n {
+      position: absolute; bottom: 1px; left: 3px;
+      color: var(--text); font-size: 10px; font-weight: 700;
+      text-shadow: 0 0 3px #000;
+    }
+
     /* ── Sticky bottom bar ── */
     .picker-bar {
       padding: 12px 16px calc(env(safe-area-inset-bottom) + 12px);
@@ -272,6 +340,7 @@
     <div class="mode-chips" id="mode-chips" style="display:flex;gap:6px;">
       <button class="mode-chip active" data-mode="image" onclick="setMode('image')">Images</button>
       <button class="mode-chip" data-mode="video" onclick="setMode('video')">Videos</button>
+      <button class="mode-chip" data-mode="series" onclick="setMode('series')">Serien</button>
     </div>
   </header>
 
@@ -300,6 +369,24 @@
   <div class="view" id="view-results">
 
     <div class="results-scroll" id="results-scroll">
+
+      <!-- Series walk-through: where you are in the package, which members
+           already have a title, and the series' own name above them. Hidden
+           entirely in the two single-item modes. -->
+      <div class="queue-bar" id="queue-bar">
+        <div class="queue-series-row">
+          <input id="queue-series-title" placeholder="Serientitel…"
+                 autocomplete="off" autocorrect="off" spellcheck="false">
+          <button class="queue-wand" id="queue-series-wand" onclick="suggestSeriesTitle()"
+                  title="Titel für die ganze Serie vorschlagen">✨</button>
+          <button class="queue-wand" id="queue-series-save" onclick="saveSeriesTitle()"
+                  title="Serientitel speichern">💾</button>
+        </div>
+        <div class="queue-head">
+          <span class="label" id="queue-label"></span>
+        </div>
+        <div class="queue-strip" id="queue-strip"></div>
+      </div>
 
       <!-- Image row -->
       <div class="img-preview-row">
@@ -347,14 +434,22 @@ const PAGE_SIZE = 60;
 
 const state = {
   apiKey:   ArtRium.getApiKey(),
-  mode:     'image',     // 'image' | 'video'
+  mode:     'image',     // 'image' | 'video' | 'series'
   images:   [],
   offset:   0,
   hasMore:  false,
-  selected: null,
+  selected: null,        // the one thing being titled right now
   titles:   [],
   chosenTitle: null,
+  // Series mode. `selected` still points at the member being titled, so the
+  // whole titling flow below stays one code path — the queue only decides
+  // which member that is.
+  series:   null,
+  queue:    [],
+  queueIdx: 0,
 };
+
+const isSeries = () => state.mode === 'series';
 
 // ══════════════════════════════════════════════════════════
 // HELPERS
@@ -375,21 +470,31 @@ const switchView = (name) => {
 // ══════════════════════════════════════════════════════════
 // MODE TOGGLE
 // ══════════════════════════════════════════════════════════
+const MODE_COPY = {
+  image:  { title: 'Image Titler',  hint: 'Select an image to generate titles for.',        pick: 'an image' },
+  video:  { title: 'Video Titler',  hint: 'Select a video — 3 sample frames will be sent to the VLM.', pick: 'a video' },
+  series: { title: 'Serien-Titler', hint: 'Wähle eine Serie — du gehst sie Bild für Bild durch.',      pick: 'eine Serie' },
+};
+
 const setMode = (mode) => {
   if (mode === state.mode) return;
-  if (mode !== 'image' && mode !== 'video') return;
+  if (!MODE_COPY[mode]) return;
   state.mode = mode;
   document.querySelectorAll('.mode-chip').forEach(c => {
     c.classList.toggle('active', c.dataset.mode === mode);
   });
-  $('header-title').textContent = mode === 'video' ? 'Video Titler' : 'Image Titler';
-  $('picker-hint').textContent = mode === 'video'
-    ? 'Select a video — 3 sample frames will be sent to the VLM.'
-    : 'Select an image to generate titles for.';
-  $('generate-btn').textContent = 'Select ' + (mode === 'video' ? 'a video' : 'an image') + ' first';
+  const copy = MODE_COPY[mode];
+  $('header-title').textContent = copy.title;
+  $('picker-hint').textContent = copy.hint;
+  $('generate-btn').textContent = mode === 'series'
+    ? 'Erst eine Serie wählen' : 'Select ' + copy.pick + ' first';
   state.selected = null;
+  state.series = null;
+  state.queue = [];
+  state.queueIdx = 0;
   $('selected-thumb').classList.remove('show');
   $('generate-btn').disabled = true;
+  $('queue-bar').classList.remove('show');
   switchView('picker');
   loadImages(true);
 };
@@ -415,6 +520,11 @@ const loadImages = async (reset = false) => {
       const all = await r.json();
       data = all.filter(v => v.status === 'done' && v.thumb_url);
       state.hasMore = false;
+    } else if (state.mode === 'series') {
+      const r = await apiFetch(`/api/series?limit=${PAGE_SIZE}&offset=${state.offset}`);
+      data = await r.json();
+      state.offset += data.length;
+      state.hasMore = data.length === PAGE_SIZE;
     } else {
       const r = await apiFetch(`/api/images?limit=${PAGE_SIZE}&offset=${state.offset}`);
       data = await r.json();
@@ -437,6 +547,8 @@ const loadImages = async (reset = false) => {
 };
 
 const makePickerItem = (item, idx) => {
+  if (state.mode === 'series') return makeSeriesPickerItem(item, idx);
+
   const div = document.createElement('div');
   div.className = 'picker-item';
   div.dataset.idx = idx;
@@ -472,6 +584,41 @@ const makePickerItem = (item, idx) => {
   return div;
 };
 
+/** A stack tile — same shape as the gallery's, so a series looks the same
+ *  wherever it is picked. */
+const makeSeriesPickerItem = (s, idx) => {
+  const div = document.createElement('div');
+  div.className = 'picker-item';
+  div.dataset.idx = idx;
+
+  const stack = document.createElement('div');
+  stack.className = 'stack';
+  const thumbs = s.preview_thumbs || [];
+  thumbs.slice(1, 3).reverse().forEach((t, i) => {
+    const card = document.createElement('div');
+    card.className = 'stack-card back' + (i === 0 ? ' far' : '');
+    card.innerHTML = `<img src="${withAuth(t)}" alt="" loading="lazy">`;
+    stack.appendChild(card);
+  });
+  const cover = document.createElement('div');
+  cover.className = 'stack-card cover';
+  if (thumbs.length) cover.innerHTML = `<img src="${withAuth(thumbs[0])}" alt="" loading="lazy">`;
+  const count = document.createElement('div');
+  count.className = 'stack-count';
+  count.textContent = s.item_count;
+  cover.appendChild(count);
+  stack.appendChild(cover);
+  div.appendChild(stack);
+
+  const titleEl = document.createElement('div');
+  titleEl.className = 'picker-title' + (s.title ? '' : ' placeholder');
+  titleEl.textContent = s.title || 'Ohne Titel';
+  div.appendChild(titleEl);
+
+  div.onclick = () => startSeries(s.id);
+  return div;
+};
+
 const selectImage = (idx) => {
   document.querySelectorAll('.picker-item.selected').forEach(el => el.classList.remove('selected'));
 
@@ -489,6 +636,130 @@ const selectImage = (idx) => {
   btn.disabled = false;
 };
 
+// ══════════════════════════════════════════════════════════
+// SERIES WALK-THROUGH
+// ══════════════════════════════════════════════════════════
+// Picking a series does not select one thing, it loads a queue. Everything
+// below still titles `state.selected`; the queue only decides which member
+// that is, and moves on once one is saved.
+
+const startSeries = async (seriesId) => {
+  try {
+    const r = await apiFetch(`/api/series/${encodeURIComponent(seriesId)}`);
+    state.series = await r.json();
+  } catch (e) {
+    ArtRium.toast('Serie konnte nicht geladen werden: ' + e.message, true);
+    return;
+  }
+  state.queue = state.series.images || [];
+  if (!state.queue.length) { ArtRium.toast('Diese Serie hat keine Bilder', true); return; }
+
+  if (state.mode !== 'series') {
+    state.mode = 'series';
+    document.querySelectorAll('.mode-chip').forEach(c => {
+      c.classList.toggle('active', c.dataset.mode === 'series');
+    });
+    $('header-title').textContent = MODE_COPY.series.title;
+  }
+  $('queue-series-title').value = state.series.title || '';
+  // Start on the first member without a title — coming back to a
+  // half-finished series should carry on rather than start over.
+  const firstUntitled = state.queue.findIndex(i => !i.title);
+  goToQueue(firstUntitled >= 0 ? firstUntitled : 0);
+};
+
+const goToQueue = (idx) => {
+  if (idx < 0 || idx >= state.queue.length) return;
+  state.queueIdx = idx;
+  state.selected = state.queue[idx];
+  renderQueue();
+  startTitling();
+};
+
+const renderQueue = () => {
+  const bar = $('queue-bar');
+  if (!isSeries() || !state.queue.length) { bar.classList.remove('show'); return; }
+  bar.classList.add('show');
+
+  const titled = state.queue.filter(i => i.title).length;
+  $('queue-label').textContent =
+    `Bild ${state.queueIdx + 1} von ${state.queue.length} · ${titled} betitelt`;
+
+  $('queue-strip').innerHTML = state.queue.map((img, i) => `
+    <div class="queue-thumb${i === state.queueIdx ? ' current' : ''}${img.title ? ' titled' : ''}"
+         onclick="goToQueue(${i})" title="${ArtRium.escHtml(img.title || 'Ohne Titel')}">
+      <img src="${withAuth(img.thumb_url)}" alt="" loading="lazy">
+      <span class="n">${i + 1}</span>
+    </div>`).join('');
+};
+
+/** A title for the set rather than for a member — the model is shown several
+ *  members at once and asked what they share. */
+const suggestSeriesTitle = async () => {
+  if (!state.series) return;
+  const btn = $('queue-series-wand');
+  btn.disabled = true;
+  showProgress('Serientitel…', 'Das VLM schaut sich mehrere Bilder der Serie an');
+  try {
+    const r = await apiFetch('/api/titler/run-series', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ series_id: state.series.id }),
+    });
+    const d = await r.json();
+    hideProgress();
+    const titles = d.titles || [];
+    if (!titles.length) { ArtRium.toast('Keine Vorschläge zurückgekommen', true); return; }
+    // Reuses the same cards as the per-image suggestions, but picking one
+    // writes the series title instead of a member's.
+    state.titles = titles;
+    state.chosenTitle = null;
+    renderTitleCards({ forSeries: true });
+    $('titles-section').style.display = 'block';
+  } catch (e) {
+    hideProgress();
+    ArtRium.toast('Titler fehlgeschlagen: ' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+const saveSeriesTitle = async () => {
+  if (!state.series) return;
+  const btn = $('queue-series-save');
+  btn.disabled = true;
+  try {
+    const r = await apiFetch(`/api/series/${state.series.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: $('queue-series-title').value.trim() }),
+    });
+    const updated = await r.json();
+    state.series.title = updated.title;
+    ArtRium.toast('Serientitel gespeichert');
+  } catch (e) {
+    ArtRium.toast('Speichern fehlgeschlagen: ' + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+/** `?series=<id>` from the gallery's series sheet — straight into the walk,
+ *  no picker. The param is wiped so a reload does not restart it. */
+const applySeriesDeepLink = async () => {
+  const id = new URLSearchParams(location.search).get('series');
+  if (!id) return false;
+  history.replaceState(null, '', location.pathname);
+  state.mode = 'series';
+  document.querySelectorAll('.mode-chip').forEach(c => {
+    c.classList.toggle('active', c.dataset.mode === 'series');
+  });
+  $('header-title').textContent = MODE_COPY.series.title;
+  $('picker-hint').textContent = MODE_COPY.series.hint;
+  await startSeries(id);
+  return true;
+};
+
 const loadMoreImages = () => {
   $('picker-load-more').disabled = true;
   loadImages(false);
@@ -501,6 +772,7 @@ const startTitling = async () => {
   if (!state.selected) return;
 
   switchView('results');
+  renderQueue();
 
   $('preview-thumb').src = withAuth(state.selected.thumb_url);
   const currentEl = $('preview-current');
@@ -560,9 +832,11 @@ const onTitlesReceived = (titles) => {
   }, 100);
 };
 
-const renderTitleCards = () => {
+const renderTitleCards = (opts = {}) => {
   const list = $('titles-list');
   list.innerHTML = '';
+  $('titles-section').querySelector('.titles-section-label').textContent =
+    opts.forSeries ? 'Vorschläge für die Serie' : 'Generated Titles';
 
   state.titles.forEach((title, i) => {
     const card = document.createElement('div');
@@ -574,7 +848,12 @@ const renderTitleCards = () => {
     text.textContent = title;
 
     card.appendChild(text);
-    card.onclick = () => selectTitle(i);
+    // A series suggestion goes into the series field, not into the member
+    // currently being walked — picking one must not silently retitle a
+    // picture.
+    card.onclick = opts.forSeries
+      ? () => { $('queue-series-title').value = title; ArtRium.toast('Serientitel übernommen — noch speichern'); }
+      : () => selectTitle(i);
     list.appendChild(card);
   });
 };
@@ -584,7 +863,8 @@ const selectTitle = (i) => {
   document.querySelector(`.title-card[data-i="${i}"]`).classList.add('selected');
 
   state.chosenTitle = state.titles[i];
-  $('save-btn').textContent = 'Save Title';
+  $('save-btn').textContent = isSeries() && state.queueIdx < state.queue.length - 1
+    ? 'Speichern & weiter →' : 'Save Title';
   $('save-btn').disabled = false;
 };
 
@@ -616,8 +896,26 @@ const saveTitle = async () => {
     currentEl.textContent = updated.title;
     currentEl.classList.remove('placeholder');
 
-    btn.textContent = 'Saved ✓';
     ArtRium.toast('Title saved');
+
+    // Walking a series: saving is also "done with this one". Move to the
+    // next member and start its suggestions, rather than leaving you to find
+    // the next thumbnail yourself.
+    if (isSeries() && state.queueIdx < state.queue.length - 1) {
+      renderQueue();
+      btn.textContent = 'Weiter…';
+      setTimeout(() => goToQueue(state.queueIdx + 1), 500);
+      return;
+    }
+    if (isSeries()) {
+      renderQueue();
+      const left = state.queue.filter(i => !i.title).length;
+      ArtRium.toast(left
+        ? `Durch — ${left} Bild${left === 1 ? '' : 'er'} noch ohne Titel`
+        : 'Serie komplett betitelt 🎉');
+    }
+
+    btn.textContent = 'Saved ✓';
     setTimeout(() => { btn.textContent = 'Save Title'; btn.disabled = false; }, 2000);
   } catch (e) {
     ArtRium.toast('Save failed: ' + e.message, true);
@@ -642,8 +940,11 @@ const hideProgress = () => {
 // ══════════════════════════════════════════════════════════
 // INIT
 // ══════════════════════════════════════════════════════════
-window.addEventListener('load', () => {
-  loadImages(true);
+window.addEventListener('load', async () => {
+  // A ?series= link goes straight into the walk-through, so the picker's
+  // first page is not worth fetching.
+  const deepLinked = await applySeriesDeepLink();
+  if (!deepLinked) loadImages(true);
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});

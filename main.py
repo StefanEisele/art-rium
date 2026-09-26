@@ -217,10 +217,11 @@ async def gate_frontend(request: Request, call_next):
 
 
 # ── Routers ──────────────────────────────────────────────────────────────────
-from routers import cut, generate, images, titler, instagram, vace, video, video_api, wordpress, system, improv, music  # noqa: E402  (after app is created)
+from routers import cut, generate, images, series, titler, instagram, vace, video, video_api, wordpress, system, improv, music  # noqa: E402  (after app is created)
 
 app.include_router(generate.router)
 app.include_router(images.router)
+app.include_router(series.router)
 app.include_router(titler.router)
 app.include_router(instagram.router)
 app.include_router(video.router)

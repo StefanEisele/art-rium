@@ -4,7 +4,7 @@ artRiumSetupSw({
   // Bumped with the network-first HTML change in sw-base.js: `activate` drops
   // every cache that is not this one, which is what evicts the stale page a
   // cache-first sw could otherwise serve forever.
-  cache: 'art-rium-gallery-v4',
+  cache: 'art-rium-gallery-v7',
   shell: [
     '/tools/gallery/',
     '/tools/gallery/manifest.json',

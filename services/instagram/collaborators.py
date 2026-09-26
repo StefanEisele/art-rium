@@ -25,6 +25,28 @@ import re
 
 MAX_COLLABORATORS = 3
 
+# The accounts we tag often, offered as quick-pick chips. Server-side because
+# a handle written in two places gets corrected in one of them: this list said
+# 'iiii.ai' until 2026-08-22, which is an account that either does not exist or
+# is not the intended one, and every post that carries this partner in fact
+# carries 'iiiil.ai' (four i's, then an l) with Instagram reporting it
+# Accepted. Getting it wrong is silent — the post publishes, the collaboration
+# simply never happens.
+PRESETS = [
+    "iiiil.ai",
+    "epicworldaiart",
+    "art.ai.future",
+    "aicccreatorshub",
+    "echoesmag.ai",
+]
+
+# Pre-selected on a new post when nothing else is remembered. The window to
+# set collaborators is tiny — a cloud-scheduled post is handed to the Pi
+# within seconds of being created, and from then on the container is built
+# there and the field is read-only — so the default has to be right before
+# the post is created, not correctable afterwards.
+DEFAULT_COLLABORATORS = ["iiiil.ai", "echoesmag.ai", "art.ai.future"]
+
 # Instagram usernames: letters, digits, periods and underscores, up to 30 chars.
 _USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 

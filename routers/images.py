@@ -28,7 +28,7 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.job_control import cancel_job
-from core.models import Image
+from core.models import Image, ImageSeriesItem
 from core.tasks import safe_create_task
 from core.thumbnail import make_thumbnail, thumb_rel_path
 from services.comfy.client import poll_history, post_workflow, upload_image
@@ -85,10 +85,10 @@ class GrainRequest(BaseModel):
 
 
 class UpscaleRequest(BaseModel):
-    # The one control that matters: low = the picture it already is, only
-    # bigger; high = the model repaints detail into it. Named after what the
-    # user is choosing rather than after the sampler parameter it sets.
-    denoise: float = upscale_service.DENOISE_DEFAULT
+    # Kreativität: the redraw's start noise. 0 = enlargement only; up to 0.6
+    # the tiles are repainted more and more. None = whatever suits the chosen
+    # enlarger (services/image/upscale.py::ENLARGERS).
+    denoise: Optional[float] = None
     scale: float = upscale_service.SCALE_DEFAULT
     model: str = upscale_service.DEFAULT_UPSCALE_MODEL
     seed: Optional[int] = None
@@ -107,9 +107,32 @@ async def list_images(
     search: Optional[str] = None,
     rating_min: Optional[int] = Query(None, ge=1, le=5),
     wp_uploaded: Optional[bool] = Query(None, description="True: only WP-uploaded images. False: only not-yet-uploaded. None: all."),
+    series_id: Optional[uuid.UUID] = Query(None, description="Only this series' members, in series order."),
+    in_series: Optional[bool] = Query(None, description="True: only images that belong to some series. False: only loose ones. None: all."),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = select(Image).order_by(desc(Image.created_at)).offset(offset).limit(limit)
+    stmt = select(Image)
+
+    if series_id is not None:
+        # Here the order IS the content, so it comes from the series rather
+        # than the clock. Anything handing a whole series to another tool
+        # should still read /api/series/{id} — this filter is for pickers
+        # that want to browse one.
+        stmt = (
+            stmt.join(ImageSeriesItem, ImageSeriesItem.image_id == Image.id)
+            .where(ImageSeriesItem.series_id == series_id)
+            .order_by(ImageSeriesItem.position)
+        )
+    else:
+        stmt = stmt.order_by(desc(Image.created_at))
+
+    # A subquery rather than a join: a picture may sit in several series, and
+    # a join would hand it back once per membership.
+    if in_series is True:
+        stmt = stmt.where(Image.id.in_(select(ImageSeriesItem.image_id)))
+    elif in_series is False:
+        stmt = stmt.where(Image.id.not_in(select(ImageSeriesItem.image_id)))
+
     if tag:
         stmt = stmt.where(Image.tags.contains([tag]))
     if workflow:
@@ -123,6 +146,7 @@ async def list_images(
     elif wp_uploaded is False:
         stmt = stmt.where(Image.wp_media_id.is_(None))
 
+    stmt = stmt.offset(offset).limit(limit)
     result = await db.execute(stmt)
     images = result.scalars().all()
     return [_serialize(img) for img in images]
@@ -472,16 +496,23 @@ async def upscale_options(image_id: uuid.UUID, db: AsyncSession = Depends(get_db
             "capped": allowed < choice - 0.01,
             "width": w, "height": h,
             "seconds": upscale_service.estimate_seconds(src_w, src_h, allowed),
+            # The stages apart, so the ETA can follow the model and the
+            # Kreativität slider without asking again.
+            "timing": upscale_service.timing(src_w, src_h, allowed),
             "tiles": upscale_service.tile_count(w, h),
         })
     return {
         "denoise_min": upscale_service.DENOISE_MIN,
         "denoise_max": upscale_service.DENOISE_MAX,
         "denoise_default": upscale_service.DENOISE_DEFAULT,
+        "denoise_bands": upscale_service.denoise_bands(),
         "scale_default": upscale_service.SCALE_DEFAULT,
+        # Labels and hints are the measured behaviour and live next to the
+        # measurements, not here.
         "models": [
-            {"key": "realesrgan", "label": "RealESRGAN 4x+", "hint": "Allrounder, ruhige Kanten"},
-            {"key": "nomos8ksc",  "label": "4x Nomos8kSC",   "hint": "Schärfer, foto-orientiert"},
+            {"key": key, "label": spec["label"], "hint": spec["hint"],
+             "default_denoise": spec["default_denoise"]}
+            for key, spec in upscale_service.ENLARGERS.items()
         ],
         "default_model": upscale_service.DEFAULT_UPSCALE_MODEL,
         "scales": scales,
@@ -524,9 +555,12 @@ async def upscale_image_endpoint(
     if not src.exists():
         raise HTTPException(status_code=404, detail="Source image missing on disk")
 
-    denoise = upscale_service.clamp_denoise(body.denoise)
+    # Not UPSCALE_MODELS: that is the ESRGAN files only, and SeedVR2 — the
+    # default — is not a file. Checking against it would quietly swap every
+    # SeedVR2 request for the fallback.
+    model = upscale_service.resolve_enlarger(body.model)
+    denoise = upscale_service.clamp_denoise(body.denoise, model)
     scale = upscale_service.clamp_scale(body.scale, img.width or 0, img.height or 0)
-    model = body.model if body.model in upscale_service.UPSCALE_MODELS else upscale_service.DEFAULT_UPSCALE_MODEL
 
     _set_upscale_progress(str(image_id), "queued", "Warte auf die GPU…", 3)
     safe_create_task(
@@ -542,7 +576,9 @@ async def upscale_image_endpoint(
         "scale": scale,
         "denoise": denoise,
         "model": model,
-        "seconds": upscale_service.estimate_seconds(img.width or 0, img.height or 0, scale),
+        "seconds": upscale_service.estimate_seconds(
+            img.width or 0, img.height or 0, scale, model=model, denoise=denoise,
+        ),
     }
 
 
@@ -558,6 +594,7 @@ async def _run_image_upscale(
                 raise RuntimeError("Image row gone")
             src = upscale_source_path(img)
             prompt = img.prompt or ""
+            src_w, src_h = img.width or 0, img.height or 0
             rel, name = upscale_service.upscaled_rel_path(img.filepath)
 
         if _image_upscale_gate.locked():
@@ -571,6 +608,7 @@ async def _run_image_upscale(
                     uploaded, prompt=prompt, denoise=denoise, scale=scale,
                     upscale_model=model, seed=seed,
                     filename_prefix=f"artrium_imgup_{image_id.hex[:8]}",
+                    src_width=src_w, src_height=src_h,
                 )
                 _set_upscale_progress(key, "submitting", "Workflow wird gestartet…", 15)
                 prompt_id = await post_workflow(client, wf)
@@ -578,7 +616,9 @@ async def _run_image_upscale(
                 if listener:
                     listener.register_node_labels(prompt_id, wf)
                 _set_upscale_progress(
-                    key, "running", "Kacheln werden neu gezeichnet…", 25,
+                    key, "running",
+                    "Wird vergrößert und nachgezeichnet…" if denoise > 0 else "Wird vergrößert…",
+                    25,
                     # The band the tiled redraw owns: ComfyUI's own step counter
                     # maps into it, so the bar moves through the tiles instead
                     # of sitting at 25% for several minutes.
@@ -800,8 +840,16 @@ def _serialize(img: Image) -> dict:
         "width": img.width,
         "height": img.height,
         "loras": img.loras or [],
+        # The Detail Daemon dial this was sampled at — part of the recipe
+        # "Weiterarbeiten" rebuilds, like the LoRA chain above it.
+        "detail_amount": img.detail_amount,
         "workflow_name": img.workflow_name,
         "batch_id": str(img.batch_id) if img.batch_id else None,
+        # Which curated series this picture belongs to — it may be several.
+        # Ids only: the gallery already holds the titles from /api/series,
+        # and nesting them here would mean a second eager relationship on
+        # every image query in the app to save one lookup in one grid.
+        "series_ids": [str(it.series_id) for it in img.series_items],
         "tags": img.tags or [],
         "rating": img.rating,
         "notes": img.notes,
@@ -809,3 +857,9 @@ def _serialize(img: Image) -> dict:
         "wp_uploaded": img.wp_media_id is not None,
         "created_at": img.created_at.isoformat(),
     }
+
+
+# The series router serializes its members with this too, so a picture reads
+# the same whichever endpoint handed it over — including the `?v=` rendition
+# marker, which is the part nobody should ever rebuild by hand.
+serialize_image = _serialize

@@ -7,13 +7,19 @@ them per submission.
 Two graphs live here, and they are the same graph apart from where the latent
 comes from:
 
-  - `build_zimage_workflow`         EmptySD3LatentImage → KSampler(denoise 1)
-  - `build_zimage_variant_workflow` LoadImage → VAEEncode → KSampler(denoise<1)
+  - `build_zimage_workflow`         EmptySD3LatentImage → sampler(denoise 1)
+  - `build_zimage_variant_workflow` LoadImage → VAEEncode → sampler(denoise<1)
 
 Everything else — model, text encoder, VAE, AuraFlow shift, sampler, step
 count, the zeroed negative and the LoRA chain — is deliberately identical. A
 distilled model steered differently is a different model, and a variant that
 was sampled unlike its source would not read as a variant of it.
+
+Both templates still carry a `KSampler`, and both builders swap it for the
+Detail Daemon sampler chain on the way out — see `_apply_detail_sampler`. The
+templates keep the simple node because it is the readable statement of what
+the sampling *is*; the chain is the same thing decomposed so a wrapper can be
+inserted, and at detail 0 it was measured to be pixel-identical.
 """
 import copy
 import json
@@ -159,6 +165,197 @@ def denoise_bands() -> list[dict]:
     return bands
 
 
+# ── Detail Daemon: how much material the model invents ──────────────────────
+#
+# ComfyUI-Detail-Daemon (Jonseed) wraps the sampler and lowers the sigma handed
+# to the model over a schedule, which makes it resolve more structure than the
+# step count alone would. It is *not* a sharpen filter and it does not run
+# after the fact — it changes what gets sampled.
+#
+# It needs a SAMPLER object, which a plain `KSampler` never produces, so the
+# graph is submitted as the decomposition `KSampler` performs internally:
+# RandomNoise + CFGGuider + BasicScheduler + KSamplerSelect →
+# DetailDaemonSamplerNode → SamplerCustomAdvanced. That is the wiring the
+# node's own Z-Image Turbo example uses.
+#
+# MEASURED, 2026-09-19, 1024x1024, 9 steps, res_multistep/simple, cfg 1, one
+# fixed seed: the decomposition at detail 0 is **pixel-identical** to the
+# KSampler it replaces (same SHA over the decoded pixels). That is why there is
+# no second code path — 0 really is "as before", not "close to before".
+#
+# The sweep at ±: what the dial actually does on this model.
+#   -1.0  flat. Paint texture and rust grain smoothed away; clean but lifeless.
+#    0.0  the render this tool has always produced.
+#   +0.5  real material detail — roller grain in paint, granular rust, chips.
+#   +1.0  much more flaking, chip edges with undercoat showing. Still physical.
+#   +2.0  the surface turns *liquid*: pour-like swirls, speckles, curls. A
+#         different picture rather than a more detailed one — which happens to
+#         suit this library's paint-pour look, so it stays reachable.
+#   +3.0  clutter: invented foliage and spikes crowd the subject out.
+#   +4.0  breakdown into blue/white shards; 2% of the frame clipped.
+#
+# Hence the range below. The cap is where the sweep stopped producing a picture
+# of the thing that was asked for.
+DETAIL_MIN = -1.0
+DETAIL_MAX = 2.5
+DETAIL_DEFAULT = 0.0
+DETAIL_SWEET_MIN, DETAIL_SWEET_MAX = 0.4, 1.2
+
+# The schedule shape around `detail_amount`, taken from the node author's
+# Z-Image Turbo example workflow rather than from the node defaults — the
+# defaults (start 0.2, end 0.8, exponent 1) are tuned for many-step SDXL/Flux
+# runs, and this model gets nine. Exposed as one dial on purpose: the other
+# eight inputs are schedule shaping, and a second row of sliders would not
+# earn its space next to a nine-step sampler.
+_DETAIL_SCHEDULE: dict = {
+    "start": 0.0,
+    "end": 1.0,
+    "bias": 0.5,
+    "exponent": 3.0,
+    "start_offset": 0.0,
+    "end_offset": 0.0,
+    "fade": 0.0,
+    "smooth": True,
+    # 0 = let the wrapper read the CFG off the guider. At cfg 1 the scale
+    # factor is 1.0, so the adjustment applies undiminished — the dial is not
+    # inert on a distilled model, which is the first thing worth checking.
+    "cfg_scale_override": 0.0,
+}
+
+# Node ids for the swapped-in sampler chain. Deliberately above everything in
+# both templates (9, 39-49) so they cannot collide with a template node.
+_DD_NOISE, _DD_GUIDER, _DD_SIGMAS = "50", "51", "52"
+_DD_SELECT, _DD_DAEMON, _DD_SAMPLER = "53", "54", "55"
+
+_KSAMPLER_NODE = "44"     # the node the chain replaces, in both templates
+_DECODE_NODE = "43"       # VAEDecode — has to be re-pointed at the new sampler
+
+_DETAIL_BANDS: tuple[tuple[float, str, str], ...] = (
+    (-0.25, "Geglättet",
+     "Textur wird zurückgenommen — Flächen werden ruhiger, Korn und Rost verschwinden."),
+    (0.25, "Wie gehabt",
+     "Der Sampler läuft unverändert. Bei 0 exakt das Bild, das dieses Tool immer geliefert hat."),
+    (1.30, "Material",
+     "Mehr Oberfläche: Farbkorn, Rostkörnung, Abplatzer mit sichtbaren Kanten. "
+     "Motiv und Komposition bleiben, wie sie sind."),
+    (2.51, "Erfunden",
+     "Das Modell setzt eigene Struktur dazu — Farbe wird flüssig, Schlieren und "
+     "Sprenkel kommen hinzu. Ein anderes Bild, nicht nur ein detaillierteres."),
+)
+
+
+def clamp_detail(value: float | None) -> float:
+    """Pull a detail request into the range that still returns the picture
+    that was asked for. `None` means the dial was not touched."""
+    if value is None:
+        return DETAIL_DEFAULT
+    return round(min(max(float(value), DETAIL_MIN), DETAIL_MAX), 2)
+
+
+def describe_detail(value: float | None) -> dict:
+    """Band name + one-line effect for a detail value."""
+    detail = clamp_detail(value)
+    for upper, name, effect in _DETAIL_BANDS:
+        if detail < upper:
+            break
+    return {
+        "detail": detail,
+        "band": name,
+        "effect": effect,
+        "recommended": DETAIL_SWEET_MIN <= detail <= DETAIL_SWEET_MAX,
+    }
+
+
+def detail_bands() -> list[dict]:
+    """The full band table, for a client that wants to label its own slider."""
+    lower = DETAIL_MIN
+    bands = []
+    for upper, name, effect in _DETAIL_BANDS:
+        bands.append({
+            "from": round(lower, 2),
+            "to": round(min(upper, DETAIL_MAX), 2),
+            "band": name,
+            "effect": effect,
+        })
+        lower = upper
+        if lower >= DETAIL_MAX:
+            break
+    return bands
+
+
+def _apply_detail_sampler(wf: dict, detail: float) -> None:
+    """Replace the template's KSampler with the Detail Daemon sampler chain.
+
+    Unconditional, including at detail 0, because the decomposition was
+    measured to be pixel-identical there — one graph is easier to reason about
+    than two, and it keeps "same seed, dial moved" an honest comparison
+    instead of one that also swapped samplers.
+
+    Everything the KSampler was configured with is carried across rather than
+    restated, so the sampler, scheduler, cfg, steps and denoise stay the
+    template's business and this function only ever adds the wrapper.
+    """
+    ks = wf.pop(_KSAMPLER_NODE)["inputs"]
+
+    wf[_DD_NOISE] = {
+        "inputs": {"noise_seed": ks["seed"]},
+        "class_type": "RandomNoise",
+        "_meta": {"title": "Noise"},
+    }
+    wf[_DD_GUIDER] = {
+        "inputs": {
+            "model": ks["model"],
+            "positive": ks["positive"],
+            "negative": ks["negative"],
+            "cfg": ks["cfg"],
+        },
+        "class_type": "CFGGuider",
+        "_meta": {"title": "Guider"},
+    }
+    wf[_DD_SIGMAS] = {
+        "inputs": {
+            "model": ks["model"],
+            "scheduler": ks["scheduler"],
+            "steps": ks["steps"],
+            # BasicScheduler does the same `int(steps/denoise)` then
+            # `sigmas[-(steps+1):]` that KSampler.set_steps does, so a variant
+            # still samples its full step count from a later starting point —
+            # the long note at the top of this module still holds.
+            "denoise": ks["denoise"],
+        },
+        "class_type": "BasicScheduler",
+        "_meta": {"title": "Sigmas"},
+    }
+    wf[_DD_SELECT] = {
+        "inputs": {"sampler_name": ks["sampler_name"]},
+        "class_type": "KSamplerSelect",
+        "_meta": {"title": "Sampler"},
+    }
+    wf[_DD_DAEMON] = {
+        "inputs": {
+            "sampler": [_DD_SELECT, 0],
+            "detail_amount": detail,
+            **_DETAIL_SCHEDULE,
+        },
+        "class_type": "DetailDaemonSamplerNode",
+        "_meta": {"title": "Detail Daemon"},
+    }
+    wf[_DD_SAMPLER] = {
+        "inputs": {
+            "noise": [_DD_NOISE, 0],
+            "guider": [_DD_GUIDER, 0],
+            "sampler": [_DD_DAEMON, 0],
+            "sigmas": [_DD_SIGMAS, 0],
+            "latent_image": ks["latent_image"],
+        },
+        "class_type": "SamplerCustomAdvanced",
+        "_meta": {"title": "Sampler (Detail Daemon)"},
+    }
+    # Slot 0 is `output`, which is what KSampler returned; slot 1 is
+    # `denoised_output` and would be a different picture.
+    wf[_DECODE_NODE]["inputs"]["samples"] = [_DD_SAMPLER, 0]
+
+
 def latent_size(width: int, height: int) -> tuple[int, int]:
     """The size a source image actually comes back at.
 
@@ -192,13 +389,15 @@ def _apply_lora_chain(wf: dict, loras: list[dict]) -> None:
 
 def build_zimage_workflow(
     prompt: str, seed: int, width: int, height: int,
-    loras: list[dict],
+    loras: list[dict], detail: float | None = None,
 ) -> dict:
     """
     *loras*: [{"name": "<filename>.safetensors", "strength": 0.0-1.0}, ...],
     applied as a chain in list order (each LoraLoaderModelOnly feeds the
     next). An empty list wires the UNETLoader straight into
     ModelSamplingAuraFlow with no LoRA at all.
+
+    *detail*: the Detail Daemon dial, `None` or 0 for the sampler as it was.
     """
     wf = copy.deepcopy(_TEMPLATE)
     wf["45"]["inputs"]["text"] = prompt
@@ -206,12 +405,13 @@ def build_zimage_workflow(
     wf["41"]["inputs"]["width"] = width
     wf["41"]["inputs"]["height"] = height
     _apply_lora_chain(wf, loras)
+    _apply_detail_sampler(wf, clamp_detail(detail))
     return wf
 
 
 def build_zimage_variant_workflow(
     image_name: str, prompt: str, seed: int, denoise: float,
-    loras: list[dict],
+    loras: list[dict], detail: float | None = None,
 ) -> dict:
     """Re-diffuse an existing picture into a variant of itself.
 
@@ -224,7 +424,7 @@ def build_zimage_variant_workflow(
     when they want the picture pushed somewhere. *denoise* decides how much of
     the source survives to be painted over; see the module constants.
 
-    *loras* behaves exactly as in `build_zimage_workflow`.
+    *loras* and *detail* behave exactly as in `build_zimage_workflow`.
     """
     wf = copy.deepcopy(_VARIANT_TEMPLATE)
     wf["49"]["inputs"]["image"] = image_name
@@ -232,4 +432,5 @@ def build_zimage_variant_workflow(
     wf["44"]["inputs"]["seed"] = seed if seed >= 0 else random.randint(0, 2**32 - 1)
     wf["44"]["inputs"]["denoise"] = clamp_denoise(denoise)
     _apply_lora_chain(wf, loras)
+    _apply_detail_sampler(wf, clamp_detail(detail))
     return wf

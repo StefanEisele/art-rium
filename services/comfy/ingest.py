@@ -29,6 +29,7 @@ async def ingest_comfy_image(
     width: int | None = None,
     height: int | None = None,
     loras: list[dict] | None = None,
+    detail_amount: float | None = None,
     workflow_name: str | None = None,
     batch_id: uuid.UUID | None = None,
 ) -> tuple[Path | None, str | None]:
@@ -82,9 +83,15 @@ async def ingest_comfy_image(
                 width=width,
                 height=height,
                 loras=loras,
+                detail_amount=detail_amount,
                 workflow_name=workflow_name,
                 batch_id=batch_id,
                 created_at=now,
+                # A brand-new picture is in no series, but saying so here is
+                # what settles the collection: a flush does not, so anything
+                # serializing this row before it has been re-read would hit a
+                # lazy load in async code and raise MissingGreenlet instead.
+                series_items=[],
             )
             session.add(record)
             await session.commit()

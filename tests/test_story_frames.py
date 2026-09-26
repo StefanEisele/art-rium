@@ -22,7 +22,9 @@ class TestBuildZimageWorkflow:
         loras = [{"name": "some_lora.safetensors", "strength": 0.7}]
         wf = build_zimage_workflow("a rusty gate", 1234, 960, 704, loras)
         assert wf["45"]["inputs"]["text"] == "a rusty gate"
-        assert wf["44"]["inputs"]["seed"] == 1234
+        # The seed lives on RandomNoise now — the KSampler was decomposed so
+        # the Detail Daemon wrapper could be inserted.
+        assert wf["50"]["inputs"]["noise_seed"] == 1234
         assert wf["41"]["inputs"]["width"] == 960
         assert wf["41"]["inputs"]["height"] == 704
         assert wf["lora_0"]["inputs"]["lora_name"] == "some_lora.safetensors"
@@ -31,7 +33,7 @@ class TestBuildZimageWorkflow:
 
     def test_negative_seed_is_randomized(self):
         wf = build_zimage_workflow("p", -1, 512, 512, [{"name": "l.safetensors", "strength": 0.5}])
-        assert wf["44"]["inputs"]["seed"] >= 0
+        assert wf["50"]["inputs"]["noise_seed"] >= 0
 
     def test_lora_strength_is_clamped(self):
         wf = build_zimage_workflow("p", 1, 512, 512, [{"name": "l.safetensors", "strength": 1.7}])

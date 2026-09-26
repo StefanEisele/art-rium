@@ -521,7 +521,12 @@
       background: var(--accent); opacity: 0.5;
       transition: left 0.18s ease, width 0.18s ease;
     }
-    #denoise { width: 100%; margin: 0; accent-color: var(--accent); display: block; }
+    #denoise, #detail { width: 100%; margin: 0; accent-color: var(--accent); display: block; }
+    /* Hidden for SDXL and Ernie, whose graphs have no Detail Daemon.
+       Same `.show` convention as #negative-prompt-field above — toggling
+       inline `display:''` would only fall back to this rule. */
+    #detail-field { display: none; }
+    #detail-field.show { display: flex; }
     .dn-ends {
       display: flex; justify-content: space-between;
       font-size: 11px; color: var(--text-dim); margin-top: 2px;
@@ -610,6 +615,26 @@
       <label>Negative Prompt</label>
       <textarea id="negative-prompt" placeholder="What to avoid — SDXL actually obeys this…"
                 maxlength="1000" style="min-height:70px"></textarea>
+    </div>
+
+    <!-- Detail Daemon — Z-Image Turbo only, both Direct and Variante.
+         Not a sharpen filter: it lowers the sigma handed to the model while
+         sampling, so the model resolves more material than nine steps would
+         otherwise give. Sits out here rather than in Advanced because it
+         changes the picture, not the plumbing. 0 is the sampler as it was. -->
+    <div class="field" id="detail-field">
+      <div class="dn-head">
+        <label style="margin:0">Detailgrad</label>
+        <span><span class="val" id="detail-val">0.00</span>
+              <span class="band" id="detail-band"></span></span>
+      </div>
+      <div class="dn-track-wrap">
+        <div class="dn-rail"><div class="dn-zone" id="detail-zone"></div></div>
+        <input type="range" id="detail" min="-100" max="250" step="5" value="0"
+               oninput="onDetailInput()">
+      </div>
+      <div class="dn-ends"><span>← Glatter</span><span>Mehr Material →</span></div>
+      <div class="dn-effect" id="detail-effect"></div>
     </div>
 
     <!-- Enhance review (prompt cards) — populated after /api/prompts/enhance -->
@@ -800,6 +825,12 @@ const DOM_IDS = {
   denoiseBand: 'denoise-band',
   denoiseZone: 'denoise-zone',
   denoiseEffect: 'denoise-effect',
+  detailField: 'detail-field',
+  detail: 'detail',
+  detailVal: 'detail-val',
+  detailBand: 'detail-band',
+  detailZone: 'detail-zone',
+  detailEffect: 'detail-effect',
   pickerModal: 'picker-modal',
   pickerGrid: 'picker-grid',
   pickerSearch: 'picker-search',
@@ -860,6 +891,10 @@ const state = {
   sourcePrompt: '',
   denoise: 0.40,
   denoiseOptions: null,    // GET /api/variant/options — the SSOT for the ranges
+  // Detail Daemon. 0 samples exactly as this tool always did, which is
+  // why it is the default and why nothing needs migrating.
+  detail: 0.0,
+  detailOptions: null,     // the `detail` block of GET /api/variant/options
   pickerImages: [], pickerSearch: '', pickerPage: 0,
   pickerLoading: false, pickerDone: false,
   // Generator model: 'zimage' (Z-Image Turbo, ignores negative prompts) or
@@ -1556,6 +1591,9 @@ const startGenerationRequest = async (extra) => {
         height: state.imgHeight,
         client_id: state.clientId,
         loras: [...state.activeLoras].map(name => ({ name, strength: state.loraStrengths[name] })),
+        // Ignored server-side for SDXL and Ernie, whose graphs have no
+        // Detail Daemon node — sent unconditionally so there is one body.
+        detail: state.detail,
         ...extra,
       }),
     });
@@ -1577,7 +1615,18 @@ const startGenerationRequest = async (extra) => {
 const loadDenoiseOptions = async () => {
   try {
     const r = await apiFetch('/api/variant/options');
-    state.denoiseOptions = await r.json();
+    const o = await r.json();
+    state.denoiseOptions = o;
+    // Same endpoint, same reason: the detail range was measured off this
+    // workflow, so the slider takes its bounds and its band labels from
+    // the server rather than keeping a copy that can drift.
+    state.detailOptions = o.detail || null;
+    if (state.detailOptions) {
+      const el = $(DOM_IDS.detail);
+      el.min = String(Math.round(state.detailOptions.min * 100));
+      el.max = String(Math.round(state.detailOptions.max * 100));
+    }
+    syncDetailSlider();
   } catch (e) {
     console.error('Failed to load variant options:', e);
   }
@@ -1640,6 +1689,49 @@ const renderDenoise = () => {
 const onDenoiseInput = () => {
   state.denoise = parseInt($(DOM_IDS.denoise).value, 10) / 100;
   renderDenoise();
+};
+
+// ── Detail Daemon ────────────────────────────────────────────────────────────
+// The slider is integers (×100) because `<input type=range>` steps are more
+// predictable that way; the value the server sees is the float.
+
+/** Repaint value, band name, recommended zone and effect together. */
+const renderDetail = () => {
+  const o = state.detailOptions;
+  setText(DOM_IDS.detailVal, (state.detail > 0 ? '+' : '') + state.detail.toFixed(2));
+  if (!o) return;
+
+  const span = o.max - o.min;
+  const zone = $(DOM_IDS.detailZone);
+  zone.style.left  = ((o.recommended_min - o.min) / span * 100).toFixed(1) + '%';
+  zone.style.width = ((o.recommended_max - o.recommended_min) / span * 100).toFixed(1) + '%';
+
+  const inZone = state.detail >= o.recommended_min && state.detail <= o.recommended_max;
+  const band = o.bands.find(b => state.detail < b.to) || o.bands[o.bands.length - 1];
+  const bandEl = $(DOM_IDS.detailBand);
+  bandEl.textContent = band ? `· ${band.band}` : '';
+  bandEl.classList.toggle('rec', inZone);
+  setText(DOM_IDS.detailEffect, band ? band.effect : '');
+};
+
+const onDetailInput = () => {
+  state.detail = parseInt($(DOM_IDS.detail).value, 10) / 100;
+  renderDetail();
+};
+
+/** Put the slider where `state.detail` already is — used after a session
+ *  restore and after a `?from=` deep link, neither of which fires `input`. */
+const syncDetailSlider = () => {
+  const el = $(DOM_IDS.detail);
+  if (el) el.value = String(Math.round(state.detail * 100));
+  renderDetail();
+};
+
+/** Only the Z-Image graphs carry the Detail Daemon sampler; the SDXL and
+ *  Ernie workflows have no such node, so the dial would be a lie there. */
+const updateDetailVisibility = () => {
+  const field = $(DOM_IDS.detailField);
+  if (field) field.classList.toggle('show', state.model === 'zimage');
 };
 
 /** Jump the slider to the middle of whichever band currently applies. Called
@@ -1721,6 +1813,11 @@ const setVariantSource = (img) => {
     fromSource.forEach(l => { state.loraStrengths[l.name] = l.strength; });
     renderLoraState();
   }
+
+  // Same argument as the LoRA stack above: a variant of a picture that was
+  // sampled with extra material should start from that, not from 0.
+  state.detail = typeof img.detail_amount === 'number' ? img.detail_amount : 0;
+  syncDetailSlider();
 
   snapDenoiseToRecommended();
   renderSourceCard();
@@ -1844,6 +1941,7 @@ const setModel = async (model) => {
   $(DOM_IDS.modelSdxlBtn).classList.toggle('active', model === 'sdxl');
   $(DOM_IDS.modelErnieBtn).classList.toggle('active', model === 'ernie');
   updateNegativePromptVisibility();
+  updateDetailVisibility();
 
   await buildLoraList();  // refetches for the new model; resets state.activeLoras to its default
 
@@ -2216,7 +2314,7 @@ const buildBatchRow = () => {
 // the LoRA selection, the denoise band, a variant's source picture — is put
 // back afterwards by applySessionLate().
 const Z_SESSION_KEYS = [
-  'mode', 'model', 'imgWidth', 'imgHeight', 'batchCount', 'denoise',
+  'mode', 'model', 'imgWidth', 'imgHeight', 'batchCount', 'denoise', 'detail',
   'enhancePhase', 'enhancedPrompts',
 ];
 
@@ -2240,6 +2338,10 @@ const zSession = ArtRium.session('z-image', {
     if (saved.imgHeight) state.imgHeight = saved.imgHeight;
     if (saved.batchCount) state.batchCount = saved.batchCount;
     if (typeof saved.denoise === 'number') state.denoise = saved.denoise;
+    // Note the shape of this function: it reads each key by name rather than
+    // looping Z_SESSION_KEYS, so adding a key to that list only makes it
+    // *saved*. A value restored here has to be named here too.
+    if (typeof saved.detail === 'number') state.detail = saved.detail;
     $(DOM_IDS.modelZimageBtn).classList.toggle('active', state.model === 'zimage');
     $(DOM_IDS.modelSdxlBtn).classList.toggle('active', state.model === 'sdxl');
     $(DOM_IDS.modelErnieBtn).classList.toggle('active', state.model === 'ernie');
@@ -2249,6 +2351,10 @@ const zSession = ArtRium.session('z-image', {
     });
     if (sizeBtn) selectButton('.size-btn', sizeBtn);
     updateNegativePromptVisibility();
+    updateDetailVisibility();
+    // The options fetch has not landed yet, so this only puts the handle
+    // and the number back; the band labels arrive with loadDenoiseOptions.
+    syncDetailSlider();
   },
 });
 
@@ -2437,10 +2543,17 @@ const applyContinueDeepLink = async () => {
     renderLoraState();
   }
 
+  // The detail dial is part of the recipe too: continuing from a picture that
+  // was sampled at +1.2 and silently starting from 0 would hand back a
+  // materially different render off an otherwise identical setup.
+  state.detail = typeof img.detail_amount === 'number' ? img.detail_amount : 0;
+  syncDetailSlider();
+
   updateAdvSummary();
   const bits = [`${img.width}×${img.height}`];
   if (img.seed !== null && img.seed !== undefined) bits.push(`Seed ${img.seed}`);
   if (carried.length) bits.push(carried.length === 1 ? '1 LoRA' : `${carried.length} LoRAs`);
+  if (state.detail) bits.push(`Detail ${state.detail > 0 ? '+' : ''}${state.detail}`);
   ArtRium.toast(`Übernommen: Prompt · ${bits.join(' · ')}`);
 };
 
@@ -2455,6 +2568,9 @@ window.addEventListener('load', async () => {
   // which needs the ranges to already be here.
   await loadDenoiseOptions();
   await applySessionLate(savedSession);
+  // After the session restore, which may have brought a different model back
+  // with it — the dial only belongs to the Z-Image graphs.
+  updateDetailVisibility();
   state.generatedImages = storage.loadImages();
   gallery.render();
 

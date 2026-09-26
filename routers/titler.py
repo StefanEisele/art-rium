@@ -10,15 +10,20 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth
 from core.config import settings
 from core.db import get_db
 from core.imaging import prepare_jpg_for_web
-from core.models import Image, Video
+from core.models import Image, ImageSeries, ImageSeriesItem, Video
 from core.video_thumb import extract_video_frames
-from services.ollama.analysis import generate_titles, generate_video_titles
+from services.ollama.analysis import (
+    generate_series_titles,
+    generate_titles,
+    generate_video_titles,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(dependencies=[Depends(require_auth)])
@@ -30,6 +35,11 @@ _TITLER_N = 5
 # context without blowing up the VL token budget on qwen2.5vl:3b.
 _VIDEO_FRAMES = 3
 _VIDEO_FRAME_MAX_EDGE = 512
+# Members sampled from a series, for the same reason the video titler caps
+# its frames at 3: qwen2.5vl:3b runs against a 16k context, and a 20-picture
+# series at 512 px does not fit in it. Four is enough to show what the set
+# has in common — first, last, and two from the middle.
+_SERIES_IMAGES = 4
 
 
 async def _titles_with_retry(generate, subject: str) -> list[str]:
@@ -142,3 +152,95 @@ async def run_video_titler(
         raise HTTPException(status_code=502, detail="Titler returned no titles")
 
     return {"titles": titles, "frames_used": len(frames)}
+
+
+class SeriesTitlerRequest(BaseModel):
+    series_id: str
+    n: int | None = None          # optional override; default _TITLER_N
+
+
+def _sample_evenly(items: list, count: int) -> list:
+    """Pick `count` items spread across the list, keeping first, last and order.
+
+    Sending the first four of a twenty-picture series would title whatever
+    happens to open it rather than the series.
+    """
+    if len(items) <= count:
+        return items
+    step = (len(items) - 1) / (count - 1)
+    return [items[round(i * step)] for i in range(count)]
+
+
+@router.post("/api/titler/run-series")
+async def run_series_titler(
+    req: SeriesTitlerRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Titles for a series as a whole — several works, one name.
+
+    The title this produces becomes the Instagram caption and the article's
+    subject, so the model is shown members rather than one picture and asked
+    what they share.
+    """
+    try:
+        series_uuid = uuid.UUID(req.series_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid series_id")
+
+    series = await db.get(ImageSeries, series_uuid)
+    if not series:
+        raise HTTPException(status_code=404, detail="Series not found")
+
+    rows = (await db.execute(
+        select(ImageSeriesItem)
+        .where(ImageSeriesItem.series_id == series_uuid)
+        .order_by(ImageSeriesItem.position)
+    )).scalars().all()
+    if not rows:
+        raise HTTPException(status_code=400, detail="Series has no images")
+
+    picked_ids = _sample_evenly([r.image_id for r in rows], _SERIES_IMAGES)
+    found = {
+        img.id: img
+        for img in (await db.execute(
+            select(Image).where(Image.id.in_(picked_ids))
+        )).scalars().all()
+    }
+
+    jpgs: list[bytes] = []
+    for image_id in picked_ids:                 # sample order, not query order
+        img = found.get(image_id)
+        if not img:
+            continue
+        # img.filepath, matching the single-image titler above: the model is
+        # being asked about the work, and the renditions on top of it are
+        # delivery, not subject.
+        src = settings.storage_dir / img.filepath
+        if not src.exists():
+            continue
+        jpg_bytes, _ = await prepare_jpg_for_web(
+            src, max_edge=_TITLER_MAX_EDGE, quality=_TITLER_JPG_QUALITY,
+        )
+        jpgs.append(jpg_bytes)
+    if not jpgs:
+        raise HTTPException(status_code=404, detail="No readable images in this series")
+
+    n = max(1, min(10, req.n if req.n is not None else _TITLER_N))
+    logger.info(
+        "Series titler: series=%s, model=%s, images=%d of %d, total=%dKB",
+        series.id, settings.ollama_titler_model, len(jpgs), len(rows),
+        sum(len(j) for j in jpgs) // 1024,
+    )
+
+    try:
+        titles = await _titles_with_retry(
+            lambda: generate_series_titles(jpgs, n=n), f"series {series.id}",
+        )
+    except Exception as exc:
+        logger.exception("Series titler failed for series %s", series.id)
+        raise HTTPException(status_code=502, detail=f"Titler failed: {exc}")
+
+    if not titles:
+        raise HTTPException(status_code=502, detail="Titler returned no titles")
+
+    return {"titles": titles, "images_used": len(jpgs), "item_count": len(rows)}

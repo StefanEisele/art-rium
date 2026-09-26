@@ -111,6 +111,7 @@ class ComfyListener:
         width: int,
         height: int,
         loras: list[dict] | None = None,
+        detail_amount: float | None = None,
         workflow_name: str = WORKFLOW_NAME,
     ) -> None:
         self._prompt_meta[prompt_id] = {
@@ -123,6 +124,7 @@ class ComfyListener:
             "width": width,
             "height": height,
             "loras": loras,
+            "detail_amount": detail_amount,
             "workflow_name": workflow_name,
             "filename": None,
         }
@@ -330,6 +332,7 @@ class ComfyListener:
             width=meta.get("width"),
             height=meta.get("height"),
             loras=meta.get("loras"),
+            detail_amount=meta.get("detail_amount"),
             workflow_name=meta.get("workflow_name", WORKFLOW_NAME),
             batch_id=uuid.UUID(meta["batch_id"]) if meta.get("batch_id") else None,
         )

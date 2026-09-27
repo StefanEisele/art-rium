@@ -1,7 +1,7 @@
 importScripts('/shared/sw-base.js');
 
 artRiumSetupSw({
-  cache: 'art-rium-dashboard-v3',
+  cache: 'art-rium-dashboard-v5',
   shell: ['/', '/manifest.json', '/icon.svg'],
   // /shared/ (shared.css/shared.js) evolves in lockstep with every page's
   // markup — a stale cached copy silently breaks layout on every tool that

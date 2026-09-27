@@ -13,172 +13,173 @@
   <style>
     .app {
       min-height: 100dvh;
-      max-width: 600px;
-      padding-bottom: calc(env(safe-area-inset-bottom) + 24px);
+      max-width: 920px;
+      padding-bottom: calc(env(safe-area-inset-bottom) + 40px);
     }
 
     /* ── Header (delta from shared.css defaults — no divider on the hub page) ── */
     header {
       justify-content: space-between;
-      padding: 18px 20px 14px;
+      align-items: flex-end;
+      padding: 30px 20px 22px;
       border-bottom: none;
     }
+    .brand h1 { font-size: 27px; font-weight: 800; letter-spacing: -0.9px; line-height: 1; }
+    .brand p  { font-size: 13px; color: var(--text-dim); margin-top: 7px; }
+    /* The server connection only speaks up when it is not fine — while
+       connected, the queue line below already says all is well. */
+    header .dot { margin-bottom: 4px; }
+    header .dot.connected { visibility: hidden; }
 
-    .header-brand { display: flex; flex-direction: column; gap: 2px; }
-    .header-brand h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
-    .header-brand p  { font-size: 13px; color: var(--text-dim); }
-
-    /* ── Main ── */
     main {
       flex: 1;
-      padding: 8px 20px 0;
+      padding: 0 20px;
       display: flex;
       flex-direction: column;
-      gap: 28px;
+      gap: 34px;
     }
 
-    /* ── Section (delta from shared.css defaults) ── */
-    .section-label { letter-spacing: 0.8px; margin-bottom: 10px; }
-
-    /* ── Tool card ── */
-    .tools-list { display: flex; flex-direction: column; gap: 10px; }
-
-    .tool-card {
-      display: flex;
-      align-items: center;
-      gap: 16px;
-      background: var(--surface);
-      border: 1.5px solid var(--border);
-      border-radius: var(--radius);
-      padding: 16px 18px;
-      text-decoration: none;
-      color: inherit;
-      transition: border-color 0.15s, background 0.15s;
-      -webkit-tap-highlight-color: transparent;
+    /* ── Group label: small caps with a hairline running out to the edge ── */
+    .group {
+      display: flex; align-items: center; gap: 14px;
+      font-size: 11px; font-weight: 700; color: var(--text-faint);
+      text-transform: uppercase; letter-spacing: 1.3px;
+      margin-bottom: 14px;
     }
+    .group::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
-    .tool-card.active {
-      cursor: pointer;
-      border-color: var(--border);
+    /* ── Tool tiles ──
+       The icon is the tile. Its objects are painted with scripts/ui_icons.py,
+       cut out and trimmed to the same square, so they stand free on the card —
+       no frame, just a soft shadow under them to lift them off the surface. */
+    .tools {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
     }
-    .tool-card.active:active {
-      background: var(--surface2);
-      border-color: var(--accent);
-    }
-
-    .tool-card.soon {
-      opacity: 0.45;
-      cursor: default;
-    }
-
-    .tool-icon {
-      width: 46px; height: 46px;
-      border-radius: 12px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 22px;
-      background: var(--surface2);
+    .tool {
+      position: relative;
+      display: flex; flex-direction: column; align-items: flex-start;
+      padding: 18px 16px 16px;
+      /* A whisper of top light, like a lit plinth. */
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 55%), var(--surface);
       border: 1px solid var(--border);
-      flex-shrink: 0;
-      transition: background 0.15s, border-color 0.15s;
+      border-radius: var(--radius-lg);
+      color: inherit;
+      text-decoration: none;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.2s, border-color 0.2s, transform 0.12s;
     }
-    /* Active cards: subtle accent tint instead of a solid orange block. */
-    .tool-card.active .tool-icon {
-      background: var(--accent-soft);
-      border-color: var(--accent-border);
+    .tool-icon {
+      display: block;
+      width: 76px; height: 76px;
+      margin: 0 0 18px -3px;
+      filter: drop-shadow(0 7px 12px rgba(0, 0, 0, 0.5));
+      -webkit-user-drag: none;
+      transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
     }
-
-    .tool-body { flex: 1; min-width: 0; }
-    .tool-name {
-      font-size: 16px;
-      font-weight: 700;
-      letter-spacing: -0.2px;
-      margin-bottom: 3px;
-    }
+    .tool-name { font-size: 15px; font-weight: 650; letter-spacing: -0.2px; }
     .tool-desc {
-      font-size: 13px;
-      color: var(--text-dim);
-      line-height: 1.4;
+      margin-top: 4px;
+      font-size: 12.5px; line-height: 1.4; color: var(--text-dim);
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden;
+      min-height: 2.8em;    /* always two lines, so a row never has a short tile */
+    }
+    /* The one place the accent shows on a tile: a quiet arrow on hover. */
+    .tool::after {
+      content: '→';
+      position: absolute; top: 16px; right: 16px;
+      font-size: 15px; color: var(--accent);
+      opacity: 0; transform: translateX(-4px);
+      transition: opacity 0.2s, transform 0.2s;
+    }
+    a.tool:active { transform: scale(0.98); background: var(--surface2); }
+    @media (hover: hover) {
+      a.tool:hover { background: var(--surface2); border-color: var(--border-strong); }
+      a.tool:hover .tool-icon { transform: translateY(-3px) scale(1.04); }
+      a.tool:hover::after { opacity: 1; transform: none; }
     }
 
-    .tool-meta { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
-
-    .badge {
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.6px;
-      padding: 3px 8px;
-      border-radius: 6px;
-    }
-    .badge.live { background: rgba(50,215,75,0.15); color: var(--green); }
-    .badge.soon { background: var(--surface2); color: var(--text-dim); }
-
-    .tool-arrow {
-      font-size: 20px;
-      color: var(--accent);
-      font-weight: 300;
-      line-height: 1;
+    .tool.soon { cursor: default; }
+    .tool.soon .tool-icon { opacity: 0.35; filter: grayscale(1); }
+    .tool.soon .tool-name, .tool.soon .tool-desc { color: var(--text-faint); }
+    .tool.soon::after {
+      content: 'Soon'; opacity: 1; transform: none;
+      font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+      color: var(--text-faint);
     }
 
-    /* ── Footer ── */
-    footer {
-      padding: 20px 20px 0;
-      font-size: 12px;
-      color: var(--text-dim);
-      text-align: center;
+    @media (min-width: 720px) {
+      header { padding: 44px 32px 30px; }
+      .brand h1 { font-size: 32px; }
+      main { padding: 0 32px; gap: 40px; }
+      .tools { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+      .tool { padding: 22px 20px 20px; }
+      .tool-icon { width: 96px; height: 96px; margin-bottom: 22px; }
+      .tool-name { font-size: 16px; }
+      .tool-desc { font-size: 13px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .tool, .tool-icon, .tool::after { transition: none; }
+      a.tool:hover .tool-icon { transform: none; }
     }
 
-    /* ── Comfy progress strip ── */
+    /* ── Render queue: one quiet status line ──
+       On the hub rather than in a tool, because you reach for it when you no
+       longer trust the tool. The confirm() dialogs carry the explanation. */
+    .queue {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 9px 9px 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-pill);
+      font-size: 13px; color: var(--text-dim);
+    }
+    #queue-state { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .queue-btn {
+      flex-shrink: 0;
+      padding: 6px 12px;
+      border-radius: var(--radius-pill);
+      border: 1px solid var(--border-strong);
+      background: none; color: var(--text-dim);
+      font: 600 12px var(--font);
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+    .queue-btn:hover  { color: var(--text); background: var(--surface2); }
+    .queue-btn.danger:hover { color: var(--red); border-color: var(--red); background: none; }
+    .queue-btn:active { transform: scale(0.96); }
+    .queue-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
+
+    /* ── Comfy progress strip — visible during active generation ── */
     #comfy-strip {
       display: none;
       flex-direction: column;
-      gap: 5px;
-      padding: 8px 20px 10px;
-      border-bottom: 1px solid var(--border);
+      gap: 6px;
+      padding: 0 20px 18px;
       flex-shrink: 0;
     }
     #comfy-strip.show { display: flex; }
-    .comfy-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
+    .comfy-row { display: flex; justify-content: space-between; align-items: center; }
     #comfy-label { font-size: 13px; color: var(--text-dim); font-weight: 500; }
     #comfy-steps { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
     .comfy-track { height: 2px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
     #comfy-bar   { height: 100%; background: var(--accent); border-radius: 2px; width: 0%; transition: width 0.35s ease; }
-
-    /* ── System panel ── */
-    .system-panel {
-      background: var(--surface);
-      border: 1.5px solid var(--border);
-      border-radius: var(--radius);
-      padding: 14px 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .system-state {
-      display: flex; align-items: center; gap: 9px;
-      font-size: 13px; color: var(--text-dim);
-    }
-    .system-state b { color: var(--text); font-weight: 600; }
-    .system-actions { display: flex; gap: 8px; }
-    .system-actions .btn { padding: 11px 14px; font-size: 14px; }
-    .system-note { font-size: 12px; color: var(--text-faint); line-height: 1.45; }
+    @media (min-width: 720px) { #comfy-strip { padding: 0 32px 22px; } }
 
     /* ── Auth panel ── */
     #auth-panel {
       display: none;
       background: var(--surface);
-      border: 1.5px solid var(--border);
-      border-radius: var(--radius);
-      padding: 18px 20px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 20px;
       gap: 12px;
       flex-direction: column;
     }
     #auth-panel.show { display: flex; }
-    #auth-panel h2 { font-size: 15px; font-weight: 600; }
+    #auth-panel h2 { font-size: 15px; font-weight: 650; }
     #auth-panel p  { font-size: 13px; color: var(--text-dim); line-height: 1.5; }
 
     .field { display: flex; flex-direction: column; gap: 7px; }
@@ -187,8 +188,8 @@
       text-transform: uppercase; letter-spacing: 0.7px;
     }
     .field input[type="password"] {
-      width: 100%; background: var(--surface2); border: 1.5px solid var(--border);
-      border-radius: 10px; color: var(--text); font-size: 16px;
+      width: 100%; background: var(--surface2); border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm); color: var(--text); font-size: 16px;
       padding: 13px 14px; outline: none; font-family: inherit;
       transition: border-color 0.2s; -webkit-appearance: none;
     }
@@ -208,14 +209,13 @@
 <div class="app">
 
   <header>
-    <div class="header-brand">
+    <div class="brand">
       <h1>art-rium</h1>
       <p>AI art creation platform</p>
     </div>
     <div class="dot" id="dot" style="opacity:0"></div>
   </header>
 
-  <!-- Comfy progress strip — visible during active generation -->
   <div id="comfy-strip">
     <div class="comfy-row">
       <span id="comfy-label">Generating…</span>
@@ -238,182 +238,89 @@
       <button class="connect-btn" onclick="saveApiKey()">Connect</button>
     </div>
 
-    <!-- Render queue — the escape hatches, on the hub rather than in a tool,
-         because you reach for them when you no longer trust the tool. -->
+    <div class="queue" aria-label="Render queue">
+      <span class="dot connecting" id="queue-dot"></span>
+      <span id="queue-state">Checking ComfyUI…</span>
+      <button class="queue-btn danger" id="cancel-all-btn" onclick="cancelAllJobs()"
+              title="Stop every running job and empty ComfyUI's queue">Cancel all</button>
+      <button class="queue-btn" id="restart-comfy-btn" onclick="restartComfy()"
+              title="Cancel everything, then kill and restart ComfyUI — for when it answers but never renders">Restart</button>
+    </div>
+
     <section>
-      <div class="section-label">Render Queue</div>
-      <div class="system-panel">
-        <div class="system-state">
-          <span class="dot connecting" id="queue-dot"></span>
-          <span id="queue-state">Checking ComfyUI…</span>
-        </div>
-        <div class="system-actions">
-          <button class="btn danger" id="cancel-all-btn" onclick="cancelAllJobs()">Cancel all jobs</button>
-          <button class="btn" id="restart-comfy-btn" onclick="restartComfy()">Restart ComfyUI</button>
-        </div>
-        <div class="system-note">
-          Cancel stops every running job and empties ComfyUI's queue. Restart
-          also kills the ComfyUI process — for when it answers but never
-          renders. Paid cloud renders are left alone either way.
-        </div>
+      <h2 class="group">Generation</h2>
+      <div class="tools">
+        <a class="tool" href="/tools/z-image/">
+          <img class="tool-icon" src="icons/z-image.webp" alt="" width="96" height="96">
+          <span class="tool-name">z-Image</span>
+          <span class="tool-desc">Images from a prompt</span>
+        </a>
+        <a class="tool" href="/tools/video/">
+          <img class="tool-icon" src="icons/video.webp" alt="" width="96" height="96">
+          <span class="tool-name">Video</span>
+          <span class="tool-desc">Clips from images, cut to music</span>
+        </a>
+        <a class="tool" href="/tools/video-api/">
+          <img class="tool-icon" src="icons/video-api.webp" alt="" width="96" height="96">
+          <span class="tool-name">Video Cloud</span>
+          <span class="tool-desc">MiniMax H3 in the cloud, on a budget</span>
+        </a>
+        <a class="tool" href="/tools/vace/">
+          <img class="tool-icon" src="icons/vace.webp" alt="" width="96" height="96">
+          <span class="tool-name">Struktur</span>
+          <span class="tool-desc">Blender-Geometrie + Bild → Video</span>
+        </a>
+        <a class="tool" href="/tools/improv/">
+          <img class="tool-icon" src="icons/improv.webp" alt="" width="96" height="96">
+          <span class="tool-name">Improv</span>
+          <span class="tool-desc">Score a video on the piano</span>
+        </a>
+        <a class="tool" href="/tools/music/">
+          <img class="tool-icon" src="icons/music.webp" alt="" width="96" height="96">
+          <span class="tool-name">Music</span>
+          <span class="tool-desc">Songs with ACE-Step 1.5</span>
+        </a>
       </div>
     </section>
 
     <section>
-      <div class="section-label">Generation</div>
-      <div class="tools-list">
-
-        <a class="tool-card active" href="/tools/z-image/">
-          <div class="tool-icon">⚡</div>
-          <div class="tool-body">
-            <div class="tool-name">z-Image</div>
-            <div class="tool-desc">Generate images with the z-image turbo workflow</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
+      <h2 class="group">Curation</h2>
+      <div class="tools">
+        <a class="tool" href="/tools/gallery/">
+          <img class="tool-icon" src="icons/gallery.webp" alt="" width="96" height="96">
+          <span class="tool-name">Gallery</span>
+          <span class="tool-desc">Browse, rate and refine</span>
         </a>
-
-        <a class="tool-card active" href="/tools/video/">
-          <div class="tool-icon">🎬</div>
-          <div class="tool-body">
-            <div class="tool-name">Video</div>
-            <div class="tool-desc">Clips from images (Wan 2.2 / MiniMax), merge, cut to music, upscale, look</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
+        <a class="tool" href="/tools/titler/">
+          <img class="tool-icon" src="icons/titler.webp" alt="" width="96" height="96">
+          <span class="tool-name">Titler</span>
+          <span class="tool-desc">Titles for images and videos</span>
         </a>
-
-        <a class="tool-card active" href="/tools/video-api/">
-          <div class="tool-icon">☁️</div>
-          <div class="tool-body">
-            <div class="tool-name">Video Cloud</div>
-            <div class="tool-desc">MiniMax H3 over the API, against a hard monthly budget</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
-        </a>
-
-        <a class="tool-card active" href="/tools/vace/">
-          <div class="tool-icon">⧉</div>
-          <div class="tool-body">
-            <div class="tool-name">Struktur</div>
-            <div class="tool-desc">Blender-Geometrie und ein Referenzbild werden ein Video</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
-        </a>
-
-        <a class="tool-card active" href="/tools/improv/">
-          <div class="tool-icon">🎹</div>
-          <div class="tool-body">
-            <div class="tool-name">Improv</div>
-            <div class="tool-desc">Score a video with a piano improvisation (Scarlett + iPhone)</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
-        </a>
-
-        <a class="tool-card active" href="/tools/music/">
-          <div class="tool-icon">🎵</div>
-          <div class="tool-body">
-            <div class="tool-name">Music</div>
-            <div class="tool-desc">Generate songs with ACE-Step 1.5 Turbo</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
-        </a>
-
       </div>
     </section>
 
     <section>
-      <div class="section-label">Curation</div>
-      <div class="tools-list">
-
-        <a class="tool-card active" href="/tools/gallery/">
-          <div class="tool-icon">🖼</div>
-          <div class="tool-body">
-            <div class="tool-name">Gallery</div>
-            <div class="tool-desc">Browse, rate, and tag generated images</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
+      <h2 class="group">Publishing</h2>
+      <div class="tools">
+        <a class="tool" href="/tools/instagram/">
+          <img class="tool-icon" src="icons/instagram.webp" alt="" width="96" height="96">
+          <span class="tool-name">Instagram</span>
+          <span class="tool-desc">Schedule and manage posts</span>
         </a>
-
-        <a class="tool-card active" href="/tools/titler/">
-          <div class="tool-icon">✍️</div>
-          <div class="tool-body">
-            <div class="tool-name">Image Titler</div>
-            <div class="tool-desc">Generate AI titles for images and videos</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
+        <a class="tool" href="/tools/articles/">
+          <img class="tool-icon" src="icons/articles.webp" alt="" width="96" height="96">
+          <span class="tool-name">Articles</span>
+          <span class="tool-desc">Draft and publish to WordPress</span>
         </a>
-
-      </div>
-    </section>
-
-    <section>
-      <div class="section-label">Publishing</div>
-      <div class="tools-list">
-
-        <a class="tool-card active" href="/tools/instagram/">
-          <div class="tool-icon">📸</div>
-          <div class="tool-body">
-            <div class="tool-name">Instagram</div>
-            <div class="tool-desc">Schedule and manage Instagram posts</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
-        </a>
-
-        <a class="tool-card active" href="/tools/articles/">
-          <div class="tool-icon">📝</div>
-          <div class="tool-body">
-            <div class="tool-name">Articles</div>
-            <div class="tool-desc">Draft and publish WordPress articles</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge live">Live</span>
-            <span class="tool-arrow">›</span>
-          </div>
-        </a>
-
-        <div class="tool-card soon">
-          <div class="tool-icon">🛒</div>
-          <div class="tool-body">
-            <div class="tool-name">Shop Prep</div>
-            <div class="tool-desc">Prepare and submit Singulart listings</div>
-          </div>
-          <div class="tool-meta">
-            <span class="badge soon">Soon</span>
-          </div>
+        <div class="tool soon" aria-disabled="true">
+          <img class="tool-icon" src="icons/shop.webp" alt="" width="96" height="96">
+          <span class="tool-name">Shop Prep</span>
+          <span class="tool-desc">Singulart listings</span>
         </div>
-
       </div>
     </section>
 
   </main>
-
-  <footer>art-rium</footer>
 
 </div>
 

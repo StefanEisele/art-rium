@@ -65,11 +65,13 @@ DEFAULT_OUT = ROOT / "storage" / "ui_icon_candidates"
 # - Long thin things lie diagonally. Upright, a pen or a brush is trimmed to a
 #   tall sliver and is a single line in a 46 px tile.
 MOTIFS: dict[str, list[str]] = {
-    "z-image":   ["a painter's palette with a thumb hole and a few blobs of paint",
+    "z-image":   ["a camera aperture with fanned iris blades, wide open",
                   "a painter's flat brush lying diagonally"],
     "video":     ["a cinema film reel", "a film clapperboard"],
     "video-api": ["a sculpted cloud", "a satellite dish"],
     "vace":      ["a wireframe icosahedron", "a faceted low-poly polyhedron"],
+    "embeddings": ["a painter's colour swatch fan deck, spread open in a fan",
+                   "a small glass jar of coloured pigment powder with a cork"],
     "improv":    ["a grand piano with its lid open", "a short row of piano keys"],
     "music":     ["a vinyl record with fine grooves, tilted at an angle",
                   "a pair of over-ear studio headphones"],

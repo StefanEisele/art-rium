@@ -270,6 +270,11 @@
           <span class="tool-name">Struktur</span>
           <span class="tool-desc">Blender-Geometrie + Bild → Video</span>
         </a>
+        <a class="tool" href="/tools/embeddings/">
+          <img class="tool-icon" src="icons/embeddings.webp" alt="" width="96" height="96">
+          <span class="tool-name">Embeddings</span>
+          <span class="tool-desc">Eigene Stile aus Galerie-Bildern</span>
+        </a>
         <a class="tool" href="/tools/improv/">
           <img class="tool-icon" src="icons/improv.webp" alt="" width="96" height="96">
           <span class="tool-name">Improv</span>
@@ -542,9 +547,7 @@ window.addEventListener('load', async () => {
     if (document.visibilityState === 'visible') refreshQueue();
   });
 
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
+  ArtRium.registerSw();
 });
 </script>
 

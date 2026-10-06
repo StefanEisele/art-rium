@@ -439,3 +439,51 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex: 1; 
   display: none; align-items: center; justify-content: center;
 }
 .picker-cell.selected .order-badge { display: flex; }
+
+/* ── Embedding trainer (shared/embeddings.js) ────────────────────────────────
+   Self-contained under .et: the two pages that mount it (the Embeddings tool
+   and the Struktur tool's picker) define their own form primitives with
+   different names, so the trainer brings its own. */
+.et { display: flex; flex-direction: column; gap: 12px; }
+.et-field { display: flex; flex-direction: column; gap: 6px; }
+.et-label { font-size: 11px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: .7px; }
+.et-label b { color: var(--accent); }
+.et-hint { font-size: 11px; color: var(--text-dim); line-height: 1.45; }
+.et-row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 12px; }
+.et input[type=text], .et input[type=number], .et input[type=search], .et select {
+  width: 100%; background: var(--surface2); color: var(--text); border: 1.5px solid var(--border);
+  border-radius: 8px; padding: 9px 10px; font-size: 14px; font-family: inherit;
+}
+.et input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
+.et .fold-body > .btn { flex: none; }
+.et-link { background: none; border: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.et-tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(78px, 1fr)); background: var(--surface2); border-radius: 10px; padding: 3px; }
+.et-tabs button { background: transparent; border: none; color: var(--text-dim); font: inherit; font-size: 12px; font-weight: 600; padding: 8px 6px; border-radius: 8px; cursor: pointer; }
+.et-tabs button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+.et-pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 5px; max-height: 46vh; overflow-y: auto; }
+.et-pick { position: relative; border-radius: 6px; overflow: hidden; cursor: pointer; border: 2px solid transparent; background: var(--surface2); }
+.et-pick img { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+.et-pick.on { border-color: var(--accent); }
+.et-pick.on::after { content: '✓'; position: absolute; top: 3px; right: 5px; font-size: 12px; font-weight: 700; color: var(--on-accent); background: var(--accent); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; }
+.et-list-title { font-size: 13px; font-weight: 700; margin-top: 4px; }
+.et-list { display: flex; flex-direction: column; gap: 10px; }
+.et-card { background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 11px 12px; display: flex; flex-direction: column; gap: 8px; }
+.et-card-head { display: flex; align-items: center; gap: 8px; }
+.et-card-head b { font-size: 14px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.et-status { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); }
+.et-status.s-done { color: var(--green); }
+.et-status.s-failed, .et-status.s-cancelled { color: var(--red); }
+.et-status.s-training, .et-status.s-queued { color: var(--accent); }
+.et-meta { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.et-meta code { color: var(--text); }
+.et-error { font-size: 11px; color: var(--red); white-space: pre-wrap; word-break: break-word; }
+.et-track { height: 5px; background: var(--surface); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.et-fill { height: 100%; background: var(--accent); transition: width .4s ease; }
+.et-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.et-snaps { display: flex; flex-direction: column; gap: 5px; }
+.et-snap { display: grid; grid-template-columns: 58px repeat(3, 1fr) 78px; gap: 5px; align-items: center; }
+.et-snap-head { font-size: 10px; color: var(--text-dim); }
+.et-snap-lbl { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.et-snap-lbl b { color: var(--accent); display: block; font-size: 10px; text-transform: uppercase; }
+.et-snap img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 6px; display: block; cursor: zoom-in; background: var(--surface); }
+.et-snap .chip-btn { font-size: 11px; padding: 5px 6px; }

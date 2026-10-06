@@ -28,9 +28,11 @@ mechanism the frontend would have to learn.
 import asyncio
 import json
 import logging
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +47,7 @@ from core.auth import require_auth
 from core.config import settings
 from core.db import AsyncSessionLocal, get_db
 from core.models import ControlTrack, Image, Video
+from core.job_control import cancel_job
 from core.subproc import communicate
 from core.tasks import safe_create_task
 from core.video_thumb import (
@@ -52,7 +55,7 @@ from core.video_thumb import (
     probe_video_dimensions,
     probe_video_frames,
 )
-from routers.video import _progress, _segments_dir, _set_progress
+from routers.video import _progress, _segments_dir, _set_progress, forget_progress
 from services.segment import (
     DURATIONS as SEGMENT_DURATIONS,
 )
@@ -71,7 +74,7 @@ from services.segment import (
     run_segmentation,
     trim_filters,
 )
-from services.comfy.client import free_memory, poll_history, post_workflow
+from services.comfy.client import embedding_names, free_memory, poll_history, post_workflow
 from services.comfy.vram import free_vram_for
 from services.comfy.animatelcm import (
     DEPTH_SWEEP as LCM_DEPTH_SWEEP,
@@ -97,6 +100,24 @@ from services.comfy.animatelcm import (
 )
 from services.comfy.animatelcm import (
     Region as LcmRegion,
+)
+from services.comfy.animatelcm import (
+    CURVES as LCM_CURVES,
+    CYCLES_DEFAULT as LCM_CYCLES_DEFAULT,
+    DEFAULT_EMBEDDING_JOIN,
+    EMBEDDING_JOINS,
+    is_embedding_name,
+)
+from services.comfy.animatelcm import (
+    Embedding as LcmEmbedding,
+)
+from services.comfy.animatelcm import (
+    FPS as LCM_FPS,
+)
+from services.comfy.animatelcm import (
+    INJECT_START_DEFAULT as LCM_INJECT_START_DEFAULT,
+    INJECT_STRENGTH_DEFAULT as LCM_INJECT_STRENGTH_DEFAULT,
+    Injection as LcmInjection,
 )
 from services.comfy.animatelcm import (
     build_animatelcm_base_workflow,
@@ -155,7 +176,9 @@ _MAX_UPLOAD_BYTES = 600 * 1024 * 1024
 
 class RegionSpec(BaseModel):
     color: tuple[int, int, int]
-    image_id: uuid.UUID              # reference picture, from the gallery
+    # Reference picture, from the gallery. Optional for AnimateLCM once the
+    # region carries embeddings of its own; VACE always needs one.
+    image_id: Optional[uuid.UUID] = None
     # VACE only: how freely that region's pass may repaint. AnimateLCM has no
     # per-region denoise — it renders every region in one sampler pass — so it
     # reads `ip_weight` instead, and reading this one there would silently wire
@@ -166,6 +189,34 @@ class RegionSpec(BaseModel):
     # before the dial existed.
     ip_weight: Optional[float] = None
     threshold: int = 20
+    # AnimateLCM only: kentskooking's RGB masks — this colour's own embedding
+    # stack, a conditioning layer keyed on the region's mask. Held for the
+    # whole clip; a curve here is ignored.
+    embeddings: list["EmbeddingSpec"] = []
+
+
+class InjectionSpec(BaseModel):
+    """A control-track-library video laid into the base pass partway through
+    (AnimateDiff-Evolved image injection) — TV static, a pixel pattern, another
+    generator's clip."""
+    track_id: uuid.UUID
+    strength: float = LCM_INJECT_STRENGTH_DEFAULT
+    start: float = LCM_INJECT_START_DEFAULT
+    # Only inside this colour of the job's mask video; None = the whole frame.
+    color: Optional[tuple[int, int, int]] = None
+
+
+class EmbeddingSpec(BaseModel):
+    """A textual-inversion embedding by the name ComfyUI knows it under —
+    `artrium/<name>` for a trained one (routers/embeddings.py), the file stem
+    for anything else in the embeddings folder."""
+    name: str
+    weight: float = 1.0
+    # None holds it for the whole clip; otherwise one of the builder's CURVES,
+    # and the embedding becomes a layer of its own that owns the frames the
+    # curve gives it — one extra UNet evaluation per step.
+    curve: Optional[str] = None
+    cycles: int = LCM_CYCLES_DEFAULT
 
 
 class GenerateRequest(BaseModel):
@@ -209,6 +260,12 @@ class GenerateRequest(BaseModel):
     length: Optional[int] = None              # None = as much of the track as Wan takes
     seed: int = -1
     negative: Optional[str] = None
+    # AnimateLCM only: textual-inversion embeddings joined into the prompt —
+    # kentskooking's material channel. With at least one, the reference picture
+    # becomes optional: the embeddings are then the material.
+    embeddings: list[EmbeddingSpec] = []
+    embedding_join: str = DEFAULT_EMBEDDING_JOIN
+    injection: Optional[InjectionSpec] = None
 
 
 # Valid values for the three axes, read off the builder's own tables so a new
@@ -1067,10 +1124,53 @@ def _validate_mask_pairing(control: ControlTrack, mask: ControlTrack) -> None:
             )
 
 
-@router.post("/generate", status_code=202)
-async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
-    """Queue a structure-video job. Returns immediately; poll
-    `GET /api/video/jobs/{video_id}/progress`."""
+@dataclass
+class _Prepared:
+    """A validated request with every file it names resolved — what both a
+    render and a ladder start from."""
+    control: ControlTrack
+    mask: Optional[ControlTrack]
+    # Aligned with the regions ([region…, base?]); None where a region is
+    # made of embeddings only.
+    references: list[Optional[Path]]
+    image_ids: list[Optional[uuid.UUID]]
+    length: int
+    # (storage-relative path, frame count) of the injected video.
+    injection: Optional[tuple[str, Optional[int]]] = None
+
+
+async def _check_embeddings(body: GenerateRequest) -> None:
+    """Refuse an embedding ComfyUI cannot load, before anything is queued.
+
+    ComfyUI does not fail on a missing one: it logs a warning and encodes the
+    prompt without it, so the render comes back looking like the embedding
+    "did nothing" — the one conclusion an embedding render must never lead to
+    for the wrong reason.
+    """
+    every = list(body.embeddings) + [e for r in body.regions for e in r.embeddings]
+    if not every:
+        return
+    if body.engine != "animatelcm":
+        raise HTTPException(status_code=400,
+                            detail="Embeddings gibt es nur in der AnimateLCM-Engine")
+    if body.embedding_join not in EMBEDDING_JOINS:
+        raise HTTPException(status_code=400,
+                            detail=f"embedding_join muss eins von {EMBEDDING_JOINS} sein")
+    bad = [e.name for e in every if not is_embedding_name(e.name)]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Embedding-Name: {bad[0]}")
+    bad_curves = [e.curve for e in body.embeddings if e.curve and e.curve not in LCM_CURVES]
+    if bad_curves:
+        raise HTTPException(status_code=400, detail=f"Unbekannter Verlauf: {bad_curves[0]}")
+    known = await embedding_names()
+    if known is not None:
+        missing = sorted({e.name for e in every if e.name not in known})
+        if missing:
+            raise HTTPException(status_code=400,
+                                detail=f"ComfyUI kennt dieses Embedding nicht: {', '.join(missing)}")
+
+
+async def _prepare(body: GenerateRequest, db: AsyncSession) -> _Prepared:
     control = await _get_track(body.control_track_id, db)
     if not (settings.storage_dir / control.filepath).is_file():
         raise HTTPException(status_code=404, detail="Control track missing on disk")
@@ -1084,8 +1184,24 @@ async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="At most 3 regions")
     if body.regions and not body.mask_track_id:
         raise HTTPException(status_code=400, detail="Regions need a mask track")
-    if not body.regions and not body.image_id:
-        raise HTTPException(status_code=400, detail="A reference image is required")
+    lcm = body.engine == "animatelcm"
+    embeddings_only = lcm and bool(body.embeddings)
+    for i, r in enumerate(body.regions):
+        if not r.image_id and not (lcm and r.embeddings):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Region {i + 1} braucht ein Referenzbild"
+                       + (" oder ein Embedding" if lcm else ""),
+            )
+    if body.injection and not lcm:
+        raise HTTPException(status_code=400,
+                            detail="Image Injection gibt es nur in der AnimateLCM-Engine")
+    if body.injection and body.injection.color is not None and not body.mask_track_id:
+        raise HTTPException(status_code=400,
+                            detail="Eine Injektion in eine Region braucht ein Maskenvideo")
+    if not body.regions and not body.image_id and not embeddings_only:
+        raise HTTPException(status_code=400,
+                            detail="Ein Referenzbild oder ein Embedding ist nötig")
     if body.engine not in ("animatelcm", "vace"):
         raise HTTPException(status_code=400, detail=f"Unknown engine: {body.engine}")
     if body.engine == "animatelcm" and body.regions and len(body.regions) > 3:
@@ -1098,6 +1214,7 @@ async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail=f"Unknown recipe: {body.recipe}")
     if body.fit not in FITS:
         raise HTTPException(status_code=400, detail=f"Unknown fit: {body.fit}")
+    await _check_embeddings(body)
 
     mask = None
     if body.mask_track_id:
@@ -1116,20 +1233,42 @@ async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
     # Resolve every reference now, so a typo fails the request instead of the
     # background job ten minutes later.
     if body.regions:
-        references = [await _reference_for(r.image_id, db) for r in body.regions]
+        references = [await _reference_for(r.image_id, db) if r.image_id else None
+                      for r in body.regions]
         image_ids = [r.image_id for r in body.regions]
         # Appended, never inserted: `_lcm_request` reads the regions off the
         # front of this list by index, so the base has to be the tail.
         if body.base_image_id:
             references.append(await _reference_for(body.base_image_id, db))
             image_ids.append(body.base_image_id)
-    else:
+    elif body.image_id:
         references = [await _reference_for(body.image_id, db)]
         image_ids = [body.image_id]
+    else:
+        # Embeddings only: they are the material, and no adapter is loaded.
+        references, image_ids = [], []
+
+    injection = None
+    if body.injection:
+        track = await _get_track(body.injection.track_id, db)
+        if not (settings.storage_dir / track.filepath).is_file():
+            raise HTTPException(status_code=404, detail="Injektions-Spur fehlt auf der Platte")
+        injection = (track.filepath, track.frame_count)
+    return _Prepared(control, mask, references, image_ids, length, injection)
+
+
+@router.post("/generate", status_code=202)
+async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
+    """Queue a structure-video job. Returns immediately; poll
+    `GET /api/video/jobs/{video_id}/progress`."""
+    prep = await _prepare(body, db)
+    control, mask = prep.control, prep.mask
+    references, image_ids, length = prep.references, prep.image_ids, prep.length
 
     video = Video(
         id=uuid.uuid4(),
-        image_ids=image_ids,
+        # Only real pictures; the runner keeps the aligned list with its gaps.
+        image_ids=[i for i in image_ids if i],
         workflow=WORKFLOW_NAME,
         prompt=body.prompt or None,
         frame_count=length,
@@ -1149,7 +1288,7 @@ async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
         runner = _run_lcm(
             video.id, body, control.filepath, mask.filepath if mask else None,
             references, length, (control.width, control.height), control.kind,
-            image_ids=image_ids,
+            image_ids=image_ids, injection=prep.injection,
         )
     else:
         runner = _run_vace(
@@ -1266,13 +1405,23 @@ _LCM_SECONDS_PER_PIXEL_FRAME = 2.94e-5
 _LCM_BASE_SHARE = 0.35          # what is left when the refine is switched off
 
 
+def _layer_factor(req: "GenerateRequest") -> int:
+    """UNet evaluations per step: one, plus one per embedding with a curve and
+    one per region with embeddings — each is a conditioning layer of its own,
+    sampled beside the base."""
+    if req.engine != "animatelcm":
+        return 1
+    return (1 + sum(1 for e in req.embeddings if e.curve)
+            + sum(1 for r in req.regions if r.embeddings))
+
+
 def _lcm_seconds(req: "GenerateRequest", width: int | None, height: int | None,
                  length: int) -> int:
     canvas_w, canvas_h = lcm_canvas(req.lcm_aspect, (width, height))
     cost = canvas_w * canvas_h * length * _LCM_SECONDS_PER_PIXEL_FRAME
     if not req.hires:
         cost *= _LCM_BASE_SHARE
-    return max(30, int(cost))
+    return max(30, int(cost * _layer_factor(req)))
 
 
 # ── AnimateLCM: one graph, optionally in two stages ──────────────────────────
@@ -1307,17 +1456,21 @@ def _lcm_final_name(video_id: uuid.UUID) -> str:
     return f"lcm_{video_id}.mp4"
 
 
-def _stage_references(video_id: uuid.UUID, references: list[Path]) -> list[str]:
+def _stage_references(video_id: uuid.UUID,
+                      references: list[Optional[Path]]) -> list[Optional[str]]:
+    """Stage each picture; a gap (a region of embeddings only) stays a gap so
+    the list keeps lining up with the regions."""
     return [
-        _stage_image(path, f"artrium_lcm_ref_{video_id.hex[:8]}_{i}.png")
+        _stage_image(path, f"artrium_lcm_ref_{video_id.hex[:8]}_{i}.png") if path else None
         for i, path in enumerate(references)
     ]
 
 
-def _unstage(names: list[str]) -> None:
+def _unstage(names: list[Optional[str]]) -> None:
     inp = settings.comfyui_output_dir.parent / "input"
     for name in names:
-        (inp / name).unlink(missing_ok=True)
+        if name:
+            (inp / name).unlink(missing_ok=True)
 
 
 def _lcm_request(
@@ -1330,6 +1483,7 @@ def _lcm_request(
     source_size: tuple[int | None, int | None],
     track_kind: str,
     seed: int,
+    injection: Optional[tuple[str, Optional[int]]] = None,
 ) -> AnimateLcmRequest:
     """The builder request, from the API request. Both stages go through here,
     which is what guarantees the second one refines the first rather than
@@ -1362,6 +1516,7 @@ def _lcm_request(
             LcmRegion(
                 color=tuple(r.color), reference=staged[i], threshold=r.threshold,
                 weight=(r.ip_weight if r.ip_weight is not None else req.ip_weight),
+                embeddings=[LcmEmbedding(e.name, e.weight) for e in r.embeddings],
             )
             for i, r in enumerate(req.regions)
         ],
@@ -1370,6 +1525,18 @@ def _lcm_request(
         base_reference=(staged[len(req.regions)]
                         if len(staged) > len(req.regions) else None),
         base_weight=req.base_weight,
+        # Both stages read these from the same request — the hires pass is
+        # sampled against the same positive, or it would refine the base into
+        # something the embeddings never asked for.
+        embeddings=[LcmEmbedding(e.name, e.weight, e.curve, e.cycles)
+                    for e in req.embeddings],
+        embedding_join=req.embedding_join,
+        injection=(LcmInjection(
+            video=str(settings.storage_dir / injection[0]),
+            strength=req.injection.strength, start=req.injection.start,
+            color=tuple(req.injection.color) if req.injection.color else None,
+            source_frames=injection[1],
+        ) if req.injection and injection else None),
     )
     if req.negative:
         lcm.negative = req.negative
@@ -1381,11 +1548,12 @@ def _write_lcm_plan(
     req: GenerateRequest,
     control_rel: str,
     mask_rel: str | None,
-    image_ids: list[uuid.UUID],
+    image_ids: list[Optional[uuid.UUID]],
     length: int,
     source_size: tuple[int | None, int | None],
     track_kind: str,
     seed: int,
+    injection: Optional[tuple[str, Optional[int]]] = None,
 ) -> None:
     """Everything stage two needs, on disk.
 
@@ -1398,7 +1566,9 @@ def _write_lcm_plan(
         "request": req.model_dump(mode="json"),
         "control_rel": control_rel,
         "mask_rel": mask_rel,
-        "image_ids": [str(i) for i in image_ids],
+        # null, not "None": a region made of embeddings has no picture.
+        "image_ids": [str(i) if i else None for i in image_ids],
+        "injection": list(injection) if injection else None,
         "length": length,
         "source_size": list(source_size),
         "track_kind": track_kind,
@@ -1472,7 +1642,8 @@ async def _run_lcm(
     length: int,
     source_size: tuple[int | None, int | None] = (None, None),
     track_kind: str = "depth",
-    image_ids: list[uuid.UUID] | None = None,
+    image_ids: list[Optional[uuid.UUID]] | None = None,
+    injection: Optional[tuple[str, Optional[int]]] = None,
 ) -> None:
     """Background job: one graph, one sampler pass per stage, whatever the
     region count. Simpler than the VACE runner precisely because the adapters
@@ -1490,7 +1661,7 @@ async def _run_lcm(
     try:
         staged = _stage_references(video_id, references)
         lcm = _lcm_request(req, video_id, control_rel, mask_rel, staged,
-                           length, source_size, track_kind, seed)
+                           length, source_size, track_kind, seed, injection)
 
         if not two_stage:
             _set_progress(key, "generating", "Struktur wird gerendert…", 5)
@@ -1520,7 +1691,7 @@ async def _run_lcm(
         shutil.copy2(produced[base_node], base_dest)
 
         _write_lcm_plan(video_id, req, control_rel, mask_rel,
-                        image_ids or [], length, source_size, track_kind, seed)
+                        image_ids or [], length, source_size, track_kind, seed, injection)
         width, height = await _persist_render(
             video_id, produced[preview_node],
             settings.videos_dir / _lcm_preview_name(video_id), "review",
@@ -1556,14 +1727,16 @@ async def _run_lcm_hires(video_id: uuid.UUID, plan: dict) -> None:
 
         async with AsyncSessionLocal() as db:
             references = [
-                await _reference_for(uuid.UUID(i), db) for i in plan["image_ids"]
+                await _reference_for(uuid.UUID(i), db) if i else None
+                for i in plan["image_ids"]
             ]
         staged = _stage_references(video_id, references)
         req = GenerateRequest(**plan["request"])
+        injection = tuple(plan["injection"]) if plan.get("injection") else None
         lcm = _lcm_request(
             req, video_id, plan["control_rel"], plan["mask_rel"], staged,
             plan["length"], tuple(plan["source_size"]), plan["track_kind"],
-            int(plan["seed"]),
+            int(plan["seed"]), injection,
         )
 
         _set_progress(key, "generating", "Detailpass läuft…", 5)
@@ -1757,3 +1930,304 @@ async def _run_vace(
             (inp / name).unlink(missing_ok=True)
         if _progress.get(key, {}).get("phase") == "done":
             _progress.pop(key, None)
+
+
+# ── Embedding ladder ─────────────────────────────────────────────────────────
+# The measured lesson of 2026-09-28 (scripts/embedding_sweep.py): stacked
+# embeddings do not blend, one of them wins, and the weight window in which two
+# really mix is narrow — rust 1.0 + swirl 0.8 was all rust, 1.1 a true mix,
+# 1.2 all swirl, 1.5 a third painterly regime. No slider readout can say where
+# that window sits for a given pair; only looking can. So a ladder renders the
+# same scene once per rung — same seed, same track, base pass only, one thing
+# moving — and lays the stills side by side.
+#
+# The same machinery serves kentskooking's other habit: trying a training's
+# snapshots, because the last one is rarely the best one. A snapshot ladder
+# swaps the embedding's *name* instead of its weight.
+
+LADDER_MIN_RUNGS, LADDER_MAX_RUNGS = 2, 8
+LADDER_FRAMES_DEFAULT, LADDER_FRAMES_MAX = 32, 48
+LADDER_WEIGHT_MAX = 2.0
+# Measured in the sweeps: 56 s for 48 frames at 544² base-only without an
+# IP-Adapter — 4e-6 s per pixel-frame, well under the full graph's constant,
+# which carries the hires pass. Plus a few seconds of load per rung.
+_LADDER_SECONDS_PER_PIXEL_FRAME = 4.0e-6
+_LADDER_RUNG_OVERHEAD = 5
+_LADDER_FILE = re.compile(r"^rung_\d{1,2}\.(mp4|jpg)$")
+
+_ladders: dict[str, dict] = {}
+
+
+class LadderRequest(BaseModel):
+    """The current form, plus which embedding moves and through what values."""
+    request: GenerateRequest
+    target: str                           # an embedding already in request.embeddings
+    weights: list[float] = []             # a weight ladder …
+    names: list[str] = []                 # … or a snapshot ladder (replacement names)
+    labels: list[str] = []                # optional captions for `names`
+    frames: int = LADDER_FRAMES_DEFAULT
+
+
+def plan_ladder(body: LadderRequest) -> list[dict]:
+    """The rungs, validated. Pure, so the rules can be tested without a GPU."""
+    req = body.request
+    if req.engine != "animatelcm":
+        raise HTTPException(status_code=400, detail="Die Leiter gibt es nur für AnimateLCM")
+    if not any(e.name == body.target for e in req.embeddings):
+        raise HTTPException(status_code=400,
+                            detail="Das Embedding der Leiter muss im Render ausgewählt sein")
+    if bool(body.weights) == bool(body.names):
+        raise HTTPException(status_code=400,
+                            detail="Entweder Gewichte oder Snapshots — genau eins von beiden")
+    values = body.weights or body.names
+    if not LADDER_MIN_RUNGS <= len(values) <= LADDER_MAX_RUNGS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{LADDER_MIN_RUNGS}–{LADDER_MAX_RUNGS} Stufen pro Leiter",
+        )
+    if body.weights:
+        return [{"label": f"{w:.2f}", "weight": round(min(max(w, 0.0), LADDER_WEIGHT_MAX), 2)}
+                for w in body.weights]
+    bad = [n for n in body.names if not is_embedding_name(n)]
+    if bad:
+        raise HTTPException(status_code=400, detail=f"Ungültiger Embedding-Name: {bad[0]}")
+    labels = body.labels if len(body.labels) == len(body.names) else body.names
+    return [{"label": label, "name": name} for label, name in zip(labels, body.names)]
+
+
+def _ladder_variant(req: GenerateRequest, target: str, rung: dict) -> GenerateRequest:
+    """The form with the one thing this rung changes, and nothing but the base
+    pass: a ladder compares looks, and the look is decided in the base."""
+    variant = req.model_copy(deep=True)
+    variant.hires = False
+    variant.rife = 1
+    variant.preview_first = False
+    for emb in variant.embeddings:
+        if emb.name == target:
+            if "weight" in rung:
+                emb.weight = rung["weight"]
+            else:
+                emb.name = rung["name"]
+    return variant
+
+
+def _ladder_dir(ladder_id: uuid.UUID | str) -> Path:
+    return settings.storage_dir / "ladders" / str(ladder_id)
+
+
+def _save_ladder(state: dict) -> None:
+    path = _ladder_dir(state["id"]) / "ladder.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=1), encoding="utf-8")
+
+
+def _ladder_state(ladder_id: uuid.UUID) -> dict:
+    state = _ladders.get(str(ladder_id))
+    if state is None:
+        path = _ladder_dir(ladder_id) / "ladder.json"
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Leiter nicht gefunden")
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if state.get("status") == "running":
+            # Written by a process that is gone; nothing is rendering it now.
+            state["status"] = "failed"
+            state["error"] = "Durch einen Neustart unterbrochen"
+    live = _progress.get(str(ladder_id))
+    return {**state, "live": {k: v for k, v in (live or {}).items()
+                              if not k.startswith("_")} or None}
+
+
+async def _grab_still(video: Path, dest: Path, at: float) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        settings.ffmpeg_path, "-y", "-v", "error", "-ss", f"{at:.3f}", "-i", str(video),
+        "-frames:v", "1", "-q:v", "3", str(dest),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await communicate(proc)
+    if proc.returncode != 0 or not dest.is_file():
+        raise RuntimeError(err.decode(errors="replace")[:300] or "ffmpeg still failed")
+
+
+@router.post("/ladders", status_code=202)
+async def start_ladder(body: LadderRequest, db: AsyncSession = Depends(get_db)):
+    """Queue a ladder. Poll `GET /api/vace/ladders/{id}`; rungs fill in order."""
+    rungs = plan_ladder(body)
+    # Every rung's names have to exist, not only the form's: a snapshot ladder
+    # is made of names the form never held.
+    probe = body.request.model_copy(deep=True)
+    probe.embeddings = probe.embeddings + [
+        EmbeddingSpec(name=r["name"]) for r in rungs if "name" in r
+    ]
+    await _check_embeddings(probe)
+    prep = await _prepare(body.request, db)
+
+    ladder_id = uuid.uuid4()
+    frames = max(8, min(body.frames, LADDER_FRAMES_MAX, prep.length))
+    seed = resolve_seed(body.request.seed)
+    width, height = lcm_canvas(body.request.lcm_aspect,
+                               (prep.control.width, prep.control.height))
+    per_rung = (int(width * height * frames * _LADDER_SECONDS_PER_PIXEL_FRAME
+                    * _layer_factor(body.request)) + _LADDER_RUNG_OVERHEAD)
+    state = {
+        "id": str(ladder_id),
+        "status": "running",
+        "kind": "weight" if body.weights else "snapshot",
+        "target": body.target,
+        # Handed back so the render the ladder was for can be sampled with the
+        # same seed — a rung is only a preview of *that* seed.
+        "seed": seed,
+        "frames": frames,
+        "seconds": per_rung * len(rungs),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "rungs": [{**r, "status": "pending", "still": None, "video": None} for r in rungs],
+        "error": None,
+    }
+    _ladders[str(ladder_id)] = state
+    _save_ladder(state)
+    _set_progress(str(ladder_id), "generating", "Leiter wird eingereiht…", 1)
+    safe_create_task(_run_ladder(ladder_id, body, prep, frames, seed),
+                     name=f"ladder:{ladder_id}")
+    logger.info("Queued embedding ladder %s — %s over %d rungs, %d frames, seed %d",
+                ladder_id, body.target, len(rungs), frames, seed)
+    return _ladder_state(ladder_id)
+
+
+async def _run_ladder(ladder_id: uuid.UUID, body: LadderRequest, prep: _Prepared,
+                      frames: int, seed: int) -> None:
+    key = str(ladder_id)
+    state = _ladders[key]
+    folder = _ladder_dir(ladder_id)
+    staged: list[str] = []
+    n = len(state["rungs"])
+    try:
+        staged = _stage_references(ladder_id, prep.references)
+        source = (prep.control.width, prep.control.height)
+        mask_rel = prep.mask.filepath if prep.mask else None
+        for i, rung in enumerate(state["rungs"]):
+            rung["status"] = "rendering"
+            variant = _ladder_variant(body.request, body.target, rung)
+            lcm = _lcm_request(variant, ladder_id, prep.control.filepath, mask_rel,
+                               staged, frames, source, prep.control.kind, seed,
+                               prep.injection)
+            lcm.filename_prefix = f"artrium_ladder_{ladder_id.hex[:8]}_{i}"
+            wf, save_node = build_animatelcm_workflow(lcm)
+            band = (2 + int(96 * i / n), 2 + int(96 * (i + 1) / n))
+            produced = await _submit(wf, save_node, key, band,
+                                     f"Stufe {i + 1}/{n} · {rung['label']}")
+            video = folder / f"rung_{i}.mp4"
+            shutil.move(str(produced), video)
+            await _grab_still(video, folder / f"rung_{i}.jpg", at=frames / 2 / LCM_FPS)
+            base = f"/api/vace/ladders/{ladder_id}/files"
+            rung.update(status="done", video=f"{base}/rung_{i}.mp4",
+                        still=f"{base}/rung_{i}.jpg")
+            _save_ladder(state)
+        state["status"] = "done"
+    except asyncio.CancelledError:
+        state["status"] = "cancelled"
+        raise
+    except Exception as exc:
+        logger.exception("Embedding ladder %s failed", ladder_id)
+        state["status"] = "failed"
+        state["error"] = f"{type(exc).__name__}: {exc}"[:1000]
+    finally:
+        _unstage(staged)
+        _save_ladder(state)
+        forget_progress(key)
+
+
+@router.get("/ladders/{ladder_id}")
+async def get_ladder(ladder_id: uuid.UUID):
+    return _ladder_state(ladder_id)
+
+
+@router.get("/ladders/{ladder_id}/files/{filename}")
+async def get_ladder_file(ladder_id: uuid.UUID, filename: str):
+    if not _LADDER_FILE.match(filename):
+        raise HTTPException(status_code=400, detail="Keine Leiter-Datei")
+    path = _ladder_dir(ladder_id) / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Datei fehlt")
+    media = "video/mp4" if filename.endswith(".mp4") else "image/jpeg"
+    return FileResponse(path, media_type=media)
+
+
+@router.delete("/ladders/{ladder_id}", status_code=204)
+async def delete_ladder(ladder_id: uuid.UUID):
+    """Stop it if it still renders, then drop its files."""
+    await cancel_job(ladder_id)
+    forget_progress(str(ladder_id))
+    _ladders.pop(str(ladder_id), None)
+    shutil.rmtree(_ladder_dir(ladder_id), ignore_errors=True)
+
+
+# ── Injection sources: generated noise tracks ────────────────────────────────
+# kentskooking injects TV static ("works really good as noise") and pixelated
+# masks. Neither needs a file from anywhere: ffmpeg draws both, and the result
+# is an ordinary footage track, so it also works as a control track.
+NOISE_PATTERNS = {
+    # Fresh grey noise every frame: grain and flicker, the sampler's own
+    # "static" to build on.
+    "static": {
+        "label": "TV-Rauschen",
+        # The noise filter, not geq's random(): geq carries its random state
+        # per slice, which came out as vertical stripes. Luma only (c0): noise
+        # does not take gray, so ffmpeg silently converts to YUV first and
+        # `alls` would put colour into the chroma planes (measured U/V 73-182).
+        "filter": "color=c=gray:s=512x512:r=16:d={seconds},format=yuv420p,"
+                  "noise=c0s=100:c0f=t+u",
+    },
+    # Coloured blocks that hold for four frames: a coarse, moving patchwork
+    # the frame is pushed towards — the pixelated-mask look.
+    "pixel": {
+        "label": "Pixel-Rauschen",
+        # Noise on RGB is per channel, which is what makes the blocks coloured.
+        "filter": "color=c=gray:s=24x24:r=4:d={seconds},format=rgb24,"
+                  "noise=alls=100:allf=t+u,"
+                  "scale=512:512:flags=neighbor,fps=16,format=yuv420p",
+    },
+}
+NOISE_SECONDS_MIN, NOISE_SECONDS_MAX = 2, 20
+
+
+class NoiseRequest(BaseModel):
+    pattern: str = "static"
+    seconds: int = 6
+
+
+def noise_command(pattern: str, seconds: int, dest: Path) -> list[str]:
+    """The ffmpeg call that draws a noise track. Pure, so the filter can be
+    tested without running it."""
+    spec = NOISE_PATTERNS[pattern]
+    secs = min(max(int(seconds), NOISE_SECONDS_MIN), NOISE_SECONDS_MAX)
+    return [
+        settings.ffmpeg_path, "-y", "-v", "error",
+        "-f", "lavfi", "-i", spec["filter"].format(seconds=secs),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "12",
+        "-pix_fmt", "yuv420p", str(dest),
+    ]
+
+
+@router.post("/tracks/noise", status_code=201)
+async def create_noise_track(body: NoiseRequest, db: AsyncSession = Depends(get_db)):
+    """Draw a noise track into the library — an injection source that needs
+    no footage. 512² at 16 fps; the render fits it to its own canvas."""
+    if body.pattern not in NOISE_PATTERNS:
+        raise HTTPException(status_code=400,
+                            detail=f"Muster muss eins von {sorted(NOISE_PATTERNS)} sein")
+    track_id = uuid.uuid4()
+    rel = _track_rel(track_id, ".mp4")
+    dest = settings.storage_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    proc = await asyncio.create_subprocess_exec(
+        *noise_command(body.pattern, body.seconds, dest),
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await communicate(proc)
+    if proc.returncode != 0 or not dest.is_file():
+        raise HTTPException(status_code=500,
+                            detail=f"ffmpeg: {err.decode(errors='replace')[:300]}")
+    secs = min(max(int(body.seconds), NOISE_SECONDS_MIN), NOISE_SECONDS_MAX)
+    label = NOISE_PATTERNS[body.pattern]["label"]
+    track = await _register_track(db, track_id, dest, rel, "footage",
+                                  f"{body.pattern}_{secs}s.mp4", f"{label} · {secs} s")
+    return _serialize_track(track)

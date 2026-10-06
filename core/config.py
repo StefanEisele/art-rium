@@ -43,6 +43,23 @@ class Settings(BaseSettings):
     sam3_model_dir: Path = Path("E:/00_comfy/models/sam3/sam3-hf")
     sam3_device: str = "cuda"
 
+    # ── Embedding training (kohya sd-scripts) ────────────────────────────────
+    # Textual-inversion embeddings trained from gallery pictures
+    # (services/embedding/). sd-scripts pins its own transformers/diffusers, so
+    # it lives in its own venv — installing it into ComfyUI's would move the
+    # render stack's packages under it. Checkpoint = the one the AnimateLCM
+    # graph renders with, so an embedding learns *that* model's vocabulary.
+    sd_scripts_dir: Path = Path("E:/04_sd-scripts")
+    sd_scripts_python: Path = Path("E:/04_sd-scripts/venv/Scripts/python.exe")
+    embedding_base_checkpoint: Path = Path(
+        "E:/00_comfy/models/checkpoints/sd_15/juggernaut_reborn.safetensors"
+    )
+    # Numbered the way nvidia-smi numbers the cards (the trainer is launched
+    # with CUDA_DEVICE_ORDER=PCI_BUS_ID): 1 is the 4060 Ti. CUDA's own default
+    # order is "fastest first", which happens to agree today and is exactly
+    # the kind of agreement that stops holding after a driver update.
+    embedding_train_gpu: str = "1"
+
     # ── Storage (managed, ingested files) ────────────────────────────────────
     storage_dir: Path = Path(__file__).parent.parent / "storage"
 
@@ -190,6 +207,20 @@ class Settings(BaseSettings):
         and referenced by id.
         """
         return self.storage_dir / "control"
+
+    @property
+    def embeddings_dir(self) -> Path:
+        """ComfyUI's embeddings folder. Trained embeddings are written straight
+        into it (under `artrium/`), because that is the only place a render can
+        name them from."""
+        return self.comfyui_dir / "models" / "embeddings"
+
+    @property
+    def embedding_train_dir(self) -> Path:
+        """Per-training working files: the prepared dataset, the dataset and
+        prompt configs, the trainer's log. Disposable once a training is done;
+        the embedding itself lives in `embeddings_dir`."""
+        return self.storage_dir / "embeddings"
 
     @property
     def sam3_script(self) -> Path:

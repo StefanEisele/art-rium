@@ -946,9 +946,7 @@ window.addEventListener('load', async () => {
   const deepLinked = await applySeriesDeepLink();
   if (!deepLinked) loadImages(true);
 
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
+  ArtRium.registerSw();
 });
 </script>
 </body>

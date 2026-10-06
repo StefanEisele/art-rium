@@ -2611,9 +2611,7 @@ window.addEventListener('load', async () => {
     },
   });
 
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
+  ArtRium.registerSw();
 });
 </script>
 </body>

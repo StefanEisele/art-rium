@@ -50,12 +50,35 @@ workaround rather than a choice.
   depth ControlNet 0.45, end_percent 0.7
   hires            denoise 0.4, 11 steps; lineart CN 0.3/end 0.5, depth CN
                    0.5/end 0.6
+
+Embeddings — kentskooking's method
+──────────────────────────────────
+Textual-inversion embeddings are the third material channel next to the prompt
+and the IP-Adapter picture. How they are joined is taken from kentskooking's
+own account (Purz, Creative Exploration EP95), not from documentation:
+
+  concat, never combine   Each embedding is encoded on its own and the chunks
+                          are concatenated along the token axis. ConditioningCombine
+                          would run a second UNet evaluation per step (roughly
+                          double the VRAM and time); concat of thirty embeddings
+                          costs what one does.
+  the blank sandwich      An *empty* encode between two embeddings makes the mix
+                          better. Found by trial, not explained — a blank
+                          encode is not zeros, it is CLIP's BOS/EOS padding.
+  inline                  All in one prompt, the way A1111 users write it. Kept
+                          as the baseline the other two are measured against.
+
+The stack ends in the node the samplers already read (`pos`), so base and hires
+pass see the same material. Unmeasured on this graph so far — in particular
+whether embeddings survive the LCM LoRA at cfg 1.0, or need Kent's plain
+euler/20 steps, which `lcm_lora_strength=0` plus `sampler`/`scheduler` allow.
 """
 from __future__ import annotations
 
 import copy
 import math
 import random
+import re
 from dataclasses import dataclass, field
 
 # ── Models ───────────────────────────────────────────────────────────────────
@@ -186,15 +209,158 @@ _FIT_METHODS = {"pad": "pad", "crop": "fill / crop", "stretch": "stretch"}
 FITS = tuple(_FIT_METHODS)
 DEFAULT_FIT = "pad"
 
+# ── Embeddings ───────────────────────────────────────────────────────────────
+EMBEDDING_JOINS = ("inline", "concat", "sandwich")
+# Measured 2026-09-28 (scripts/embedding_sweep.py, cube track, seed 1234):
+# inline keeps the prompt's scene and lays the embedding over it; concat and
+# sandwich drown the prompt — it is one chunk among equals there, and the rows
+# looked like the no-prompt render. Sandwich against concat moved the picture
+# by 10.8 where real variants differ by 30-50. So inline is the default for a
+# render that has a prompt, and the other two stay for kentskooking's own case,
+# which has none.
+DEFAULT_EMBEDDING_JOIN = "inline"
+EMBEDDING_WEIGHT_MIN, EMBEDDING_WEIGHT_MAX = 0.0, 2.0
+# ComfyUI finds an embedding by the word after `embedding:`. A space ends the
+# word, a colon or bracket is read as weight syntax, and a `..` segment leaves
+# the embeddings folder, which ComfyUI refuses — all of them silently: it logs
+# a warning and renders without the embedding.
+_EMBEDDING_NAME = re.compile(r"^(?!.*(^|/)\.+(/|$))[\w.\-]+(/[\w.\-]+)*$")
+
+
+def is_embedding_name(name: str | None) -> bool:
+    return bool(_EMBEDDING_NAME.match(name or ""))
+
+
+# ── Embeddings over time ─────────────────────────────────────────────────────
+# kentskooking's signature: the vibe changes across the clip. He schedules
+# conditionings with a keyframe node pack because embeddings do not survive a
+# batch prompt schedule (only the first one registers). The same effect is made
+# here from core nodes: an embedding with a curve becomes its own conditioning
+# layer — prompt plus that embedding — carrying a per-frame mask, and the base
+# layer takes whatever the curves leave. ComfyUI averages the layers'
+# predictions weighted by their masks, and AnimateDiff-Evolved slices a mask
+# whose batch equals the frame count to each context window
+# (animatediff/sampling.py::get_resized_cond), so a curve reaches every frame.
+#
+# The price is a UNet evaluation per layer per step — one curve roughly doubles
+# the render — which is the same trade Kent describes for Conditioning Combine.
+#
+# Curves are computed here, per frame, and handed to KJNodes'
+# CreateFadeMaskAdvanced as explicit keyframes, so no interpolation mode on the
+# node side can bend them.
+CURVES = ("fade_in", "fade_out", "swell", "pulse")
+CYCLES_MIN, CYCLES_MAX, CYCLES_DEFAULT = 1, 8, 2
+# The base layer never drops to zero: a frame whose masks all read 0 would be
+# divided by nothing when ComfyUI normalises the layers.
+_BASE_FLOOR = 0.001
+_CURVE_MASK_SIZE = 64          # resized to the latent by ComfyUI anyway
+
+
+def curve_values(curve: str, frames: int, cycles: int = CYCLES_DEFAULT) -> list[float]:
+    """How much of each frame an embedding owns, 0..1.
+
+    `swell` and `pulse` start and end at the same value, so a clip rendered
+    with closed_loop still loops; `fade_in`/`fade_out` deliberately do not.
+    """
+    n = max(1, int(frames))
+    out = []
+    for f in range(n):
+        t = f / (n - 1) if n > 1 else 1.0
+        if curve == "fade_in":
+            v = 0.5 - 0.5 * math.cos(math.pi * t)
+        elif curve == "fade_out":
+            v = 0.5 + 0.5 * math.cos(math.pi * t)
+        elif curve == "swell":
+            v = math.sin(math.pi * t) ** 2
+        elif curve == "pulse":
+            k = min(max(int(cycles), CYCLES_MIN), CYCLES_MAX)
+            v = 0.5 - 0.5 * math.cos(2 * math.pi * k * f / n)
+        else:
+            raise ValueError(f"unknown curve: {curve}")
+        out.append(round(v, 3))
+    return out
+
+
+def base_curve(curves: list[list[float]], frames: int) -> list[float]:
+    """What the prompt layer owns: everything the moving layers leave."""
+    return [round(max(_BASE_FLOOR, 1.0 - sum(c[f] for c in curves)), 3)
+            for f in range(frames)]
+
+
+def fade_points(values: list[float]) -> str:
+    """CreateFadeMaskAdvanced's keyframe syntax, one key per frame."""
+    return ",\n".join(f"{i}:({v:.3f})" for i, v in enumerate(values))
+
+
+@dataclass
+class Embedding:
+    """One textual-inversion file in ComfyUI's embeddings folder, by stem.
+
+    `curve` makes it move through the clip (see CURVES); None holds it for the
+    whole clip, which is how every render worked before curves existed.
+    """
+    name: str
+    weight: float = 1.0
+    curve: str | None = None
+    cycles: int = CYCLES_DEFAULT
+
 
 @dataclass
 class Region:
-    """One colour region of the mask video and the picture it is made of."""
+    """One colour region of the mask video and what it is made of: a picture
+    (IP-Adapter, masked), embeddings (a conditioning layer, masked), or both.
+
+    kentskooking's RGB masks carry a stack of embeddings per colour; with
+    embeddings a region no longer needs a picture. Region embeddings hold for
+    the whole clip — a curve on one is ignored.
+    """
     color: tuple[int, int, int]
-    reference: str
+    reference: str | None = None
     weight: float = IP_DEFAULT
     threshold: int = 20
     invert: bool = False
+    embeddings: list[Embedding] = field(default_factory=list)
+
+
+# ── Image injection ──────────────────────────────────────────────────────────
+# kentskooking's "sample settings image injection": a video is composited into
+# the sampler's own estimate of the finished frames partway through, and the
+# sampler carries on from there. Implemented by AnimateDiff-Evolved
+# (sampling.py::perform_image_injection): the current x0 is decoded, the
+# injected frames are laid over it (masked, if a mask is given), re-encoded,
+# the noise residual is added back, and the result is blended in at `strength`.
+# He uses pixelated masks, other generators' clips and TV static; it "gets
+# around the context window" because the same frames steer every window.
+#
+# ADE splits the sampler at the injection's start and skips an injection whose
+# start lies before a sampler's own range — which is what keeps it out of the
+# hires pass, as long as the start stays below 1 - hires_denoise.
+INJECT_STRENGTH_MIN, INJECT_STRENGTH_MAX, INJECT_STRENGTH_DEFAULT = 0.05, 1.0, 0.30
+INJECT_START_MIN, INJECT_START_MAX, INJECT_START_DEFAULT = 0.05, 0.60, 0.30
+# Margin between the injection and the hires pass's first step.
+_INJECT_HIRES_MARGIN = 0.05
+
+
+@dataclass
+class Injection:
+    """A video laid into the base pass partway through."""
+    video: str                                  # absolute path
+    strength: float = INJECT_STRENGTH_DEFAULT
+    start: float = INJECT_START_DEFAULT         # fraction of the schedule
+    # Only inside this colour of the mask video; None = the whole frame.
+    color: tuple[int, int, int] | None = None
+    threshold: int = 20
+    # Frames the source has; a shorter one is looped to the clip's length.
+    source_frames: int | None = None
+
+
+def injection_start(inj: Injection, hires: bool, hires_denoise: float) -> float:
+    """The start actually used: clamped to its band and, with a hires pass,
+    kept before that pass's first step so the refine never receives it."""
+    start = clamp(inj.start, INJECT_START_MIN, INJECT_START_MAX, INJECT_START_DEFAULT)
+    if hires:
+        start = min(start, round(1.0 - hires_denoise - _INJECT_HIRES_MARGIN, 2))
+    return max(INJECT_START_MIN, start)
 
 
 @dataclass
@@ -223,8 +389,17 @@ class AnimateLcmRequest:
     base_reference: str | None = None
     base_weight: float = BASE_IP_DEFAULT
     ip_scaling: str = "K+V w/ C penalty"
+    # Joined into the positive in the order given; see the module docstring.
+    embeddings: list[Embedding] = field(default_factory=list)
+    embedding_join: str = DEFAULT_EMBEDDING_JOIN
+    injection: Injection | None = None
     steps: int = DEFAULT_STEPS
     cfg: float = DEFAULT_CFG
+    sampler: str = SAMPLER
+    scheduler: str = SCHEDULER
+    # 0 drops the LCM distillation LoRA — Kent's recipe keeps the AnimateLCM
+    # motion module but samples plainly (euler/normal, ~20 steps, cfg > 1).
+    lcm_lora_strength: float = MOTION_LORA_STRENGTH
     beta_schedule: str = BETA_SCHEDULE
     motion_lora: str | None = AD_MOTION_LORA
     motion_lora_strength: float = AD_MOTION_LORA_STRENGTH
@@ -324,6 +499,54 @@ def output_size(
     return snap_size(int(width * factor)), snap_size(int(height * factor))
 
 
+def _color_mask(p: str, color, threshold: int, invert: bool = False) -> dict:
+    return {
+        "class_type": "ColorToMask",
+        "inputs": {
+            "images": [p + "maskfit", 0], "invert": invert,
+            "red": color[0], "green": color[1], "blue": color[2],
+            "threshold": threshold, "per_batch": 16,
+        },
+    }
+
+
+def _injection_nodes(wf: dict, p: str, req: "AnimateLcmRequest",
+                     width: int, height: int, length: int) -> list:
+    """The injected frames, fitted to the canvas and exactly `length` long."""
+    inj = req.injection
+    wf[p + "injvid"] = _load_video(inj.video, length, 0.0)
+    frames = [p + "injvid", 0]
+    if inj.source_frames and inj.source_frames < length:
+        # The injection is applied to every frame of the batch at once, so a
+        # short source is looped rather than left to run out.
+        wf[p + "injrep"] = {
+            "class_type": "RepeatImageBatch",
+            "inputs": {"image": frames, "amount": math.ceil(length / inj.source_frames)},
+        }
+        wf[p + "injcut"] = {
+            "class_type": "ImageFromBatch",
+            "inputs": {"image": [p + "injrep", 0], "batch_index": 0, "length": length},
+        }
+        frames = [p + "injcut", 0]
+    wf[p + "injfit"] = _fit_node(frames, width, height, req.fit, "lanczos")
+    wf[p + "injstr"] = {
+        "class_type": "ADE_MultivalDynamic",
+        "inputs": {"float_val": clamp(inj.strength, INJECT_STRENGTH_MIN,
+                                      INJECT_STRENGTH_MAX, INJECT_STRENGTH_DEFAULT)},
+    }
+    inputs = {
+        "image": [p + "injfit", 0], "vae": [p + "ckpt", 2],
+        "invert_mask": False, "resize_image": True,
+        "start_percent": injection_start(inj, req.hires, clamp_hires(req.hires_denoise)),
+        "guarantee_steps": 1, "strength_multival": [p + "injstr", 0],
+    }
+    if inj.color is not None:
+        wf[p + "injmask"] = _color_mask(p, inj.color, inj.threshold)
+        inputs["mask_opt"] = [p + "injmask", 0]
+    wf[p + "inj"] = {"class_type": "ADE_NoisedImageInjection", "inputs": inputs}
+    return [p + "inj", 0]
+
+
 def _load_video(path: str, length: int, force_rate: float) -> dict:
     return {
         "class_type": "VHS_LoadVideoPath",
@@ -376,14 +599,17 @@ def _model_stack(wf: dict, p: str, req: AnimateLcmRequest,
         "class_type": "CheckpointLoaderSimple",
         "inputs": {"ckpt_name": CHECKPOINT},
     }
-    wf[p + "lcmlora"] = {
-        "class_type": "LoraLoaderModelOnly",
-        "inputs": {
-            "lora_name": MOTION_LORA,
-            "strength_model": MOTION_LORA_STRENGTH,
-            "model": [p + "ckpt", 0],
-        },
-    }
+    base_model = [p + "ckpt", 0]
+    if req.lcm_lora_strength > 0:
+        wf[p + "lcmlora"] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "lora_name": MOTION_LORA,
+                "strength_model": float(req.lcm_lora_strength),
+                "model": base_model,
+            },
+        }
+        base_model = [p + "lcmlora", 0]
     wf[p + "admodel"] = {
         "class_type": "ADE_LoadAnimateDiffModel",
         "inputs": {"model_name": MOTION_MODEL},
@@ -434,10 +660,13 @@ def _model_stack(wf: dict, p: str, req: AnimateLcmRequest,
             "seed_offset": 0, "adapt_denoise_steps": False,
         },
     }
+    if req.injection:
+        wf[p + "settings"]["inputs"]["image_inject"] = _injection_nodes(
+            wf, p, req, width, height, length)
     wf[p + "evolved"] = {
         "class_type": "ADE_UseEvolvedSampling",
         "inputs": {
-            "model": [p + "lcmlora", 0],
+            "model": base_model,
             "m_models": [p + "adapply", 0],
             "context_options": [p + "ctx", 0],
             "sample_settings": [p + "settings", 0],
@@ -446,12 +675,6 @@ def _model_stack(wf: dict, p: str, req: AnimateLcmRequest,
     }
 
     # ── Material: IP-Adapter, one per region, all in one pass ────────────────
-    wf[p + "ipaload"] = {
-        "class_type": "IPAdapterUnifiedLoader",
-        "inputs": {"model": [p + "evolved", 0], "preset": IPADAPTER_PRESET},
-    }
-    model_ref = [p + "ipaload", 0]
-
     if req.mask_video:
         wf[p + "maskvid"] = _load_video(req.mask_video, length, req.force_rate)
         wf[p + "maskfit"] = _fit_node(
@@ -468,19 +691,24 @@ def _model_stack(wf: dict, p: str, req: AnimateLcmRequest,
             adapters.append((None, req.base_reference, clamp_ip(req.base_weight)))
         for i, region in enumerate(req.regions):
             node = f"{p}mask{i}"
-            wf[node] = {
-                "class_type": "ColorToMask",
-                "inputs": {
-                    "images": [p + "maskfit", 0], "invert": region.invert,
-                    "red": region.color[0], "green": region.color[1],
-                    "blue": region.color[2], "threshold": region.threshold,
-                    "per_batch": 16,
-                },
-            }
-            adapters.append((node, region.reference, clamp_ip(region.weight)))
-    else:
+            wf[node] = _color_mask(p, region.color, region.threshold, region.invert)
+            # A region made only of embeddings still needs its mask — the text
+            # layer keys on it — but has no picture to adapt.
+            if region.reference:
+                adapters.append((node, region.reference, clamp_ip(region.weight)))
+    elif req.reference_image:
         adapters.append((None, req.reference_image, clamp_ip(req.ip_weight)))
 
+    # Embeddings alone are a complete material channel. Without a picture the
+    # adapter stack is left out entirely rather than loaded and fed nothing.
+    if not adapters:
+        return [p + "evolved", 0]
+
+    wf[p + "ipaload"] = {
+        "class_type": "IPAdapterUnifiedLoader",
+        "inputs": {"model": [p + "evolved", 0], "preset": IPADAPTER_PRESET},
+    }
+    model_ref = [p + "ipaload", 0]
     for i, (mask_node, picture, weight) in enumerate(adapters):
         ref_node = f"{p}ref{i}"
         wf[ref_node] = {"class_type": "LoadImage", "inputs": {"image": picture}}
@@ -499,11 +727,172 @@ def _model_stack(wf: dict, p: str, req: AnimateLcmRequest,
     return model_ref
 
 
-def _text_nodes(wf: dict, p: str, req: AnimateLcmRequest) -> None:
-    wf[p + "pos"] = {
-        "class_type": "CLIPTextEncode",
-        "inputs": {"text": req.prompt, "clip": [p + "ckpt", 1]},
+def _embedding_token(embedding: Embedding) -> str:
+    weight = clamp(embedding.weight, EMBEDDING_WEIGHT_MIN, EMBEDDING_WEIGHT_MAX, 1.0)
+    if weight == 1.0:
+        return f"embedding:{embedding.name}"
+    return f"(embedding:{embedding.name}:{weight:g})"
+
+
+def _chunks(prompt: str, embeddings: list[Embedding], join: str) -> list[str]:
+    prompt = (prompt or "").strip()
+    tokens = [_embedding_token(e) for e in embeddings]
+    if not tokens or join == "inline":
+        return [", ".join(t for t in (prompt, *tokens) if t)]
+    chunks = ([prompt] if prompt else []) + tokens
+    if join == "sandwich":
+        chunks = [part for chunk in chunks for part in ("", chunk)][1:]
+    return chunks
+
+
+def moving_embeddings(req: AnimateLcmRequest) -> list[Embedding]:
+    """The embeddings that carry a curve — one extra conditioning layer each."""
+    return [e for e in req.embeddings if e.curve]
+
+
+def positive_chunks(req: AnimateLcmRequest) -> list[str]:
+    """The texts the (base) positive is encoded from, in order; "" is a
+    sandwich blank. Only the held embeddings — a moving one gets a layer of its
+    own, see `_text_nodes`.
+
+    One chunk means one plain CLIPTextEncode — which is what a request without
+    embeddings has always produced, node for node.
+    """
+    held = [e for e in req.embeddings if not e.curve]
+    return _chunks(req.prompt, held, req.embedding_join)
+
+
+def _encode(text: str, p: str) -> dict:
+    return {"class_type": "CLIPTextEncode", "inputs": {"text": text, "clip": [p + "ckpt", 1]}}
+
+
+def _conditioning(wf: dict, p: str, chunks: list[str], out: str) -> None:
+    """Encode `chunks` and join them into one conditioning at node `out`."""
+    if len(chunks) == 1:
+        wf[out] = _encode(chunks[0], p)
+        return
+    refs = []
+    for i, text in enumerate(chunks):
+        if text:
+            wf[f"{out}_c{i}"] = _encode(text, p)
+            refs.append([f"{out}_c{i}", 0])
+        else:
+            # Every blank in a sandwich is the same conditioning.
+            wf.setdefault(p + "pos_blank", _encode("", p))
+            refs.append([p + "pos_blank", 0])
+    joined = refs[0]
+    for i, ref in enumerate(refs[1:], start=1):
+        node = out if i == len(refs) - 1 else f"{out}_j{i}"
+        wf[node] = {
+            "class_type": "ConditioningConcat",
+            # `to` comes first in the token sequence, `from` is appended.
+            "inputs": {"conditioning_to": joined, "conditioning_from": ref},
+        }
+        joined = [node, 0]
+
+
+def _set_mask(wf: dict, node: str, cond: str, mask: list) -> list:
+    wf[node] = {
+        "class_type": "ConditioningSetMask",
+        "inputs": {"conditioning": [cond, 0], "mask": mask,
+                   "strength": 1.0, "set_cond_area": "default"},
     }
+    return [node, 0]
+
+
+def _curve_mask(wf: dict, node: str, values: list[float], width: int, height: int) -> list:
+    if len(values) < 2:
+        # The node refuses a one-frame batch; ComfyUI trims the mask to the
+        # latent's batch anyway, so the second frame is never read.
+        values = values * 2
+    wf[node] = {
+        "class_type": "CreateFadeMaskAdvanced",
+        "inputs": {
+            "points_string": fade_points(values), "invert": False,
+            "frames": len(values), "width": width, "height": height,
+            "interpolation": "linear",
+        },
+    }
+    return [node, 0]
+
+
+def _outside_regions(wf: dict, p: str, indices: list[int]) -> list:
+    """1 - the union of the given regions' masks: where the global layers
+    still speak once regions carry embeddings of their own."""
+    union = [f"{p}mask{indices[0]}", 0]
+    for n, i in enumerate(indices[1:], start=1):
+        wf[f"{p}pos_union{n}"] = {
+            "class_type": "MaskComposite",
+            "inputs": {"destination": union, "source": [f"{p}mask{i}", 0],
+                       "x": 0, "y": 0, "operation": "add"},
+        }
+        union = [f"{p}pos_union{n}", 0]
+    wf[p + "pos_outside"] = {"class_type": "InvertMask", "inputs": {"mask": union}}
+    return [p + "pos_outside", 0]
+
+
+def _text_nodes(wf: dict, p: str, req: AnimateLcmRequest, length: int,
+                width: int = 0, height: int = 0) -> None:
+    """Positive and negative. The positive always ends in `pos`, whatever it
+    is built from, because every sampler and ControlNet downstream reads it.
+
+    Layers, each a conditioning with a mask, combined:
+      - the base: prompt + held embeddings;
+      - one per embedding with a curve (prompt + held + itself), owning the
+        frames its curve gives it, the base taking the rest;
+      - one per region with embeddings (prompt + the region's own), owning its
+        mask — the global layers are masked out of it, so inside a region only
+        that region's embeddings speak.
+    With none of the last two it is a single conditioning, exactly as before.
+    """
+    moving = moving_embeddings(req)
+    region_idx = [i for i, r in enumerate(req.regions) if r.embeddings]
+    if not moving and not region_idx:
+        _conditioning(wf, p, positive_chunks(req), p + "pos")
+    else:
+        held = [e for e in req.embeddings if not e.curve]
+        curves = [curve_values(e.curve, length, e.cycles) for e in moving]
+        # Curve masks are multiplied with the region masks, which come off the
+        # fitted mask video at canvas size; the two have to be the same size.
+        mw, mh = (width, height) if region_idx else (_CURVE_MASK_SIZE, _CURVE_MASK_SIZE)
+        outside = _outside_regions(wf, p, region_idx) if region_idx else None
+
+        def global_mask(node: str, values: list[float] | None) -> list:
+            mask = _curve_mask(wf, node + "_mask", values, mw, mh) if values else None
+            if outside is None:
+                return mask
+            if mask is None:
+                return outside
+            wf[node + "_out"] = {
+                "class_type": "MaskComposite",
+                "inputs": {"destination": mask, "source": outside,
+                           "x": 0, "y": 0, "operation": "multiply"},
+            }
+            return [node + "_out", 0]
+
+        _conditioning(wf, p, positive_chunks(req), p + "pos_base")
+        layers = [_set_mask(wf, p + "pos_base_m", p + "pos_base",
+                            global_mask(p + "pos_base_m",
+                                        base_curve(curves, length) if moving else None))]
+        for i, (emb, values) in enumerate(zip(moving, curves)):
+            _conditioning(wf, p, _chunks(req.prompt, held + [emb], req.embedding_join),
+                          f"{p}pos_l{i}")
+            layers.append(_set_mask(wf, f"{p}pos_l{i}_m", f"{p}pos_l{i}",
+                                    global_mask(f"{p}pos_l{i}_m", values)))
+        for i in region_idx:
+            region_embs = [Embedding(e.name, e.weight) for e in req.regions[i].embeddings]
+            _conditioning(wf, p, _chunks(req.prompt, region_embs, req.embedding_join),
+                          f"{p}pos_r{i}")
+            layers.append(_set_mask(wf, f"{p}pos_r{i}_m", f"{p}pos_r{i}",
+                                    [f"{p}mask{i}", 0]))
+        joined = layers[0]
+        for i, layer in enumerate(layers[1:], start=1):
+            node = p + "pos" if i == len(layers) - 1 else f"{p}pos_k{i}"
+            wf[node] = {
+                "class_type": "ConditioningCombine",
+                "inputs": {"conditioning_1": joined, "conditioning_2": layer},
+            }
+            joined = [node, 0]
     wf[p + "neg"] = {
         "class_type": "CLIPTextEncode",
         "inputs": {"text": req.negative, "clip": [p + "ckpt", 1]},
@@ -584,7 +973,7 @@ def _hires_nodes(wf: dict, p: str, req: AnimateLcmRequest,
             "positive": [p + "cn3", 0], "negative": [p + "cn3", 1],
             "latent_image": [p + "enc", 0],
             "seed": seed, "steps": req.hires_steps, "cfg": req.cfg,
-            "sampler_name": SAMPLER, "scheduler": SCHEDULER,
+            "sampler_name": req.sampler, "scheduler": req.scheduler,
             "denoise": clamp_hires(req.hires_denoise),
         },
     }
@@ -637,11 +1026,30 @@ def _plan_dimensions(req: AnimateLcmRequest) -> tuple[int, int, int]:
 def _validate(req: AnimateLcmRequest) -> None:
     if req.regions and not req.mask_video:
         raise ValueError("regions need a mask_video to key them out of")
-    if not req.regions and not req.reference_image:
-        raise ValueError("a reference image is required")
+    # The tool insists on a picture itself (routers/vace.py); the builder only
+    # refuses a render with nothing at all to condition on, so that a
+    # prompt-only baseline stays possible for a sweep.
+    if (not req.regions and not req.reference_image and not req.embeddings
+            and not (req.prompt or "").strip()):
+        raise ValueError("a prompt, an embedding or a reference image is required")
     for region in req.regions:
-        if not region.reference:
-            raise ValueError("a region needs a reference image")
+        if not region.reference and not region.embeddings:
+            raise ValueError("a region needs a reference image or an embedding")
+        for embedding in region.embeddings:
+            if not is_embedding_name(embedding.name):
+                raise ValueError(f"not a usable embedding name: {embedding.name!r}")
+    if req.injection:
+        if not req.injection.video:
+            raise ValueError("an injection needs a video")
+        if req.injection.color is not None and not req.mask_video:
+            raise ValueError("a region-limited injection needs a mask_video")
+    if req.embedding_join not in EMBEDDING_JOINS:
+        raise ValueError(f"embedding_join must be one of {EMBEDDING_JOINS}")
+    for embedding in req.embeddings:
+        if not is_embedding_name(embedding.name):
+            raise ValueError(f"not a usable embedding name: {embedding.name!r}")
+        if embedding.curve is not None and embedding.curve not in CURVES:
+            raise ValueError(f"curve must be one of {CURVES}")
 
 
 def _geometry_nodes(wf: dict, p: str, req: AnimateLcmRequest,
@@ -688,7 +1096,7 @@ def build_animatelcm_workflow(req: AnimateLcmRequest) -> tuple[dict, str]:
     p = "al_"
     wf: dict = {}
     model_ref = _model_stack(wf, p, req, width, height, length)
-    _text_nodes(wf, p, req)
+    _text_nodes(wf, p, req, length, width, height)
     _geometry_nodes(wf, p, req, width, height, length)
 
     # ── Base pass ────────────────────────────────────────────────────────────
@@ -703,7 +1111,7 @@ def build_animatelcm_workflow(req: AnimateLcmRequest) -> tuple[dict, str]:
             "positive": [p + "cn", 0], "negative": [p + "cn", 1],
             "latent_image": [p + "latent", 0],
             "seed": seed, "steps": req.steps, "cfg": req.cfg,
-            "sampler_name": SAMPLER, "scheduler": SCHEDULER, "denoise": 1.0,
+            "sampler_name": req.sampler, "scheduler": req.scheduler, "denoise": 1.0,
         },
     }
     wf[p + "dec"] = {
@@ -753,7 +1161,7 @@ def build_animatelcm_base_workflow(req: AnimateLcmRequest) -> tuple[dict, str, s
     p = "al_"
     wf: dict = {}
     model_ref = _model_stack(wf, p, req, width, height, length)
-    _text_nodes(wf, p, req)
+    _text_nodes(wf, p, req, length, width, height)
     _geometry_nodes(wf, p, req, width, height, length)
 
     wf[p + "latent"] = {
@@ -767,7 +1175,7 @@ def build_animatelcm_base_workflow(req: AnimateLcmRequest) -> tuple[dict, str, s
             "positive": [p + "cn", 0], "negative": [p + "cn", 1],
             "latent_image": [p + "latent", 0],
             "seed": seed, "steps": req.steps, "cfg": req.cfg,
-            "sampler_name": SAMPLER, "scheduler": SCHEDULER, "denoise": 1.0,
+            "sampler_name": req.sampler, "scheduler": req.scheduler, "denoise": 1.0,
         },
     }
     wf[p + "dec"] = {
@@ -813,7 +1221,7 @@ def build_animatelcm_hires_workflow(
     p = "al_"
     wf: dict = {}
     model_ref = _model_stack(wf, p, req, width, height, length)
-    _text_nodes(wf, p, req)
+    _text_nodes(wf, p, req, length, width, height)
 
     # No geometry chain: the base render already carries the control track's
     # shape, and the hires pass is steered by the ControlNets derived from it.

@@ -21,13 +21,21 @@ from services.comfy.animatelcm import (
     IP_MAX,
     NOISE_TYPE,
     AnimateLcmRequest,
+    Embedding,
+    Injection,
     Region,
+    build_animatelcm_base_workflow,
+    base_curve,
     build_animatelcm_workflow,
     canvas_size,
     clamp_depth,
     clamp_hires,
     clamp_ip,
+    curve_values,
+    fade_points,
+    injection_start,
     output_size,
+    positive_chunks,
     snap_size,
     sweep_workflows,
 )
@@ -338,8 +346,323 @@ class TestValidation:
     def test_something_has_to_supply_the_material(self):
         with pytest.raises(ValueError, match="reference"):
             build_animatelcm_workflow(
-                AnimateLcmRequest(control_video=DEPTH, prompt="x")
+                AnimateLcmRequest(control_video=DEPTH, prompt="  ")
             )
+
+    def test_a_prompt_alone_is_a_valid_baseline(self):
+        # The sweep's control row. The tool itself still demands a picture.
+        wf = build_animatelcm_workflow(AnimateLcmRequest(control_video=DEPTH, prompt="x"))[0]
+        assert "al_ipaload" not in wf
+
+
+A, B = Embedding("style-a"), Embedding("style-b", 0.8)
+
+
+def stacked(join: str, **kw) -> dict:
+    return simple(embeddings=[A, B], embedding_join=join, **kw)
+
+
+def walk_concat(wf: dict, node: str = "al_pos") -> list[str]:
+    """The positive's texts in token order, read back off the concat chain."""
+    entry = wf[node]
+    if entry["class_type"] == "CLIPTextEncode":
+        return [entry["inputs"]["text"]]
+    inputs = entry["inputs"]
+    return (walk_concat(wf, inputs["conditioning_to"][0])
+            + walk_concat(wf, inputs["conditioning_from"][0]))
+
+
+class TestEmbeddings:
+    """kentskooking's joins, and the guarantee that a request without
+    embeddings builds exactly what it always did."""
+
+    def test_no_embeddings_is_the_plain_prompt(self):
+        wf = simple()
+        assert wf["al_pos"] == {"class_type": "CLIPTextEncode",
+                                "inputs": {"text": "a world", "clip": ["al_ckpt", 1]}}
+        assert not nodes_of(wf, "ConditioningConcat")
+
+    def test_inline_writes_one_prompt(self):
+        wf = stacked("inline")
+        assert wf["al_pos"]["inputs"]["text"] == \
+            "a world, embedding:style-a, (embedding:style-b:0.8)"
+        assert not nodes_of(wf, "ConditioningConcat")
+
+    def test_concat_encodes_each_on_its_own(self):
+        wf = stacked("concat")
+        assert walk_concat(wf) == ["a world", "embedding:style-a", "(embedding:style-b:0.8)"]
+        assert len(nodes_of(wf, "ConditioningConcat")) == 2
+
+    def test_the_sandwich_puts_a_blank_between_every_pair(self):
+        wf = stacked("sandwich")
+        assert walk_concat(wf) == ["a world", "", "embedding:style-a", "",
+                                   "(embedding:style-b:0.8)"]
+
+    def test_every_blank_is_one_node(self):
+        wf = stacked("sandwich")
+        blanks = [k for k, v in wf.items()
+                  if v["class_type"] == "CLIPTextEncode" and v["inputs"]["text"] == ""
+                  and k != "al_neg"]
+        assert blanks == ["al_pos_blank"]
+
+    def test_inline_is_the_default(self):
+        # Measured: the only join that keeps the prompt's scene.
+        assert positive_chunks(AnimateLcmRequest(
+            control_video=DEPTH, prompt="x", embeddings=[A])) == ["x, embedding:style-a"]
+
+    def test_an_empty_prompt_leaves_only_the_embeddings(self):
+        # Kent's own renders: no text at all, the embeddings are the prompt.
+        wf = stacked("sandwich", prompt="  ")
+        assert walk_concat(wf) == ["embedding:style-a", "", "(embedding:style-b:0.8)"]
+
+    def test_both_passes_read_the_stack(self):
+        wf = stacked("sandwich")
+        assert wf["al_cn"]["inputs"]["positive"] == ["al_pos", 0]
+        assert wf["al_cn2"]["inputs"]["positive"] == ["al_pos", 0]
+        assert wf["al_pos"]["class_type"] == "ConditioningConcat"
+
+    def test_the_weight_is_clamped(self):
+        req = AnimateLcmRequest(control_video=DEPTH, prompt="", embedding_join="inline",
+                                embeddings=[Embedding("x", 9.0)])
+        assert positive_chunks(req) == ["(embedding:x:2)"]
+
+    def test_embeddings_alone_need_no_picture(self):
+        wf = build_animatelcm_workflow(AnimateLcmRequest(
+            control_video=DEPTH, prompt="a world", embeddings=[A]))[0]
+        assert not nodes_of(wf, "IPAdapterAdvanced")
+        assert "al_ipaload" not in wf
+        assert wf["al_ks"]["inputs"]["model"] == ["al_evolved", 0]
+        assert wf["al_ks2"]["inputs"]["model"] == ["al_evolved", 0]
+
+    def test_the_base_only_graph_carries_the_stack_too(self):
+        wf = build_animatelcm_base_workflow(AnimateLcmRequest(
+            control_video=DEPTH, prompt="a world", embeddings=[A, B],
+            embedding_join="concat"))[0]
+        assert walk_concat(wf)[-1] == "(embedding:style-b:0.8)"
+
+    @pytest.mark.parametrize("name", ["has space", "a:b", "(x)", "", "../up"])
+    def test_names_comfy_would_silently_skip_are_refused(self, name):
+        with pytest.raises(ValueError, match="embedding name"):
+            simple(embeddings=[Embedding(name)])
+
+    def test_a_subfolder_is_a_usable_name(self):
+        assert "embedding:civitai/style-a" in \
+            simple(embeddings=[Embedding("civitai/style-a")], embedding_join="inline")[
+                "al_pos"]["inputs"]["text"]
+
+    def test_an_unknown_join_is_refused(self):
+        with pytest.raises(ValueError, match="embedding_join"):
+            stacked("blend")
+
+
+class TestCurves:
+    """Embeddings that move through the clip: one masked layer per moving
+    embedding, the prompt layer taking what the curves leave."""
+
+    def moving(self, **kw):
+        args = {"embeddings": [Embedding("held"), Embedding("mover", 0.9, curve="fade_in")],
+                "length": 10, "reference_image": None}
+        args.update(kw)
+        return simple(**args)
+
+    def test_without_curves_nothing_changes(self):
+        wf = simple(embeddings=[A, B])
+        assert not nodes_of(wf, "ConditioningSetMask")
+        assert wf["al_pos"]["class_type"] == "CLIPTextEncode"
+
+    def test_one_curve_is_two_layers(self):
+        wf = self.moving()
+        assert nodes_of(wf, "ConditioningSetMask") == ["al_pos_base_m", "al_pos_l0_m"]
+        assert wf["al_pos"]["class_type"] == "ConditioningCombine"
+        assert wf["al_pos"]["inputs"] == {"conditioning_1": ["al_pos_base_m", 0],
+                                          "conditioning_2": ["al_pos_l0_m", 0]}
+
+    def test_held_embeddings_are_in_every_layer(self):
+        wf = self.moving()
+        assert wf["al_pos_base"]["inputs"]["text"] == "a world, embedding:held"
+        assert wf["al_pos_l0"]["inputs"]["text"] == \
+            "a world, embedding:held, (embedding:mover:0.9)"
+
+    def test_the_masks_are_the_curves_frame_by_frame(self):
+        wf = self.moving()
+        mask = wf["al_pos_l0_m_mask"]["inputs"]
+        assert mask["frames"] == 10 and mask["interpolation"] == "linear"
+        values = [float(p.split("(")[1].rstrip(")")) for p in mask["points_string"].split(",")]
+        assert values == curve_values("fade_in", 10)
+        base = [float(p.split("(")[1].rstrip(")"))
+                for p in wf["al_pos_base_m_mask"]["inputs"]["points_string"].split(",")]
+        assert base[0] == 1.0 and base[-1] == 0.001, "the base never reaches zero"
+
+    def test_both_passes_read_the_layered_positive(self):
+        wf = self.moving()
+        assert wf["al_cn"]["inputs"]["positive"] == ["al_pos", 0]
+        assert wf["al_cn2"]["inputs"]["positive"] == ["al_pos", 0]
+
+    def test_three_moving_embeddings_chain(self):
+        wf = simple(embeddings=[Embedding("a", curve="fade_out"), Embedding("b", curve="swell"),
+                                Embedding("c", curve="pulse", cycles=3)], length=12)
+        assert len(nodes_of(wf, "ConditioningSetMask")) == 4
+        assert len(nodes_of(wf, "ConditioningCombine")) == 3
+
+    def test_an_unknown_curve_is_refused(self):
+        with pytest.raises(ValueError, match="curve"):
+            simple(embeddings=[Embedding("a", curve="wobble")])
+
+    def test_the_mask_follows_the_clamped_length(self):
+        wf = self.moving(length=96, source_frames=40)
+        assert wf["al_pos_l0_m_mask"]["inputs"]["frames"] == 40
+
+
+class TestRegionEmbeddings:
+    """kentskooking's RGB masks: each colour its own embedding stack, the
+    global layers masked out of it."""
+
+    def build(self, **kw):
+        args = {
+            "control_video": DEPTH, "mask_video": MASKS, "prompt": "a world",
+            "regions": [Region((255, 0, 0), None, embeddings=[Embedding("rust", 1.1)]),
+                        Region((0, 255, 0), "g.png")],
+            "length": 16,
+        }
+        args.update(kw)
+        return build_animatelcm_workflow(AnimateLcmRequest(**args))[0]
+
+    def test_a_region_of_embeddings_needs_no_picture(self):
+        wf = self.build()
+        assert nodes_of(wf, "IPAdapterAdvanced") == ["al_ipa0"], "only the green region adapts"
+        assert wf["al_ipa0"]["inputs"]["attn_mask"] == ["al_mask1", 0]
+        assert wf["al_mask0"]["class_type"] == "ColorToMask", "the mask exists regardless"
+
+    def test_the_region_layer_keys_on_its_mask(self):
+        wf = self.build()
+        assert wf["al_pos_r0"]["inputs"]["text"] == "a world, (embedding:rust:1.1)"
+        assert wf["al_pos_r0_m"]["inputs"]["mask"] == ["al_mask0", 0]
+        assert "al_pos_r1" not in wf, "a picture-only region adds no text layer"
+
+    def test_the_global_layer_is_masked_out_of_the_region(self):
+        wf = self.build()
+        assert wf["al_pos_outside"] == {"class_type": "InvertMask",
+                                        "inputs": {"mask": ["al_mask0", 0]}}
+        assert wf["al_pos_base_m"]["inputs"]["mask"] == ["al_pos_outside", 0]
+        assert wf["al_pos"]["inputs"] == {"conditioning_1": ["al_pos_base_m", 0],
+                                          "conditioning_2": ["al_pos_r0_m", 0]}
+
+    def test_two_embedding_regions_are_one_union(self):
+        wf = self.build(regions=[Region((255, 0, 0), None, embeddings=[Embedding("a")]),
+                                 Region((0, 0, 255), None, embeddings=[Embedding("b")])])
+        assert wf["al_pos_union1"]["inputs"]["operation"] == "add"
+        assert wf["al_pos_outside"]["inputs"]["mask"] == ["al_pos_union1", 0]
+        assert not nodes_of(wf, "IPAdapterAdvanced")
+
+    def test_curves_and_regions_compose(self):
+        wf = self.build(embeddings=[Embedding("mover", curve="swell")], width=544, height=544)
+        # The curve's mask is drawn at canvas size so it can be multiplied with
+        # the region masks, which come off the fitted mask video.
+        mask = wf["al_pos_l0_m_mask"]["inputs"]
+        assert (mask["width"], mask["height"]) == (544, 544)
+        out = wf["al_pos_l0_m_out"]["inputs"]
+        assert out["operation"] == "multiply" and out["source"] == ["al_pos_outside", 0]
+        assert len(nodes_of(wf, "ConditioningSetMask")) == 3
+
+    def test_a_region_needs_something(self):
+        with pytest.raises(ValueError, match="reference image or an embedding"):
+            self.build(regions=[Region((255, 0, 0), None)])
+
+
+class TestInjection:
+    def build(self, **kw):
+        inj = kw.pop("injection", Injection("C:/fake/static.mp4"))
+        return simple(injection=inj, length=48, **kw)
+
+    def test_it_hangs_off_the_sample_settings(self):
+        wf = self.build()
+        assert wf["al_settings"]["inputs"]["image_inject"] == ["al_inj", 0]
+        inj = wf["al_inj"]["inputs"]
+        assert inj["image"] == ["al_injfit", 0] and inj["vae"] == ["al_ckpt", 2]
+        assert inj["strength_multival"] == ["al_injstr", 0]
+        assert wf["al_injstr"]["inputs"]["float_val"] == 0.3
+
+    def test_the_source_is_fitted_like_the_control_track(self):
+        wf = self.build()
+        assert wf["al_injfit"]["inputs"]["method"] == wf["al_fit"]["inputs"]["method"]
+        assert wf["al_injvid"]["inputs"]["frame_load_cap"] == 48
+
+    def test_a_short_source_is_looped_to_the_clip(self):
+        wf = self.build(injection=Injection("C:/fake/static.mp4", source_frames=20))
+        assert wf["al_injrep"]["inputs"]["amount"] == 3
+        assert wf["al_injcut"]["inputs"] == {"image": ["al_injrep", 0], "batch_index": 0,
+                                            "length": 48}
+        assert wf["al_injfit"]["inputs"]["image"] == ["al_injcut", 0]
+
+    def test_it_stays_out_of_the_hires_pass(self):
+        # ADE skips an injection whose start lies before a sampler's range; the
+        # refine starts at 1 - denoise.
+        wf = self.build(injection=Injection("v.mp4", start=0.5), hires_denoise=0.6)
+        assert wf["al_inj"]["inputs"]["start_percent"] == 0.35
+        wf = self.build(injection=Injection("v.mp4", start=0.5), hires=False)
+        assert wf["al_inj"]["inputs"]["start_percent"] == 0.5
+        assert injection_start(Injection("v", start=0.3), True, 0.75) == 0.2
+
+    def test_it_can_be_limited_to_a_region(self):
+        wf = simple(mask_video=MASKS, length=48,
+                    injection=Injection("v.mp4", color=(0, 0, 255)))
+        assert wf["al_inj"]["inputs"]["mask_opt"] == ["al_injmask", 0]
+        assert wf["al_injmask"]["inputs"]["blue"] == 255
+
+    def test_a_region_injection_needs_the_mask_video(self):
+        with pytest.raises(ValueError, match="mask_video"):
+            simple(injection=Injection("v.mp4", color=(255, 0, 0)))
+
+    def test_without_it_the_settings_are_untouched(self):
+        assert "image_inject" not in simple()["al_settings"]["inputs"]
+
+
+class TestCurveValues:
+    def test_fades_run_end_to_end(self):
+        assert curve_values("fade_in", 5) == [0.0, 0.146, 0.5, 0.854, 1.0]
+        assert curve_values("fade_out", 5) == [1.0, 0.854, 0.5, 0.146, 0.0]
+
+    def test_swell_and_pulse_close_the_loop(self):
+        # closed_loop renders wrap: the frame after the last is the first.
+        swell = curve_values("swell", 9)
+        assert swell[0] == swell[-1] == 0.0 and max(swell) == 1.0
+        pulse = curve_values("pulse", 16, cycles=2)
+        assert pulse[0] == 0.0 and pulse[4] == 1.0 and pulse[8] == 0.0
+
+    def test_cycles_are_clamped(self):
+        assert curve_values("pulse", 32, cycles=99) == curve_values("pulse", 32, cycles=8)
+
+    def test_the_base_takes_the_rest_and_never_zero(self):
+        assert base_curve([[0.0, 0.5, 1.0], [0.0, 0.8, 0.5]], 3) == [1.0, 0.001, 0.001]
+        assert base_curve([[0.25, 0.5]], 2) == [0.75, 0.5]
+
+    def test_points_parse_the_way_kjnodes_reads_them(self):
+        # mask_nodes.py::createfademask — split on ",", strip, frame:(value).
+        text = fade_points([0.0, 0.5, 1.0])
+        parsed = [(int(f.strip()), float(v.strip()[1:-1]))
+                  for f, v in (pt.split(":") for pt in text.rstrip(",\n").split(","))]
+        assert parsed == [(0, 0.0), (1, 0.5), (2, 1.0)]
+
+
+class TestRecipe:
+    """Kent keeps the AnimateLCM motion module but samples plainly; the LCM
+    distillation LoRA and the sampler have to be separable for that."""
+
+    def test_the_lcm_lora_can_be_dropped(self):
+        wf = simple(lcm_lora_strength=0)
+        assert "al_lcmlora" not in wf
+        assert wf["al_evolved"]["inputs"]["model"] == ["al_ckpt", 0]
+
+    def test_the_lcm_lora_is_on_by_default(self):
+        wf = simple()
+        assert wf["al_evolved"]["inputs"]["model"] == ["al_lcmlora", 0]
+        assert wf["al_lcmlora"]["inputs"]["strength_model"] == 1.0
+
+    def test_the_sampler_reaches_both_passes(self):
+        wf = simple(sampler="euler", scheduler="normal")
+        for ks in ("al_ks", "al_ks2"):
+            assert (wf[ks]["inputs"]["sampler_name"], wf[ks]["inputs"]["scheduler"]) \
+                == ("euler", "normal")
 
 
 class TestSweep:

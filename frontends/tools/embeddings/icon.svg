@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#111"/>
+  <!-- A fan of swatches: a palette learnt from pictures. -->
+  <g transform="translate(20 46)">
+    <rect x="-4" y="-30" width="9" height="30" rx="2" fill="#3A6690" transform="rotate(-38)"/>
+    <rect x="-4" y="-30" width="9" height="30" rx="2" fill="#5B86A8" transform="rotate(-14)"/>
+    <rect x="-4" y="-30" width="9" height="30" rx="2" fill="#C9A06A" transform="rotate(10)"/>
+    <rect x="-4" y="-30" width="9" height="30" rx="2" fill="#E2732F" transform="rotate(34)"/>
+    <circle r="3" fill="#fff" opacity="0.8"/>
+  </g>
+</svg>

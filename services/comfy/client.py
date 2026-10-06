@@ -212,3 +212,21 @@ async def loader_choices(node: str, field: str) -> set[str]:
         return set()
     _loader_choices[key] = (time.monotonic(), choices)
     return choices
+
+
+async def embedding_names() -> list[str] | None:
+    """Every embedding ComfyUI can load right now, `/`-separated, or None when
+    ComfyUI cannot be reached.
+
+    Not cached, unlike `loader_choices`: a training finishing is exactly the
+    moment someone reaches for the new name, and a minute-old list would say
+    it does not exist. The call is a directory listing and costs nothing.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"http://{settings.comfyui_host}/embeddings")
+            r.raise_for_status()
+            return [str(n).replace("\\", "/") for n in r.json()]
+    except Exception as e:
+        logger.info("ComfyUI /embeddings unavailable (%s): %s", type(e).__name__, e)
+        return None

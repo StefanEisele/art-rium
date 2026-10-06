@@ -1,0 +1,19 @@
+{
+  "name": "Embeddings",
+  "short_name": "Embeddings",
+  "description": "Eigene Stile aus Galerie-Bildern trainieren",
+  "start_url": "/tools/embeddings/",
+  "scope": "/tools/embeddings/",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

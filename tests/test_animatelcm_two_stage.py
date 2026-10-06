@@ -227,9 +227,9 @@ def test_regions_survive_into_both_stages():
 
 def test_both_stage_builders_validate_their_input():
     with pytest.raises(ValueError):
-        build_animatelcm_base_workflow(request(reference_image=None))
+        build_animatelcm_base_workflow(request(reference_image=None, prompt=""))
     with pytest.raises(ValueError):
-        build_animatelcm_hires_workflow(request(reference_image=None), "base.mp4")
+        build_animatelcm_hires_workflow(request(reference_image=None, prompt=""), "base.mp4")
     with pytest.raises(ValueError):
         build_animatelcm_base_workflow(
             request(regions=[Region(color=(255, 0, 0), reference="a.png")])

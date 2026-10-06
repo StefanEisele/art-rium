@@ -34,6 +34,40 @@ const ArtRium = (() => {
   const saveApiKey  = (key) => localStorage.setItem(STORAGE_KEYS.apiKey, key);
   const clearApiKey = ()    => localStorage.removeItem(STORAGE_KEYS.apiKey);
 
+  // ── Service worker registration ─────────────────────────────────────────────
+
+  /**
+   * Register `sw.js` and reload once a new version takes over.
+   *
+   * Every sw.js (see sw-base.js) answers icons/manifest cache-first and only
+   * drops the old cache in its `activate` handler. A plain refresh fetches the
+   * new sw.js and starts it installing, but the tab that triggered the
+   * refresh is usually still on the OLD active worker for that same load —
+   * `activate` (and the cache it deletes) lands a beat later. Without this,
+   * a redeploy needs two manual refreshes before new icons/assets show up,
+   * which reads as "the deploy didn't work" rather than "reload again".
+   * `controllerchange` fires the moment the new worker claims the page, so
+   * reloading there is the earliest correct moment — the reload's own
+   * requests are guaranteed to hit the new worker instead of racing it.
+   *
+   * `controllerchange` also fires on a page's very first-ever visit — going
+   * from no controller to one is a "change" too — so a first-time visitor
+   * would otherwise see one unexplained reload. `hadController`, read before
+   * `register()` starts anything, tells the two apart: it is only true on a
+   * repeat visit where an earlier worker was already running the page.
+   */
+  const registerSw = () => {
+    if (!('serviceWorker' in navigator)) return;
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded) return;
+      reloaded = true;
+      location.reload();
+    });
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  };
+
   // ── Auth helpers ───────────────────────────────────────────────────────────
 
   const getAuthHeaders = (apiKey) => apiKey ? { 'X-API-Key': apiKey } : {};
@@ -355,7 +389,7 @@ const ArtRium = (() => {
     STORAGE_KEYS,
     getClientId, getApiKey, saveApiKey, clearApiKey,
     getAuthHeaders, withAuth, apiFetch, makeApiFetch,
-    escHtml, toast, setDot, connectWs, session,
+    escHtml, toast, setDot, connectWs, session, registerSw,
   };
 
 })();

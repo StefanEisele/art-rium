@@ -45,6 +45,7 @@ from core.db import AsyncSessionLocal
 from core.models import (
     API_WORKFLOW,
     AUDIO_WORKFLOWS,
+    EmbeddingTraining,
     ImprovSession,
     PostCompanion,
     Song,
@@ -101,6 +102,17 @@ async def sweep_stuck_jobs(reason: str = _INTERRUPTED_MSG) -> int:
         )
         for companion in result.scalars():
             companion.status = "failed"
+            n += 1
+
+        # An embedding training is a child process of this server; it cannot
+        # outlive the process that was reading its progress. Left alone, the
+        # row would also block every later training ("one at a time").
+        result = await db.execute(
+            select(EmbeddingTraining).where(EmbeddingTraining.status.in_(("queued", "training")))
+        )
+        for training in result.scalars():
+            training.status = "failed"
+            training.error = reason
             n += 1
 
         if n:

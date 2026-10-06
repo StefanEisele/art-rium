@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e1013">
+<title>Embeddings</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="/shared/shared.css">
+<style>
+  /* shared.css supplies .app, header and .card; the trainer brings its own
+     form styles (.et-*). This page is only the shell around it. */
+  .app { min-height: 100dvh; max-width: 720px; padding-bottom: env(safe-area-inset-bottom); }
+  header { justify-content: space-between; padding: 14px 20px; }
+  .header-left { display: flex; align-items: center; gap: 10px; }
+  main {
+    flex: 1; overflow-y: auto; padding: 18px 20px 40px;
+    display: flex; flex-direction: column; gap: 16px; -webkit-overflow-scrolling: touch;
+  }
+  .card h2 { font-size: 15px; font-weight: 700; letter-spacing: -0.2px; margin-bottom: 8px; }
+  .intro { font-size: 13px; color: var(--text-dim); line-height: 1.55; }
+  .intro b { color: var(--text); font-weight: 600; }
+  .files { display: flex; flex-wrap: wrap; gap: 6px; }
+  .files code {
+    font-size: 12px; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 7px; padding: 4px 8px; color: var(--text);
+  }
+  .hint { font-size: 11px; color: var(--text-dim); line-height: 1.45; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div class="header-left">
+      <a class="back-btn" href="/" title="Dashboard">‹</a>
+      <h1>Embeddings</h1>
+    </div>
+    <a class="chip-btn" href="/tools/vace/" title="Embeddings im Struktur-Tool einsetzen">Struktur ›</a>
+  </header>
+
+  <main>
+    <section class="card">
+      <p class="intro">
+        Ein Embedding ist ein <b>neues Wort, das das Modell aus deinen Bildern lernt</b> —
+        so baut kentskooking seine Videos: etwa 20 eigene Bilder, ein trainierter Stil,
+        der dann im Struktur-Tool ins Video fließt. Wähle eine Bildserie oder einzelne
+        Bilder aus der Galerie, trainiere, und vergleiche die Snapshots: der letzte ist
+        nicht immer der beste.
+      </p>
+    </section>
+
+    <section class="card">
+      <h2>Training</h2>
+      <div id="trainer"></div>
+    </section>
+
+    <section class="card" id="files-card">
+      <h2>Weitere Dateien</h2>
+      <div class="files" id="files"></div>
+      <div class="hint">Embeddings aus anderen Quellen (z. B. Civitai) nach
+        <code>E:\00_comfy\models\embeddings\</code> legen — sie erscheinen hier und im Struktur-Tool.</div>
+    </section>
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script src="/shared/shared.js"></script>
+<script src="/shared/embeddings.js"></script>
+<script>
+const apiKey = ArtRium.getApiKey();
+const api = ArtRium.makeApiFetch(() => apiKey);
+const withAuth = (u) => ArtRium.withAuth(u, apiKey);
+
+function renderFiles(lib) {
+  const box = document.getElementById('files');
+  const other = lib.embeddings.filter(e => !e.trained);
+  box.innerHTML = other.length
+    ? other.map(e => `<code>${ArtRium.escHtml(e.name)}</code>`).join('')
+    : `<span class="hint" style="margin:0">${lib.comfy_online ? 'Keine.' : 'ComfyUI ist nicht erreichbar.'}</span>`;
+}
+
+ArtRium.EmbeddingTrainer.mount(document.getElementById('trainer'), {
+  api, withAuth,
+  pickImages: true,
+  formOpen: true,
+  useLabel: 'Im Struktur-Tool verwenden',
+  // The Struktur tool adopts ?embedding= on load and drops the parameter.
+  onUse: (t) => { location.href = '/tools/vace/?embedding=' + encodeURIComponent(t.embedding); },
+  onLoad: renderFiles,
+});
+
+ArtRium.registerSw();
+</script>
+</body>
+</html>

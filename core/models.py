@@ -672,6 +672,61 @@ class ControlTrack(Base):
     )
 
 
+class EmbeddingTraining(Base):
+    """A textual-inversion embedding trained from gallery pictures.
+
+    kentskooking's method in one row: ~20 of your own pictures become a word
+    the AnimateLCM graph can say (services/embedding/). The files are not here
+    — sd-scripts writes them into ComfyUI's embeddings folder, because that is
+    the only place a render can name them from:
+
+        embeddings/artrium/<name>.safetensors            the one renders use
+        embeddings/artrium/_train/<name>/…-stepN…        every snapshot
+        embeddings/artrium/_train/<name>/sample/*.png    a preview per snapshot
+
+    The snapshots are kept because the last one is rarely the best one — Kent
+    saves every 500 steps and tries them. `chosen_step` is which of them the
+    active file is a copy of; null means the final save.
+    """
+    __tablename__ = "embedding_trainings"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued', 'training', 'done', 'failed', 'cancelled')",
+            name="ck_embedding_trainings_status",
+        ),
+        CheckConstraint("template IN ('style', 'object')", name="ck_embedding_trainings_template"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # The file stem, and so the name a render uses: embedding:artrium/<name>.
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    # The token the trainer invents for the concept. Only meaningful while
+    # training — ComfyUI addresses the file by name, not by this.
+    token: Mapped[str] = mapped_column(String(64), nullable=False)
+    series_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("image_series.id", ondelete="SET NULL"),
+    )
+    # The pictures it was trained on, in order. Ids rather than a join table:
+    # the set is frozen the moment training starts, and a picture deleted later
+    # does not un-train the embedding.
+    image_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    template: Mapped[str] = mapped_column(String(16), nullable=False, default="style")
+    init_word: Mapped[str] = mapped_column(String(64), nullable=False)
+    vectors: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    steps: Mapped[int] = mapped_column(Integer, nullable=False)
+    learning_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    error: Mapped[str | None] = mapped_column(Text)
+    chosen_step: Mapped[int | None] = mapped_column(Integer)
+    seconds: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class VideoClip(Base):
     """One generated segment clip of a Video job — a first-class library item.
 

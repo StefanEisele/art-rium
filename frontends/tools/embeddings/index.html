@@ -26,10 +26,30 @@
     border-radius: 7px; padding: 4px 8px; color: var(--text);
   }
   .hint { font-size: 11px; color: var(--text-dim); line-height: 1.45; margin-top: 8px; }
+
+  /* ── Desktop (≥860px) ──
+     One widget, so no two panes: inside the training card the form and the
+     list of trainings sit side by side, and the list — snapshot rows of
+     three pictures each — gets the width. */
+  @media (min-width: 860px) {
+    main { padding: 20px 24px 40px; }
+    .intro { max-width: 820px; }
+    #trainer.et {
+      display: grid; align-items: start; gap: 12px 24px;
+      grid-template-columns: var(--split-side) minmax(0, 1fr);
+      grid-template-rows: auto 1fr;
+    }
+    #trainer > .et-form { grid-column: 1; grid-row: 1 / span 2; }
+    #trainer > .et-list-title { grid-column: 2; grid-row: 1; margin-top: 0; }
+    #trainer > .et-list { grid-column: 2; grid-row: 2; }
+    /* Three snapshot columns stretched over the pane would make one training
+       a couple of screens tall; this size is still enough to compare by. */
+    #trainer .et-snap { grid-template-columns: 58px repeat(3, minmax(0, 170px)) 78px; }
+  }
 </style>
 </head>
 <body>
-<div class="app">
+<div class="app wide">
 
   <header>
     <div class="header-left">

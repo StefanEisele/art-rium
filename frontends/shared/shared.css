@@ -440,6 +440,72 @@ header h1 { font-size: 19px; font-weight: 700; letter-spacing: -0.4px; flex: 1; 
 }
 .picker-cell.selected .order-badge { display: flex; }
 
+/* ── Desktop: use the width ─────────────────────────────────────────────────
+   Every tool is laid out for a phone first, and below 860px none of this
+   applies. From 860px up (the breakpoint the gallery set) a page opts in:
+
+     <div class="app wide">                ← widens, pins to the viewport height
+       <header>…</header>
+       <main class="split">                 ← two columns, each scrolls alone
+         <div class="split-side">…</div>    ← the controls: a fixed-width column
+         <div class="split-main">…</div>    ← what they make: the rest
+       </main>
+     </div>
+
+   Each half scrolls on its own, so a long library never pushes the Generate
+   button out of reach, and a long form never pushes the result off screen.
+   `--split-side` is the side column's width: a page that lays out its own
+   columns uses it too, and a page that wants a wider side sets it locally.
+
+   `.bare` marks a pane that exists only for this layout — a wrapper the phone
+   layout never had. Below the breakpoint it is no box at all, so its children
+   lay out exactly as they did before it was added. `.split-empty` is the
+   placeholder that says where the result will appear; it only exists on a
+   desktop, and each page hides it once there is something to show. */
+:root {
+  --split-side: clamp(380px, 32vw, 500px);
+  --wide-max: 1920px;     /* how wide a tool grows; the gallery uses it too */
+}
+.split-empty { display: none; }
+@media (max-width: 859.98px) {
+  .split-side.bare, .split-main.bare { display: contents; }
+}
+@media (min-width: 860px) {
+  /* padding-bottom: a phone's scroll-end room, which the panes keep on
+     their own here — on .app it would only be a dead strip under both. */
+  .app.wide { max-width: var(--wide-max); height: 100dvh; min-height: 0; padding-bottom: 0; }
+  .app.wide > header { padding-left: 24px; padding-right: 24px; }
+  .split {
+    flex: 1; min-height: 0; padding: 0; gap: 0;
+    display: grid;
+    grid-template-columns: var(--split-side) minmax(0, 1fr);
+    overflow: hidden;
+  }
+  .split-side, .split-main {
+    min-width: 0; min-height: 0;
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 20px 24px 40px;
+  }
+  .split-side { border-right: 1px solid var(--border); }
+  .split-empty {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 260px; padding: 28px;
+    border: 1.5px dashed var(--border-strong); border-radius: var(--radius);
+    color: var(--text-faint); font-size: 13px; line-height: 1.55; text-align: center;
+  }
+
+  /* The image pickers: three columns is right for a phone and gives
+     480px thumbnails on a monitor. (Scoped to the modal.) */
+  .picker-header { padding-left: 24px; padding-right: 24px; }
+  #picker-modal .picker-search { padding-left: 24px; padding-right: 24px; }
+  #picker-modal .picker-search input { max-width: 560px; }
+  #picker-modal #picker-grid {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 6px; padding: 6px 24px 24px;
+    align-content: start;
+  }
+}
+
 /* ── Embedding trainer (shared/embeddings.js) ────────────────────────────────
    Self-contained under .et: the two pages that mount it (the Embeddings tool
    and the Struktur tool's picker) define their own form primitives with

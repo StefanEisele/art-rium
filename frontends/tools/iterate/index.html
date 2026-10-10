@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e1013">
+<title>Iterieren</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="/shared/shared.css">
+<style>
+  /* The loop's design lives in prompts/iterate.md; this page starts a run,
+     watches it round by round, and keeps the record of earlier runs. */
+  .app { min-height: 100dvh; max-width: 720px; padding-bottom: env(safe-area-inset-bottom); }
+  header { justify-content: space-between; padding: 14px 20px; }
+  .header-left { display: flex; align-items: center; gap: 10px; }
+  main { flex: 1; overflow-y: auto; padding: 18px 20px 40px; -webkit-overflow-scrolling: touch; }
+  .split-side, .split-main { display: flex; flex-direction: column; gap: 14px; }
+  @media (max-width: 859.98px) { .split-main { margin-top: 14px; } }
+  .card + .card { margin-top: 0; }
+
+  .field { display: flex; flex-direction: column; gap: 7px; }
+  .field + .field { margin-top: 14px; }
+  .lbl { font-size: 11px; font-weight: 700; color: var(--text-dim); text-transform: uppercase; letter-spacing: .7px;
+         display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .lbl .val { color: var(--accent); font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; font-size: 13px; }
+  .hint { font-size: 12px; color: var(--text-dim); line-height: 1.5; }
+  textarea, input[type=number], input[type=search] {
+    width: 100%; background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+    color: var(--text); font: inherit; font-size: 15px; padding: 10px 12px; outline: none;
+  }
+  textarea { min-height: 96px; resize: vertical; line-height: 1.45; }
+  textarea:focus, input:focus { border-color: var(--accent-border); }
+  input[type=range] { width: 100%; accent-color: var(--accent); margin: 0; }
+
+  .seg { display: grid; grid-auto-columns: 1fr; grid-auto-flow: column; background: var(--surface2);
+         border-radius: 10px; padding: 3px; }
+  .seg button { background: transparent; border: none; color: var(--text-dim); font: inherit; font-size: 13px;
+                font-weight: 600; padding: 8px 6px; border-radius: 8px; cursor: pointer; line-height: 1.25; }
+  .seg button small { display: block; font-size: 10px; font-weight: 500; opacity: .75; }
+  .seg button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+
+  .src-card { display: flex; align-items: center; gap: 10px; min-height: 64px; padding: 8px; cursor: pointer;
+              background: var(--surface2); border: 1.5px dashed var(--border-strong); border-radius: var(--radius-sm);
+              color: var(--text-dim); font-size: 13px; }
+  .src-card.set { border-style: solid; }
+  .src-card img { width: 52px; height: 52px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
+  .src-card .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+                 -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--text); }
+
+  .lora-row { display: grid; grid-template-columns: 22px 1fr 92px 38px; gap: 8px; align-items: center; font-size: 13px; }
+  .lora-row + .lora-row { margin-top: 6px; }
+  .lora-row input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); }
+  .lora-row .n { color: var(--text-dim); }
+  .lora-row.on .n { color: var(--text); }
+  .lora-row .s { font-variant-numeric: tabular-nums; color: var(--text-dim); text-align: right; font-size: 12px; }
+  .lora-row:not(.on) input[type=range] { opacity: .35; }
+  .sizes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .sizes .chip-btn { justify-content: center; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim); }
+  .check input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+  #start-btn { width: 100%; padding: 14px; font-size: 16px; }
+  #cancel-btn { width: 100%; }
+
+  /* ── run view ── */
+  .run-head { display: flex; align-items: baseline; gap: 10px; }
+  .run-head h2 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .st { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); }
+  .st.running, .st.queued { color: var(--accent); }
+  .st.done { color: var(--green); }
+  .st.failed, .st.cancelled, .st.interrupted { color: var(--red); }
+  .msg { font-size: 13px; margin-top: 8px; }
+  .detail { font-size: 12px; color: var(--text-dim); margin-top: 3px; min-height: 1em; }
+  .err { font-size: 12px; color: var(--red); white-space: pre-wrap; margin-top: 8px; }
+  .meta { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; margin-top: 8px; }
+
+  .brief dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; font-size: 13px; margin-top: 8px; }
+  .brief dt { color: var(--text-dim); }
+  .brief dd { line-height: 1.45; }
+  .tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: var(--radius-pill);
+         background: var(--surface2); border: 1px solid var(--border); margin: 0 4px 4px 0; }
+  .tag.accent { border-color: var(--accent-border); color: var(--accent); }
+  .tag.warn { border-color: var(--yellow); color: var(--yellow); }
+
+  .best { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .best img { width: 100%; height: auto; max-height: 62vh; object-fit: contain; border-radius: var(--radius-sm);
+              background: var(--surface2); cursor: zoom-in; display: block; }
+  .scores { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+  .bar { display: grid; grid-template-columns: 92px 1fr 22px; gap: 8px; align-items: center; }
+  .bar .k { color: var(--text-dim); }
+  .bar .tr { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .bar .fi { height: 100%; background: var(--accent-2); }
+  .bar .v { text-align: right; font-variant-numeric: tabular-nums; }
+  .total { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .total small { font-size: 12px; color: var(--text-dim); font-weight: 500; margin-left: 6px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+
+  .rounds { display: flex; flex-direction: column; gap: 8px; }
+  .rnd { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 10px; padding: 8px;
+         background: var(--surface2); border: 1.5px solid var(--border); border-radius: var(--radius-sm); }
+  .rnd.best-r { border-color: var(--accent); }
+  .rnd .th { width: 64px; height: 64px; flex-shrink: 0; border-radius: 6px; object-fit: cover; background: var(--surface); cursor: zoom-in; }
+  .rnd .th.none { display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 20px; cursor: default; }
+  .rnd .top { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+  .rnd .top b { font-size: 13px; }
+  .rnd .ch { font-size: 13px; line-height: 1.4; margin-top: 4px; }
+  .rnd .sum { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+  .dec { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: var(--radius-pill); }
+  .dec.accepted, .dec.first { background: rgba(78,168,112,.15); color: var(--green); }
+  .dec.rejected { background: rgba(197,74,59,.12); color: var(--red); }
+  .dec.skipped { background: var(--surface3); color: var(--text-dim); }
+  .rnd details { margin-top: 6px; font-size: 12px; color: var(--text-dim); }
+  .rnd details summary { cursor: pointer; color: var(--accent); }
+  .rnd details p { margin-top: 6px; line-height: 1.45; }
+  .rnd details p b { color: var(--text); font-weight: 600; }
+  .rnd code { font-family: inherit; color: var(--text); }
+
+  .sweep { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; margin-top: 8px; }
+  .sweep figure { font-size: 11px; color: var(--text-dim); text-align: center; }
+  .sweep img { width: 100%; height: auto; object-fit: cover; border-radius: 6px; cursor: zoom-in; display: block; margin-bottom: 3px; }
+  .sweep figure.win img { outline: 2px solid var(--accent); }
+
+  .runs { display: flex; flex-direction: column; gap: 6px; }
+  .run-item { display: grid; grid-template-columns: 40px 1fr auto; gap: 10px; align-items: center; cursor: pointer;
+              padding: 6px; border-radius: 8px; font-size: 12px; }
+  .run-item:hover { background: var(--surface2); }
+  .run-item img, .run-item .ph { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; background: var(--surface2); }
+  .run-item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 13px; }
+  .run-item .x { color: var(--text-faint); background: none; border: none; font-size: 16px; cursor: pointer; padding: 4px; }
+
+  /* A round's picture deleted in the gallery: keep its box, say so. */
+  img.gone { background: var(--surface2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='20'%3E%3Ctext x='60' y='14' fill='%2356565d' font-family='sans-serif' font-size='11' text-anchor='middle'%3Egel%C3%B6scht%3C/text%3E%3C/svg%3E") center no-repeat;
+             color: transparent; cursor: default; }
+  #viewer { position: fixed; inset: 0; background: rgba(0,0,0,.92); z-index: 500; display: none;
+            align-items: center; justify-content: center; cursor: zoom-out; }
+  #viewer.show { display: flex; }
+  #viewer img { max-width: 96vw; max-height: 94vh; object-fit: contain; }
+
+  #picker-modal .picker-search { padding: 0 16px 10px; }
+
+  @media (min-width: 860px) {
+    main { padding: 20px 24px; }
+    .split-side, .split-main { padding-bottom: 32px; }
+    .best { grid-template-columns: minmax(0, 1.4fr) minmax(220px, 1fr); align-items: start; }
+    .rounds { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); align-items: start; }
+  }
+</style>
+</head>
+<body>
+<div class="app wide">
+
+  <header>
+    <div class="header-left">
+      <a class="back-btn" href="/" title="Dashboard">‹</a>
+      <h1>Iterieren</h1>
+    </div>
+    <button class="chip-btn" id="reset-btn" onclick="resetForm()" title="Formular zurücksetzen">Reset</button>
+  </header>
+
+  <main class="split">
+    <div class="split-side">
+
+      <section class="card">
+        <div class="field">
+          <div class="lbl">Idee</div>
+          <textarea id="idea" maxlength="1000"
+                    placeholder="z. B. Ein Leuchtturmwärter, dessen Leuchtturm aus übereinander gestapelten Menschen besteht"></textarea>
+          <div class="hint">Deutsch oder Englisch. Runde 0 friert daraus Subjekt, Twist und Muss-Elemente ein —
+            jede Runde wird daran gemessen, nicht am vorigen Prompt.</div>
+        </div>
+
+        <div class="field">
+          <div class="lbl">Startbild <span class="val" id="src-clear" style="display:none;cursor:pointer" onclick="setSource(null)">entfernen</span></div>
+          <div class="src-card" id="src-card" onclick="openPicker()">+ optional: aus der Galerie</div>
+          <div class="hint">Mit Startbild entwickelt der Lauf dessen Prompt weiter, mit dessen Seed und LoRAs.</div>
+        </div>
+
+        <div class="field">
+          <div class="lbl">Runden <span class="val" id="rounds-val">8</span></div>
+          <input type="range" id="rounds" min="1" max="30" value="8" oninput="onRounds()">
+          <div class="hint" id="eta"></div>
+        </div>
+
+        <div class="field">
+          <div class="lbl">Prompt-Art</div>
+          <div class="seg" id="mode-seg">
+            <button type="button" data-v="formula" class="active" onclick="setMode('formula')">Formel<small>LoRA-Stack trägt den Stil, 8–40 Wörter</small></button>
+            <button type="button" data-v="prose" onclick="setMode('prose')">Prosa<small>Materialphysik, 120–220 Wörter</small></button>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="lbl">Kritiker</div>
+          <div class="seg" id="critic-seg"></div>
+        </div>
+      </section>
+
+      <details class="fold" id="adv">
+        <summary><span class="fold-title">Erweitert</span><span class="fold-value" id="adv-summary"></span></summary>
+        <div class="fold-body">
+          <div class="field">
+            <div class="lbl">LoRA-Stack <span class="val" style="cursor:pointer" onclick="useSignatureStack()">Signatur</span></div>
+            <div id="lora-list"></div>
+          </div>
+          <div class="field">
+            <div class="lbl">Größe</div>
+            <div class="sizes" id="sizes"></div>
+          </div>
+          <div class="row2 field">
+            <div class="field" style="margin:0">
+              <div class="lbl">Seed</div>
+              <input type="number" id="seed" value="-1" min="-1" max="4294967295">
+            </div>
+            <div class="field" style="margin:0">
+              <div class="lbl">Gegenprobe</div>
+              <input type="number" id="sweep" value="3" min="0" max="6">
+            </div>
+          </div>
+          <div class="hint">Seed −1: der des Startbilds, sonst zufällig — fest für alle Runden.
+            Gegenprobe: so viele weitere Seeds mit dem besten Prompt (0 = aus).</div>
+          <div class="field">
+            <div class="lbl">Detailgrad <span class="val" id="detail-val">0.00</span></div>
+            <input type="range" id="detail" min="-100" max="250" step="5" value="0" oninput="onDetail()">
+          </div>
+          <div class="field">
+            <label class="check"><input type="checkbox" id="early-stop"> Früh aufhören, wenn das Polieren zweimal nichts bringt</label>
+          </div>
+        </div>
+      </details>
+
+      <button class="btn primary" id="start-btn" onclick="startRun()">Lauf starten</button>
+      <button class="btn danger" id="cancel-btn" style="display:none" onclick="cancelRun()">Abbrechen</button>
+
+      <details class="fold" id="runs-fold" open>
+        <summary><span class="fold-title">Frühere Läufe</span><span class="fold-value" id="runs-count"></span></summary>
+        <div class="fold-body"><div class="runs" id="runs"></div></div>
+      </details>
+    </div>
+
+    <div class="split-main">
+      <div class="split-empty" id="empty">Der Lauf erscheint hier — Runde für Runde.</div>
+      <div id="run-view" style="display:none; flex-direction:column; gap:14px"></div>
+    </div>
+  </main>
+</div>
+
+<div id="picker-modal">
+  <div class="picker-header">
+    <h2>Startbild wählen</h2>
+    <button class="picker-done-btn" onclick="closePicker()">Schließen</button>
+  </div>
+  <div class="picker-search"><input type="search" id="picker-search" placeholder="Prompt durchsuchen…" autocomplete="off"></div>
+  <div id="picker-grid"></div>
+</div>
+
+<div id="viewer" onclick="this.classList.remove('show')"><img id="viewer-img" alt=""></div>
+<div id="toast"></div>
+
+<script src="/shared/shared.js"></script>
+<script>
+const apiKey = ArtRium.getApiKey();
+const api = ArtRium.makeApiFetch(() => apiKey);
+const withAuth = (u) => ArtRium.withAuth(u, apiKey);
+const esc = ArtRium.escHtml;
+const $ = (id) => document.getElementById(id);
+
+const SIZES = [[1080, 1920, '9:16'], [1920, 1080, '16:9'], [1024, 1024, '1:1'],
+               [768, 1024, '3:4'], [1024, 768, '4:3'], [2048, 2048, '1:1 HD']];
+// Seconds per round, measured on this machine (render + GPU hand-over +
+// critic + editor); the duel on close calls comes on top.
+const SECS_PER_ROUND = { gemma: 180, qwen: 110 };
+const CRIT = ['intent', 'surreal', 'signature', 'composition', 'craft'];
+const CRIT_DE = { intent: 'Idee', surreal: 'Surreal', signature: 'Signatur', composition: 'Komposition', craft: 'Handwerk' };
+const OP_DE = { SCALE: 'Maßstab', REPEAT: 'Wiederholen', DOUBLE: 'Doppeln', MATERIAL: 'Material', GRAVITY: 'Schwerkraft',
+  RELOCATE: 'Ort', MERGE: 'Verschmelzen', LIGHT: 'Licht', CAMERA: 'Kamera', CAPTURE: 'Aufnahme', REDUCE: 'Reduzieren', CLARIFY: 'Klären' };
+const DEC_DE = { first: 'Start', accepted: 'übernommen', rejected: 'verworfen', skipped: 'übersprungen' };
+const ST_DE = { queued: 'wartet', running: 'läuft', done: 'fertig', failed: 'fehlgeschlagen',
+  cancelled: 'abgebrochen', interrupted: 'unterbrochen' };
+const PHASE_DE = { brief: 'Brief', explore: 'Erkunden', refine: 'Verfeinern', polish: 'Polieren' };
+
+const state = {
+  options: null, loras: [], stack: new Map(), mode: 'formula', critic: null,
+  size: [1080, 1920], source: null, run: null, timer: null,
+  picker: { images: [], page: 0, done: false, loading: false, search: '' },
+};
+
+// ── form ─────────────────────────────────────────────────────────────────
+function onRounds() {
+  $('rounds-val').textContent = $('rounds').value;
+  const n = +$('rounds').value;
+  const per = (state.critic || '').startsWith('qwen') ? SECS_PER_ROUND.qwen : SECS_PER_ROUND.gemma;
+  const sweep = Math.max(0, +$('sweep').value || 0);
+  const min = Math.round((n + sweep * 0.7) * per / 60);
+  $('eta').textContent = `≈ ${min < 60 ? min + ' min' : (min / 60).toFixed(1) + ' h'} · läuft im Hintergrund, die Seite darf zu.`;
+}
+function onDetail() { $('detail-val').textContent = (+$('detail').value / 100).toFixed(2); updateSummary(); }
+
+function setMode(m) {
+  state.mode = m;
+  document.querySelectorAll('#mode-seg button').forEach(b => b.classList.toggle('active', b.dataset.v === m));
+  // The two modes have different natural stacks; a picked source keeps its own.
+  if (!state.source) {
+    state.stack = new Map(m === 'formula' ? state.options.signature_loras.map(l => [l.name, l.strength]) : []);
+    renderLoras();
+  }
+  updateSummary();
+}
+
+function renderCritics() {
+  const seg = $('critic-seg');
+  seg.innerHTML = state.options.critics.map(c =>
+    `<button type="button" data-v="${esc(c.model)}">${esc(c.label)}<small>${esc(c.note)}</small></button>`).join('');
+  seg.querySelectorAll('button').forEach(b => b.onclick = () => setCritic(b.dataset.v));
+  setCritic(state.critic || state.options.default_critic);
+}
+function setCritic(m) {
+  state.critic = m;
+  document.querySelectorAll('#critic-seg button').forEach(b => b.classList.toggle('active', b.dataset.v === m));
+  onRounds();
+}
+
+function renderLoras() {
+  const box = $('lora-list');
+  box.innerHTML = '';
+  for (const l of state.loras) {
+    const on = state.stack.has(l.filename);
+    const val = on ? state.stack.get(l.filename) : 0.35;
+    const row = document.createElement('div');
+    row.className = 'lora-row' + (on ? ' on' : '');
+    row.innerHTML = `<input type="checkbox" ${on ? 'checked' : ''}><span class="n">${esc(l.label)}</span>
+      <input type="range" min="0" max="100" step="5" value="${Math.round(val * 100)}"><span class="s">${val.toFixed(2)}</span>`;
+    const [cb, , rng, s] = row.children;
+    cb.onchange = () => { cb.checked ? state.stack.set(l.filename, +rng.value / 100) : state.stack.delete(l.filename);
+                          row.classList.toggle('on', cb.checked); updateSummary(); };
+    rng.oninput = () => { s.textContent = (+rng.value / 100).toFixed(2);
+                          if (state.stack.has(l.filename)) state.stack.set(l.filename, +rng.value / 100); updateSummary(); };
+    box.appendChild(row);
+  }
+}
+function useSignatureStack() {
+  state.stack = new Map(state.options.signature_loras.map(l => [l.name, l.strength]));
+  renderLoras(); updateSummary();
+}
+
+function renderSizes() {
+  $('sizes').innerHTML = SIZES.map(([w, h, l]) =>
+    `<button type="button" class="chip-btn ${w === state.size[0] && h === state.size[1] ? 'on' : ''}" data-w="${w}" data-h="${h}">${l}</button>`).join('');
+  $('sizes').querySelectorAll('button').forEach(b => b.onclick = () => {
+    state.size = [+b.dataset.w, +b.dataset.h]; renderSizes(); updateSummary();
+  });
+}
+
+function updateSummary() {
+  const label = (f) => (state.loras.find(l => l.filename === f) || {}).label || f;
+  const st = [...state.stack].map(([f, s]) => `${label(f)} ${s.toFixed(2)}`).join(' · ') || 'ohne LoRA';
+  $('adv-summary').textContent = `${state.size[0]}×${state.size[1]} · ${st}`;
+}
+
+function setSource(img) {
+  state.source = img;
+  const card = $('src-card');
+  $('src-clear').style.display = img ? '' : 'none';
+  if (!img) {
+    card.className = 'src-card'; card.textContent = '+ optional: aus der Galerie';
+    setMode(state.mode);
+    return;
+  }
+  card.className = 'src-card set';
+  card.innerHTML = `<img src="${withAuth(img.thumb_url)}" alt=""><span class="t">${esc(img.title || img.prompt || '')}</span>`;
+  if (img.loras && img.loras.length) {
+    state.stack = new Map(img.loras.map(l => [l.name, l.strength]));
+    renderLoras();
+  }
+  if (img.width && img.height) { state.size = [img.width, img.height]; renderSizes(); }
+  updateSummary();
+}
+
+// ── picker ───────────────────────────────────────────────────────────────
+function openPicker() { $('picker-modal').classList.add('show'); if (!state.picker.images.length) loadPicker(true); }
+function closePicker() { $('picker-modal').classList.remove('show'); }
+async function loadPicker(reset) {
+  const p = state.picker;
+  if (p.loading || (!reset && p.done)) return;
+  if (reset) { Object.assign(p, { images: [], page: 0, done: false }); $('picker-grid').innerHTML = ''; }
+  p.loading = true;
+  try {
+    const q = p.search ? `&search=${encodeURIComponent(p.search)}` : '';
+    const imgs = await (await api(`/api/images?limit=60&offset=${p.page * 60}${q}`)).json();
+    if (imgs.length < 60) p.done = true;
+    p.page++; p.images.push(...imgs);
+    for (const img of imgs) {
+      const cell = document.createElement('div');
+      cell.className = 'picker-cell';
+      cell.innerHTML = `<img src="${withAuth(img.thumb_url)}" alt="">`;
+      cell.onclick = () => { setSource(img); closePicker(); };
+      $('picker-grid').appendChild(cell);
+    }
+  } catch (e) { ArtRium.toast('Bilder konnten nicht geladen werden.', true); }
+  finally { p.loading = false; }
+}
+let pickerDebounce;
+$('picker-search').addEventListener('input', (e) => {
+  clearTimeout(pickerDebounce);
+  pickerDebounce = setTimeout(() => { state.picker.search = e.target.value.trim(); loadPicker(true); }, 300);
+});
+$('picker-grid').addEventListener('scroll', (e) => {
+  const g = e.target;
+  if (g.scrollTop + g.clientHeight > g.scrollHeight - 300) loadPicker(false);
+});
+
+// ── run ──────────────────────────────────────────────────────────────────
+async function startRun() {
+  const idea = $('idea').value.trim();
+  if (!idea && !state.source) { ArtRium.toast('Eine Idee oder ein Startbild, bitte.'); return; }
+  const body = {
+    idea, mode: state.mode, rounds: +$('rounds').value, sweep: +$('sweep').value,
+    loras: [...state.stack].map(([name, strength]) => ({ name, strength })),
+    width: state.size[0], height: state.size[1], seed: +$('seed').value,
+    detail: +$('detail').value / 100, early_stop: $('early-stop').checked, critic_model: state.critic,
+  };
+  if (state.source) body.source_image_id = state.source.id;
+  $('start-btn').disabled = true;
+  try {
+    const r = await api('/api/iterate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                          body: JSON.stringify(body) });
+    showRun(await r.json());
+    loadRuns();
+  } catch (e) {
+    ArtRium.toast(e.message || 'Start fehlgeschlagen', true);
+  } finally { $('start-btn').disabled = false; }
+}
+
+async function cancelRun() {
+  if (!state.run) return;
+  $('cancel-btn').disabled = true;
+  try { showRun(await (await api(`/api/iterate/${state.run.id}/cancel`, { method: 'POST' })).json()); }
+  catch (e) { ArtRium.toast(e.message, true); }
+  finally { $('cancel-btn').disabled = false; }
+}
+
+function isLive(run) { return run && (run.status === 'running' || run.status === 'queued'); }
+
+function showRun(run) {
+  state.run = run;
+  try { localStorage.setItem('iterate_last_run', run.id); } catch (_) {}
+  renderRun(run);
+  clearTimeout(state.timer);
+  if (isLive(run)) state.timer = setTimeout(poll, 2500);
+  else loadRuns();
+}
+
+async function openRun(id, quiet = false) {
+  try { showRun(await (await api(`/api/iterate/${id}`)).json()); }
+  catch (e) { if (!quiet) ArtRium.toast(e.message, true); }
+}
+
+async function poll() {
+  if (!state.run) return;
+  try {
+    const run = await (await api(`/api/iterate/${state.run.id}`)).json();
+    if (state.run && run.id === state.run.id) showRun(run);
+  } catch (_) { state.timer = setTimeout(poll, 5000); }
+}
+
+// The stored PNG is the master and measured in megabytes; what is shown is the
+// cached AVIF preview (~30x smaller, immutable URL), like the gallery does.
+// The original stays one click away ("Original").
+const full = (u) => u.replace(/\/thumb$/, '');
+const preview = (u, w) => `${full(u)}/preview?w=${w}`;
+// width/height on every <img> reserve its box before a byte has arrived —
+// without them a picture is 0 px tall until it loads and the page jumps.
+const img = (u, cls = '', w = 1024, size = state.run && [state.run.params.width, state.run.params.height]) =>
+  `<img class="${cls}" src="${withAuth(w ? preview(u, w) : u)}" alt="" loading="lazy" decoding="async"
+     ${size ? `width="${size[0]}" height="${size[1]}"` : ''} onerror="this.classList.add('gone'); this.onclick = null"
+     onclick="view('${esc(full(u))}', event)">`;
+function view(u, ev) {
+  if (ev) ev.stopPropagation();
+  $('viewer-img').src = withAuth(preview(u, 1600));
+  $('viewer').classList.add('show');
+}
+
+function scoreBars(scores) {
+  return `<div class="scores">${CRIT.map(k => `<div class="bar"><span class="k">${CRIT_DE[k]}</span>
+    <span class="tr"><span class="fi" style="width:${scores[k] * 10}%; display:block"></span></span>
+    <span class="v">${scores[k]}</span></div>`).join('')}</div>`;
+}
+
+// What changes the layout. Everything else a poll brings — the bar, the
+// stage message, ComfyUI's step counter — is patched in place, so the
+// pictures are not torn down and re-requested every 2.5 s (which on iPhone
+// Safari read as the page jumping until the run was over).
+function runSignature(run) {
+  return JSON.stringify([run.id, run.status, run.error, run.brief, run.best_round, run.final, run.series_id,
+    (run.rounds || []).map(r => [r.round, r.decision, r.image_id]), (run.sweep || []).map(x => x.image_id),
+    run.sweep_duel && run.sweep_duel.outcome, run.seeds_passed]);
+}
+
+function renderRun(run) {
+  const live = isLive(run);
+  const sig = runSignature(run);
+  if (sig === state.lastSig && $('rv-msg')) {
+    if ($('rv-bar')) $('rv-bar').style.width = `${run.pct || 0}%`;
+    $('rv-msg').textContent = run.message || '';
+    if ($('rv-detail')) $('rv-detail').textContent = run.detail || '';
+    return;
+  }
+  state.lastSig = sig;
+  $('empty').style.display = 'none';
+  $('cancel-btn').style.display = live ? '' : 'none';
+  $('start-btn').style.display = live ? 'none' : '';
+  const v = $('run-view');
+  v.style.display = 'flex';
+  const p = run.params, b = run.brief;
+  const best = (run.rounds || []).find(r => r.round === run.best_round);
+  const final = run.final;
+  const parts = [];
+
+  parts.push(`<section class="card">
+    <div class="run-head"><h2>${esc(run.title || 'Lauf')}</h2><span class="st ${run.status}">${ST_DE[run.status] || run.status}</span></div>
+    ${live || run.status === 'failed' ? `<div class="prog-track" style="margin-top:10px"><div id="rv-bar" style="height:100%;width:${run.pct || 0}%;background:var(--accent);transition:width .4s"></div></div>` : ''}
+    <div class="msg" id="rv-msg">${esc(run.message || '')}</div>
+    ${live ? `<div class="detail" id="rv-detail">${esc(run.detail || '')}</div>` : ''}
+    ${run.error ? `<div class="err">${esc(run.error)}</div>` : ''}
+    <div class="meta">${p.rounds} Runden · ${p.mode === 'formula' ? 'Formel' : 'Prosa'} · Seed ${p.seed} · ${p.width}×${p.height}
+      · Kritiker ${esc(run.models.critic.split('/').pop())}${run.stopped_early_at ? ` · früh beendet nach Runde ${run.stopped_early_at}` : ''}</div>
+  </section>`);
+
+  if (b) {
+    parts.push(`<section class="card brief"><h2>Brief</h2><dl>
+      <dt>Subjekt</dt><dd>${esc(b.subject)}</dd>
+      <dt>Twist</dt><dd>${esc(b.twist)} ${b.twist_source === 'proposed' ? '<span class="tag accent">vorgeschlagen</span>' : ''}</dd>
+      <dt>Muss</dt><dd>${b.must_keep.length ? b.must_keep.map(m => `<span class="tag">${esc(m)}</span>`).join('') : '—'}</dd>
+      <dt>Stimmung</dt><dd>${esc(b.mood)}</dd>
+    </dl>${run.brief_violation ? `<div class="hint" style="margin-top:8px">Erster Prompt verletzt eine Regel (${esc(run.brief_violation.rule)}) — die Regie korrigiert das ab Runde 2.</div>` : ''}</section>`);
+  }
+
+  const shown = final && final.source === 'sweep' ? final : best;
+  if (shown) {
+    const rep = shown === best ? best.report : (run.sweep.find(s => s.image_id === final.image_id) || {}).report;
+    parts.push(`<section class="card"><div class="best">
+      <div>${img(shown.url, '', 1024)}</div>
+      <div>
+        <div class="lbl">${final ? 'Ergebnis' : 'Bestes bisher'}</div>
+        <div class="total">${(shown.total ?? 0).toFixed(2)}<small>${final && final.source === 'sweep'
+          ? `Gegenprobe · Seed ${final.seed}` : `Runde ${best.round}`}</small></div>
+        ${rep ? scoreBars(rep.scores) : ''}
+        ${run.seeds_passed != null ? `<div class="meta">Gegenprobe: ${run.seeds_passed} von ${run.seeds_tested} Seeds bestehen die Schwellen
+          — ${run.seeds_passed >= Math.ceil(run.seeds_tested * 0.75) ? 'der Prompt trägt' : 'der Prompt hängt am Seed'}</div>` : ''}
+        <div class="actions">
+          <a class="chip-btn" href="${withAuth(shown.url)}" target="_blank">Original</a>
+          <a class="chip-btn" href="/tools/z-image/?from=${encodeURIComponent(shown.image_id)}">Weiterarbeiten</a>
+          ${run.series_id ? `<a class="chip-btn" href="/tools/gallery/?series=${encodeURIComponent(run.series_id)}">Serie in der Galerie</a>` : ''}
+        </div>
+        ${best ? `<details style="margin-top:10px"><summary class="hint" style="cursor:pointer">Prompt</summary>
+          <p class="hint" style="margin-top:6px;color:var(--text)">${esc(best.prompt)}</p></details>` : ''}
+      </div></div></section>`);
+  }
+
+  if (run.sweep && run.sweep.length) {
+    const win = final && final.source === 'sweep' ? final.image_id : null;
+    parts.push(`<section class="card"><h2>Gegenprobe</h2>
+      <div class="hint">Der beste Prompt mit weiteren Seeds. Hält er, ist es der Prompt — nicht ein glücklicher Seed.</div>
+      <div class="sweep">${run.sweep.map(s => `<figure class="${s.image_id === win ? 'win' : ''}">${img(s.thumb_url, '', 0)}
+        ${s.total.toFixed(2)}${s.gate ? ' · ✗' : ''}</figure>`).join('')}</div>
+      ${run.sweep_duel ? `<div class="meta">Duell gegen Runde ${best ? best.round : '?'}: ${
+        { candidate: 'Gegenprobe gewinnt beide Reihenfolgen', best: 'Runde bleibt vorn', split: 'uneinig — die Runde bleibt' }[run.sweep_duel.outcome]}</div>` : ''}
+    </section>`);
+  }
+
+  const rounds = [...(run.rounds || [])].reverse();
+  if (rounds.length) {
+    parts.push(`<section class="card"><h2>Runden</h2><div class="rounds" style="margin-top:10px">${rounds.map(r => roundCard(r, run)).join('')}</div></section>`);
+  }
+  v.innerHTML = parts.join('');
+}
+
+function roundCard(r, run) {
+  const rep = r.report;
+  const t = r.timings || {};
+  const secs = ['editor', 'render', 'critic', 'duel'].filter(k => t[k] != null).map(k => `${k} ${Math.round(t[k])}s`).join(' · ');
+  const duel = r.duel ? `<p><b>Duell</b> — Kandidat als A: ${esc(r.duel.candidate_first.winner)} („${esc(r.duel.candidate_first.reason)}“)
+     · als B: ${esc(r.duel.candidate_second.winner)} („${esc(r.duel.candidate_second.reason)}“)</p>` : '';
+  return `<div class="rnd ${r.round === run.best_round ? 'best-r' : ''}">
+    ${r.thumb_url ? img(r.thumb_url, 'th', 0) : '<div class="th none">–</div>'}
+    <div style="min-width:0">
+      <div class="top"><b>${r.round}</b><span class="hint">${PHASE_DE[r.phase] || r.phase}</span>
+        ${r.operator ? `<span class="tag accent">${OP_DE[r.operator] || r.operator}</span>` : ''}
+        ${r.plateau ? '<span class="tag warn">Plateau</span>' : ''}
+        <span class="dec ${r.decision}">${DEC_DE[r.decision] || r.decision}</span>
+        ${r.total != null ? `<span style="margin-left:auto;font-variant-numeric:tabular-nums">${r.total.toFixed(2)}</span>` : ''}</div>
+      <div class="ch">${esc(r.change || '')}</div>
+      ${rep ? `<div class="sum">${CRIT.map(k => `${CRIT_DE[k]} ${rep.scores[k]}`).join(' · ')}</div>` : ''}
+      <details><summary>Details</summary>
+        ${r.reason ? `<p><b>Entscheidung</b> — ${esc(r.reason)}</p>` : ''}
+        ${r.diagnosis ? `<p><b>Diagnose</b> — ${esc(r.diagnosis)}</p>` : ''}
+        ${r.expect ? `<p><b>Erwartet</b> — ${esc(r.expect)}</p>` : ''}
+        ${rep ? `<p><b>Gesehen</b> — ${esc(rep.observed)}</p>
+          <p><b>Muss</b> — ${rep.must_keep.map(m => `${esc(m.item)}: ${m.status}`).join(' · ') || '—'}</p>
+          <p><b>Mängel</b> — ${rep.defects.map(esc).join(' / ') || '—'}</p>
+          <p><b>Stärken</b> — ${rep.keep.map(esc).join(' / ') || '—'}</p>` : ''}
+        ${duel}
+        ${r.core ? `<p><b>Kern</b> — <code>${esc(r.core)}</code></p>` : ''}
+        ${secs ? `<p>${secs}</p>` : ''}
+      </details>
+    </div></div>`;
+}
+
+// ── earlier runs ─────────────────────────────────────────────────────────
+async function loadRuns() {
+  try {
+    const { runs } = await (await api('/api/iterate?limit=30')).json();
+    $('runs-count').textContent = runs.length ? String(runs.length) : '';
+    $('runs').innerHTML = runs.length ? runs.map(r => `<div class="run-item" data-id="${r.id}">
+        ${r.thumb_url ? `<img src="${withAuth(r.thumb_url)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'), {className: 'ph'}))">` : '<span class="ph"></span>'}
+        <div style="min-width:0"><div class="t">${esc(r.idea || r.title || 'Lauf')}</div>
+          <div class="hint">${new Date(r.created_at).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' })}
+            · ${r.done_rounds}/${r.rounds} · <span class="st ${r.status}">${ST_DE[r.status] || r.status}</span>
+            ${r.best_total != null ? ' · ' + r.best_total.toFixed(2) : ''}</div></div>
+        <button class="x" title="Eintrag entfernen (Bilder bleiben)" data-del="${r.id}">×</button></div>`).join('')
+      : '<div class="hint">Noch keine.</div>';
+    $('runs').querySelectorAll('.run-item').forEach(el => el.onclick = (e) => {
+      if (e.target.dataset.del) return deleteRun(e.target.dataset.del);
+      openRun(el.dataset.id);
+    });
+  } catch (_) {}
+}
+async function deleteRun(id) {
+  if (!confirm('Eintrag entfernen? Bilder und Serie bleiben in der Galerie.')) return;
+  try { await api(`/api/iterate/${id}`, { method: 'DELETE' }); } catch (e) { ArtRium.toast(e.message, true); }
+  if (state.run && state.run.id === id) { state.run = null; $('run-view').style.display = 'none'; $('empty').style.display = ''; }
+  loadRuns();
+}
+
+// ── session ──────────────────────────────────────────────────────────────
+const session = ArtRium.session('iterate', {
+  fields: ['idea', 'rounds', 'seed', 'sweep', 'detail', 'early-stop'],
+  snapshot: () => ({ mode: state.mode, critic: state.critic, size: state.size, stack: state.stack }),
+  restore: (s) => {
+    if (s.mode) state.mode = s.mode;
+    if (s.critic) state.critic = s.critic;
+    if (s.size) state.size = s.size;
+    if (s.stack instanceof Map) state.stack = s.stack;
+  },
+});
+function resetForm() { session.reset(); }
+
+async function init() {
+  try {
+    [state.options, state.loras] = await Promise.all([
+      (await api('/api/iterate/options')).json(),
+      (await api('/api/loras?model=zimage')).json().then(d => d.loras || d),
+    ]);
+  } catch (e) { ArtRium.toast('Optionen nicht ladbar: ' + e.message, true); return; }
+  $('rounds').max = state.options.rounds.max;
+  state.stack = new Map(state.options.signature_loras.map(l => [l.name, l.strength]));
+  session.load();
+  if (state.critic && !state.options.critics.some(c => c.model === state.critic)) state.critic = null;
+  document.querySelectorAll('#mode-seg button').forEach(b => b.classList.toggle('active', b.dataset.v === state.mode));
+  renderCritics(); renderLoras(); renderSizes(); onRounds(); onDetail(); updateSummary();
+  session.start();
+
+  // ?from=<image id> — the gallery's "Iterieren" handoff.
+  const from = new URLSearchParams(location.search).get('from');
+  if (from) {
+    try { setSource(await (await api(`/api/images/${encodeURIComponent(from)}`)).json()); } catch (_) {}
+    history.replaceState(null, '', location.pathname);
+  }
+
+  const last = state.options.active_run || (() => { try { return localStorage.getItem('iterate_last_run'); } catch (_) { return null; } })();
+  if (last) openRun(last, true);
+  loadRuns();
+}
+
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { $('viewer').classList.remove('show'); closePicker(); } });
+init();
+ArtRium.registerSw();
+</script>
+</body>
+</html>

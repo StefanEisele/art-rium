@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth, ws_auth_ok
-from core.comfy import ARTIVISION_WORKFLOW_NAME, ERNIE_WORKFLOW_NAME
+from core.comfy import ARTIVISION_WORKFLOW_NAME
 from core.comfy import WORKFLOW_NAME as ZIMAGE_WORKFLOW_NAME
 from core.comfy import ZIMAGE_VARIANT_WORKFLOW_NAME, post_prompt
 from core.config import settings
@@ -33,13 +33,8 @@ from services.image import preview as image_preview
 from services.comfy import zimage as zimage_service
 from services.comfy.artivision import build_artivision_workflow
 from services.comfy.client import upload_image
-from services.comfy.ernie import build_ernie_workflow
 from services.comfy.zimage import build_zimage_variant_workflow, build_zimage_workflow
 from services.image.rendition import original_path
-
-# Models with no LoRA in the library yet — /api/loras returns an empty
-# catalogue and /api/generate skips LoRA resolution entirely for these.
-_MODELS_WITHOUT_LORAS = {"ernie"}
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -51,7 +46,7 @@ class LoraSelection(BaseModel):
 
 
 class GenerateRequest(BaseModel):
-    model: str = "zimage"  # "zimage" | "sdxl" | "ernie" — selects the generator backend + workflow
+    model: str = "zimage"  # "zimage" | "sdxl" — selects the generator backend + workflow
     prompt: str = ""
     negative_prompt: str = ""  # SDXL only; ignored by Z-Image Turbo (its ConditioningZeroOut ignores negatives)
     prompts: list[str] | None = None  # when set, overrides prompt + batch_count: one submission per item
@@ -62,7 +57,7 @@ class GenerateRequest(BaseModel):
     client_id: str
     batch_count: int = 1
     # None/omitted = that model's single default LoRA (resolved server-side).
-    # Z-Image chains every entry; SDXL/Ernie only ever use the first one.
+    # Z-Image chains every entry; SDXL only ever uses the first one.
     loras: list[LoraSelection] | None = None
     # ── Variant mode (Z-Image Turbo only) ───────────────────────────────────
     # When set, the batch starts from this image's latent instead of from
@@ -79,9 +74,7 @@ class GenerateRequest(BaseModel):
 class EnhancePromptsRequest(BaseModel):
     idea: str
     n: int = 4
-    model: str = "zimage"  # "zimage" | "sdxl" | "ernie" — selects style-block phrasing + response shape.
-                           # "ernie" deliberately reuses the "zimage" enhancer verbatim (same prose style,
-                           # no negative prompt) — already proven to work well for Ernie Image Turbo too.
+    model: str = "zimage"  # "zimage" | "sdxl" — selects style-block phrasing + response shape.
 
 
 def _lora_registry(model: str) -> tuple[set[str], str]:
@@ -95,8 +88,6 @@ async def list_loras(model: str = "zimage"):
     """Return the LoRA catalogue for the given generator model (SSOT for the frontend)."""
     if model == "sdxl":
         return {"loras": SDXL_LORAS, "default": SDXL_DEFAULT_LORA}
-    if model in _MODELS_WITHOUT_LORAS:
-        return {"loras": [], "default": ""}
     return {"loras": LORAS, "default": DEFAULT_LORA}
 
 
@@ -155,10 +146,9 @@ async def generate(
     db: AsyncSession = Depends(get_db),
 ):
     is_sdxl = req.model == "sdxl"
-    is_ernie = req.model == "ernie"
     is_variant = req.source_image_id is not None
 
-    # The variant graph is Z-Image Turbo's own; SDXL and Ernie have no
+    # The variant graph is Z-Image Turbo's own; SDXL has no
     # img2img path here, and silently ignoring the source image would produce
     # a plain generation the user did not ask for.
     if is_variant and req.model != "zimage":
@@ -185,15 +175,12 @@ async def generate(
         prompt_list = [req.prompt] * batch_count
         negative_list = [req.negative_prompt] * batch_count
 
-    if req.model in _MODELS_WITHOUT_LORAS:
-        loras: list[dict] = []
-    else:
-        allowed_loras, default_lora = _lora_registry(req.model)
-        selections = req.loras if req.loras else [LoraSelection(name=default_lora)]
-        for sel in selections:
-            if sel.name not in allowed_loras:
-                raise HTTPException(status_code=400, detail=f"Unknown LoRA: {sel.name}")
-        loras = [{"name": sel.name, "strength": sel.strength} for sel in selections]
+    allowed_loras, default_lora = _lora_registry(req.model)
+    selections = req.loras if req.loras else [LoraSelection(name=default_lora)]
+    for sel in selections:
+        if sel.name not in allowed_loras:
+            raise HTTPException(status_code=400, detail=f"Unknown LoRA: {sel.name}")
+    loras = [{"name": sel.name, "strength": sel.strength} for sel in selections]
 
     # Variant mode: hand the source to ComfyUI once, then every prompt in the
     # batch encodes the same uploaded file. The size the images come back at
@@ -202,7 +189,7 @@ async def generate(
     source_name = None
     out_width, out_height = req.width, req.height
     denoise, prompt_changed = zimage_service.DENOISE_DEFAULT, False
-    # Z-Image only — the SDXL and Ernie graphs have no Detail Daemon in them.
+    # Z-Image only — the SDXL graph has no Detail Daemon in it.
     detail = zimage_service.clamp_detail(req.detail)
     if is_variant:
         src, out_width, out_height, source_prompt = await _resolve_variant_source(
@@ -239,9 +226,6 @@ async def generate(
                 loras[0]["name"], loras[0]["strength"],
             )
             workflow_name = ARTIVISION_WORKFLOW_NAME
-        elif is_ernie:
-            workflow = build_ernie_workflow(prompt_text, seed, req.width, req.height)
-            workflow_name = ERNIE_WORKFLOW_NAME
         else:
             workflow = build_zimage_workflow(
                 prompt_text, seed, req.width, req.height, loras, detail,
@@ -271,7 +255,7 @@ async def generate(
                 ZIMAGE_WORKFLOW_NAME, ZIMAGE_VARIANT_WORKFLOW_NAME) else None),
             workflow_name=workflow_name,
         )
-        # Node ids differ per model (Z-Image / SDXL / Ernie / variant), so the
+        # Node ids differ per model (Z-Image / SDXL / variant), so the
         # stage names shown while this prompt runs are derived from the
         # workflow actually submitted rather than guessed client-side.
         listener.register_node_labels(prompt_id, workflow)
@@ -287,7 +271,7 @@ async def generate(
             "prompt_changed": prompt_changed,
             **zimage_service.describe_denoise(denoise, prompt_changed=prompt_changed),
         }
-    if not is_sdxl and not is_ernie:
+    if not is_sdxl:
         response |= {"detail": zimage_service.describe_detail(detail)}
     return response
 

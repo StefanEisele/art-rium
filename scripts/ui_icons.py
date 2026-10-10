@@ -67,6 +67,8 @@ DEFAULT_OUT = ROOT / "storage" / "ui_icon_candidates"
 MOTIFS: dict[str, list[str]] = {
     "z-image":   ["a camera aperture with fanned iris blades, wide open",
                   "a painter's flat brush lying diagonally"],
+    "iterate":   ["a nautilus shell cut in half showing its spiral chambers",
+                  "a jeweller's loupe lying diagonally"],
     "video":     ["a cinema film reel", "a film clapperboard"],
     "video-api": ["a sculpted cloud", "a satellite dish"],
     "vace":      ["a wireframe icosahedron", "a faceted low-poly polyhedron"],
@@ -77,7 +79,6 @@ MOTIFS: dict[str, list[str]] = {
                   "a pair of over-ear studio headphones"],
     "gallery":   ["an ornate baroque picture frame with carved corners",
                   "a painter's easel with a blank canvas"],
-    "titler":    ["a fountain pen lying diagonally", "a fountain pen nib seen up close"],
     "instagram": ["a vintage rangefinder camera", "an instant film camera"],
     "articles":  ["a typewriter", "a folded newspaper"],
     "shop":      ["a paper hang tag on a string", "a shopping bag"],

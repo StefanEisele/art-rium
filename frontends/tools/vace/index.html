@@ -23,7 +23,6 @@
      sitting side by side. */
   header { justify-content: space-between; padding: 14px 20px; }
   .header-left { display: flex; align-items: center; gap: 10px; }
-  .status { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-dim); }
 
   main {
     flex: 1; overflow-y: auto;
@@ -111,26 +110,6 @@
     cursor: pointer; padding: 4px 8px; flex-shrink: 0;
   }
 
-  /* ── Strength slider — the one dial that matters ─────────────────────── */
-  .dn-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-  .dn-head .readout { flex-shrink: 0; white-space: nowrap; }
-  .dn-head .val { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .dn-head .band { font-size: 12px; font-weight: 700; color: var(--text-dim); }
-  .dn-head .band.rec { color: var(--accent); }
-  .track-wrap { position: relative; padding: 7px 0 2px; }
-  /* Inset by half a thumb so the painted band lines up with where the handle
-     can actually stop. */
-  .rail { position: absolute; top: 0; left: 9px; right: 9px; height: 4px; }
-  .zone {
-    position: absolute; top: 0; height: 4px; border-radius: 2px;
-    background: var(--accent); opacity: 0.55;
-    transition: left 0.18s ease, width 0.18s ease;
-  }
-  #strength { width: 100%; margin: 0; accent-color: var(--accent); display: block; }
-  .ends { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-top: 2px; }
-  .effect { font-size: 12px; color: var(--text-dim); line-height: 1.45; min-height: 34px; }
-  .effect b { color: var(--text); font-weight: 600; }
-
   /* ── Regions ─────────────────────────────────────────────────────────── */
   #regions { display: flex; flex-direction: column; gap: 10px; }
   .region {
@@ -178,8 +157,6 @@
   .cam-dot { width: 9px; height: 9px; border-radius: 50%; background: #e5484d; display: inline-block; }
   @keyframes camPulse { 0%,100% { opacity: 1 } 50% { opacity: .25 } }
   .cam-rec .cam-dot { animation: camPulse 1s infinite; }
-  .eta { margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--surface2); font-size: 12px; color: var(--text-dim); }
-  .eta b { color: var(--text); font-weight: 600; }
   .tier-row button {
     background: transparent; border: none; color: var(--text-dim);
     font-size: 12px; font-weight: 600; padding: 9px 6px; border-radius: 8px;
@@ -316,22 +293,33 @@
   .ladder-cell .cap button { font-size: 11px; padding: 4px 8px; }
   #ladder-run, #ladder-setup { display: none; flex-direction: column; gap: 12px; }
   #ladder-run.show, #ladder-setup.show { display: flex; }
+
+  /* ── Desktop (≥860px) ──
+     shared.css .app.wide / .split. The side is wider than on other tools:
+     the prompt and the region editors are what this page is made of. The
+     right pane holds the render button and then the render itself. At the
+     end so it wins the cascade. */
+  @media (min-width: 860px) {
+    .split { --split-side: clamp(420px, 40vw, 640px); }
+    .split-side.bare, .split-main.bare { display: flex; flex-direction: column; gap: 16px; }
+    #result video { max-height: calc(100dvh - 180px); object-fit: contain; }
+  }
 </style>
 </head>
 <body>
-<div class="app">
+<div class="app wide">
 
   <header>
     <div class="header-left">
       <a class="back-btn" href="/" title="Dashboard">‹</a>
       <h1>Struktur</h1>
     </div>
-    <div class="status"><span id="status-label" style="font-size:12px;color:var(--text-dim)"></span></div>
     <button class="chip-btn" id="reset-btn" onclick="resetSession()"
             title="Gemerkte Einstellungen verwerfen">Reset</button>
   </header>
 
-  <main>
+  <main class="split">
+    <div class="split-side bare">
 
     <!-- What drives the picture: geometry, and the material it is made of. -->
     <section class="card">
@@ -377,14 +365,6 @@
              single run. One chip per picked picture; the first one also fills
              an empty box on its own, because that case has no downside. -->
         <div class="prompt-imports" id="prompt-imports"></div>
-      </div>
-
-      <!-- Which graph renders this. Default is the AnimateLCM rebuild: it is
-           the one that can carry material out of the reference picture. -->
-      <div class="field axis" id="engine-field">
-        <label>Verfahren</label>
-        <div class="tier-row" id="engine-row"></div>
-        <div class="tier-hint" id="engine-hint"></div>
       </div>
 
       <!-- AnimateLCM dials. Three numbers decide the picture, and they are
@@ -441,22 +421,6 @@
           </select>
         </div>
       </div>
-
-      <div class="field" id="vace-strength">
-        <div class="dn-head">
-          <label style="margin:0">Abweichung von der Vorlage</label>
-          <span class="readout">
-            <span class="val" id="strength-val">0.60</span>
-            <span class="band" id="strength-band"></span>
-          </span>
-        </div>
-        <div class="track-wrap">
-          <div class="rail"><div class="zone" id="strength-zone"></div></div>
-          <input type="range" id="strength" min="10" max="100" step="1" value="60" oninput="onStrength()">
-        </div>
-        <div class="ends"><span>← Wörtlich</span><span>Frei →</span></div>
-        <div class="effect" id="strength-effect"></div>
-      </div>
     </section>
 
     <section class="card">
@@ -510,26 +474,10 @@
       </div>
     </section>
 
-    <section class="card" id="vace-output">
-      <h2>Ausgabe</h2>
-      <div class="field axis">
-        <label>Format</label>
-        <div class="tier-row" id="aspect-row"></div>
-        <div class="tier-hint" id="aspect-hint"></div>
-      </div>
-      <div class="field axis">
-        <label>Größe</label>
-        <div class="tier-row" id="canvas-row"></div>
-        <div class="tier-hint" id="canvas-hint"></div>
-      </div>
-      <div class="field axis">
-        <label>Qualität</label>
-        <div class="tier-row" id="recipe-row"></div>
-        <div class="tier-hint" id="recipe-hint"></div>
-      </div>
-      <div class="eta" id="eta"></div>
-    </section>
+    </div>
 
+    <!-- The render itself. -->
+    <div class="split-main bare">
     <button id="gen-btn" onclick="generate()">Rendern</button>
 
     <div id="progress">
@@ -553,6 +501,7 @@
           Detailpass starten
         </button>
       </div>
+    </div>
     </div>
 
   </main>
@@ -696,10 +645,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // Struktur — Blender geometry in, a world out.
 //
-// The one control worth understanding is `strength`, and its bands were
-// measured rather than guessed (services/comfy/vace.py). They are fetched from
-// the server for exactly that reason: a client that hardcoded them would drift
-// away from the sampler they describe.
+// The AnimateDiff/LCM render: a depth or footage track decides the form, one
+// reference picture or embedding per colour region decides the material.
 // ═══════════════════════════════════════════════════════════════════════════
 const PICKER_LIMIT = 60;
 const REGION_COLORS = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
@@ -710,12 +657,7 @@ const state = {
   control: null,          // ControlTrack for the depth/footage
   mask: null,             // ControlTrack for the colour IDs
   reference: null,        // gallery image for the no-region case
-  regions: [],            // [{color, image, strength}]
-  strength: 0.6,
-  engine: 'animatelcm',
-  canvas: 'sketch',
-  aspect: 'wide',
-  recipe: 'fast',
+  regions: [],            // [{color, image, ipWeight, embeddings}]
   lcm: { depth: 0.45, ip: 1.0, hires: 0.60, hiresOn: true, rife: 1, previewFirst: true,
          baseWeight: 0.55 },
   baseRef: null,          // the picture the unmasked part of the frame is made of
@@ -743,13 +685,6 @@ const api = ArtRium.makeApiFetch(() => state.apiKey);
 const withAuth = (u) => ArtRium.withAuth(u, state.apiKey);
 const norm = (s) => (s || '').trim();
 
-// ── Strength readout ──────────────────────────────────────────────────────
-function onStrength() {
-  state.strength = parseInt($('strength').value, 10) / 100;
-  renderStrength();
-}
-
-
 // ── Session cache ─────────────────────────────────────────────────────────────
 // A Struktur setup is a control track, a mask, one reference picture per
 // colour region and a row of dials — several minutes of picking, and all of it
@@ -762,7 +697,7 @@ function onStrength() {
 // the server, which is the only place that knows whether it is still running.
 const VACE_SESSION_KEYS = [
   'control', 'mask', 'reference', 'regions', 'baseRef',
-  'strength', 'engine', 'canvas', 'aspect', 'recipe', 'lcm', 'budget',
+  'lcm', 'budget',
   'embeddings', 'embJoin', 'seed', 'injection',
 ];
 
@@ -784,27 +719,6 @@ const vaceSession = ArtRium.session('vace', {
 function resetSession() {
   if (!confirm('Alles zurücksetzen?\n\nVorlage, Regionen, Prompt und Regler werden geleert. Tracks und Videos bleiben.')) return;
   vaceSession.reset();
-}
-
-function renderStrength() {
-  const o = state.options;
-  $('strength-val').textContent = state.strength.toFixed(2);
-  if (!o) return;
-
-  const span = o.strength_max - o.strength_min;
-  const zone = $('strength-zone');
-  zone.style.left = ((o.recommended_min - o.strength_min) / span * 100).toFixed(1) + '%';
-  zone.style.width = ((o.recommended_max - o.recommended_min) / span * 100).toFixed(1) + '%';
-
-  const band = o.bands.find(b => state.strength < b.to) || o.bands[o.bands.length - 1];
-  const inZone = state.strength >= o.recommended_min && state.strength <= o.recommended_max;
-  const el = $('strength-band');
-  el.textContent = band ? `· ${band.band}` : '';
-  el.classList.toggle('rec', inZone);
-
-  $('strength-effect').innerHTML =
-    ArtRium.escHtml(band ? band.effect : '') +
-    (inZone ? ' <b>Empfohlen.</b>' : '');
 }
 
 // ── Control-track library ─────────────────────────────────────────────────
@@ -989,7 +903,7 @@ function pickTrack(t) {
     if (t.regions && t.regions.length && !state.regions.length) {
       state.regions = t.regions
         .filter(r => r.frames)          // an empty layer would key nothing
-        .map(r => ({ color: r.color, label: r.label, image: null, strength: state.strength }));
+        .map(r => ({ color: r.color, label: r.label, image: null }));
       renderRegions();
     }
   } else {
@@ -1132,9 +1046,7 @@ function addRegion() {
   if (state.regions.length >= 3) return;
   state.regions.push({
     color: REGION_COLORS[state.regions.length], image: null,
-    strength: state.strength,
-    // Its own reference weight, seeded from the global one. Separate from
-    // `strength`, which is VACE's denoise and means nothing to AnimateLCM.
+    // Its own reference weight, seeded from the global one.
     ipWeight: state.lcm.ip,
   });
   renderRegions();
@@ -1191,12 +1103,10 @@ function renderRegions() {
     const regionEmbs = r.embeddings || [];
     body.innerHTML = `<b>${ArtRium.escHtml(r.label || `Region ${i + 1}`)}</b>` +
       (r.image ? 'Referenz gewählt'
-        : regionEmbs.length && state.engine === 'animatelcm' ? 'Nur Embeddings — kein Bild nötig'
+        : regionEmbs.length ? 'Nur Embeddings — kein Bild nötig'
         : 'Noch kein Referenzbild');
 
-    // How hard this region's picture is pressed into its mask. Only the
-    // AnimateLCM path reads it; VACE renders a pass per region and uses the
-    // "Wörtlich ↔ Frei" slider instead.
+    // How hard this region's picture is pressed into its mask.
     const wrap = document.createElement('label');
     wrap.className = 'region-ip';
     wrap.title = 'Wie stark das Referenzbild in dieser Region wirkt';
@@ -1212,41 +1122,38 @@ function renderRegions() {
     wrap.append(sl, val);
     body.appendChild(wrap);
 
-    // kentskooking's RGB masks: this colour's own embedding stack. AnimateLCM
-    // only — VACE renders a pass per region and has no text layer per mask.
-    if (state.engine === 'animatelcm') {
-      const box = document.createElement('div');
-      box.className = 'region-embs';
-      regionEmbs.forEach((e, k) => {
-        const line = document.createElement('div');
-        line.className = 'region-emb';
-        const nm = document.createElement('span');
-        nm.className = 'nm';
-        nm.textContent = `✦ ${e.label || e.name}`;
-        nm.title = e.name;
-        const v = document.createElement('span');
-        v.className = 'v';
-        v.textContent = e.weight.toFixed(2);
-        const range = document.createElement('input');
-        range.type = 'range'; range.min = '0'; range.max = '200'; range.step = '5';
-        range.value = String(Math.round(e.weight * 100));
-        range.title = 'Gewicht';
-        range.oninput = () => { e.weight = parseInt(range.value, 10) / 100; v.textContent = e.weight.toFixed(2); };
-        const x = document.createElement('button');
-        x.type = 'button';
-        x.textContent = '×';
-        x.onclick = () => { regionEmbs.splice(k, 1); renderRegions(); };
-        line.append(nm, range, v, x);
-        box.appendChild(line);
-      });
-      const add = document.createElement('button');
-      add.type = 'button';
-      add.className = 'region-emb-add';
-      add.textContent = '+ Embedding';
-      add.onclick = () => openEmb(i);
-      box.appendChild(add);
-      body.appendChild(box);
-    }
+    // kentskooking's RGB masks: this colour's own embedding stack.
+    const box = document.createElement('div');
+    box.className = 'region-embs';
+    regionEmbs.forEach((e, k) => {
+      const line = document.createElement('div');
+      line.className = 'region-emb';
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = `✦ ${e.label || e.name}`;
+      nm.title = e.name;
+      const v = document.createElement('span');
+      v.className = 'v';
+      v.textContent = e.weight.toFixed(2);
+      const range = document.createElement('input');
+      range.type = 'range'; range.min = '0'; range.max = '200'; range.step = '5';
+      range.value = String(Math.round(e.weight * 100));
+      range.title = 'Gewicht';
+      range.oninput = () => { e.weight = parseInt(range.value, 10) / 100; v.textContent = e.weight.toFixed(2); };
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.textContent = '×';
+      x.onclick = () => { regionEmbs.splice(k, 1); renderRegions(); };
+      line.append(nm, range, v, x);
+      box.appendChild(line);
+    });
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'region-emb-add';
+    add.textContent = '+ Embedding';
+    add.onclick = () => openEmb(i);
+    box.appendChild(add);
+    body.appendChild(box);
 
     const drop = document.createElement('button');
     drop.className = 'drop';
@@ -1313,34 +1220,6 @@ async function loadPickerImages(reset = false) {
   } finally {
     state.pickerLoading = false;
   }
-}
-
-// ── Verfahren ─────────────────────────────────────────────────────────────
-// Two graphs, and the choice is not cosmetic: AnimateLCM refines an existing
-// frame and keeps the reference's material, VACE repaints from noise and loses
-// it. Everything below the switch changes with it.
-function renderEngine() {
-  const row = $('engine-row');
-  row.innerHTML = '';
-  const items = (state.options && state.options.engines) || [];
-  items.forEach(e => {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = e.label;
-    b.className = state.engine === e.key ? 'active' : '';
-    b.onclick = () => { state.engine = e.key; renderEngine(); };
-    row.appendChild(b);
-  });
-  const active = items.find(e => e.key === state.engine);
-  $('engine-hint').textContent = active ? active.hint : '';
-
-  const lcm = state.engine === 'animatelcm';
-  $('lcm-dials').style.display = lcm ? '' : 'none';
-  $('vace-strength').style.display = lcm ? 'none' : '';
-  const out = $('vace-output');
-  if (out) out.style.display = lcm ? 'none' : '';
-  renderEmbeddings();
-  renderRegions();
 }
 
 function onLcm() {
@@ -1430,16 +1309,14 @@ function sparkline(curve, cycles) {
 const esc = (s) => ArtRium.escHtml(s == null ? '' : String(s));
 
 function embeddingsActive() {
-  return state.engine === 'animatelcm' && state.embeddings.length > 0;
+  return state.embeddings.length > 0;
 }
 
 function regionReady(r) {
-  return !!r.image || (state.engine === 'animatelcm' && (r.embeddings || []).length > 0);
+  return !!r.image || (r.embeddings || []).length > 0;
 }
 
 function renderEmbeddings() {
-  const lcm = state.engine === 'animatelcm';
-  $('emb-field').style.display = lcm ? '' : 'none';
   const box = $('emb-list');
   box.innerHTML = '';
   state.embeddings.forEach((e, i) => {
@@ -1639,9 +1516,6 @@ function onInjection() {
 }
 
 function renderInjection() {
-  const lcm = state.engine === 'animatelcm';
-  $('inj-card').style.display = lcm ? '' : 'none';
-  if (!lcm) return;
   const inj = state.injection;
   const slotEl = $('slot-inj');
   slotEl.innerHTML = '';
@@ -2187,63 +2061,8 @@ async function pollSegment() {
   } catch { /* transient — keep polling */ }
 }
 
-// ── Ausgabe ───────────────────────────────────────────────────────────────
-// Three axes rather than one "Tier". Size and sampler used to be the same
-// control, which made the only comparison worth running — the same scene under
-// two samplers — impossible, because changing the canvas changes the scene.
-const AXES = [
-  { key: 'aspect', list: 'aspects',  row: 'aspect-row', hint: 'aspect-hint' },
-  { key: 'canvas', list: 'canvases', row: 'canvas-row', hint: 'canvas-hint' },
-  { key: 'recipe', list: 'recipes',  row: 'recipe-row', hint: 'recipe-hint' },
-];
-
-function renderAxes() {
-  AXES.forEach(axis => {
-    const row = $(axis.row);
-    row.innerHTML = '';
-    const items = (state.options && state.options[axis.list]) || [];
-    items.forEach(item => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = item.label;
-      b.className = state[axis.key] === item.key ? 'active' : '';
-      b.onclick = () => { state[axis.key] = item.key; renderAxes(); refreshEstimate(); };
-      row.appendChild(b);
-    });
-    const active = items.find(item => item.key === state[axis.key]);
-    $(axis.hint).textContent = active ? active.hint : '';
-  });
-}
-
-// The ETA comes from the server, formatted included: the cost model is anchored
-// on renders measured off this graph, and a copy of it here would drift the
-// moment the sampler is retuned. Debounced because every click lands here.
-let _etaTimer = null;
-function refreshEstimate() {
-  clearTimeout(_etaTimer);
-  _etaTimer = setTimeout(async () => {
-    const track = state.control;
-    const length = track ? (track.usable_frames || track.frame_count || 81) : 81;
-    const params = new URLSearchParams({
-      canvas: state.canvas, aspect: state.aspect, recipe: state.recipe,
-      length, passes: Math.max(1, state.regions.length),
-    });
-    try {
-      const r = await api('/api/vace/estimate?' + params);
-      const e = await r.json();
-      $('eta').innerHTML =
-        `${e.width}×${e.height} · ${e.frames} Frames · <b>${e.label}</b>` +
-        (e.passes > 1 ? ` für ${e.passes} Durchläufe` : '') +
-        (track ? '' : ' <span style="opacity:.6">(geschätzt für 81 Frames)</span>');
-    } catch {
-      $('eta').textContent = '';
-    }
-  }, 120);
-}
-
 // ── Generate ──────────────────────────────────────────────────────────────
 function updateGenButton() {
-  refreshEstimate();
   const btn = $('gen-btn');
   const n = state.regions.length;
   const ready = state.control && norm($('prompt').value) &&
@@ -2260,11 +2079,6 @@ function buildRequest() {
   const body = {
     control_track_id: state.control.id,
     prompt: norm($('prompt').value),
-    engine: state.engine,
-    canvas: state.canvas,
-    aspect: state.aspect,
-    recipe: state.recipe,
-    strength: state.strength,
     depth_strength: state.lcm.depth,
     ip_weight: state.lcm.ip,
     hires: state.lcm.hiresOn,
@@ -2274,11 +2088,10 @@ function buildRequest() {
   };
   if (state.regions.length) {
     body.mask_track_id = state.mask.id;
-    const lcm = state.engine === 'animatelcm';
     body.regions = state.regions.map(r => ({
-      color: r.color, image_id: r.image ? r.image.id : null, strength: state.strength,
+      color: r.color, image_id: r.image ? r.image.id : null,
       ip_weight: r.ipWeight ?? state.lcm.ip,
-      embeddings: lcm ? (r.embeddings || []).map(e => ({ name: e.name, weight: e.weight })) : [],
+      embeddings: (r.embeddings || []).map(e => ({ name: e.name, weight: e.weight })),
     }));
     if (state.baseRef) {
       body.base_image_id = state.baseRef.id;
@@ -2295,7 +2108,7 @@ function buildRequest() {
   }
   if (state.seed != null) body.seed = state.seed;
   const inj = state.injection;
-  if (state.engine === 'animatelcm' && inj.track) {
+  if (inj.track) {
     body.injection = { track_id: inj.track.id, strength: inj.strength, start: inj.start,
                        color: inj.color };
   }
@@ -2532,18 +2345,9 @@ window.addEventListener('load', async () => {
   try {
     const r = await api('/api/vace/options');
     state.options = await r.json();
-    state.strength = state.options.strength_default;
-    $('strength').min = Math.round(state.options.strength_min * 100);
-    $('strength').max = Math.round(state.options.strength_max * 100);
-    $('strength').value = Math.round(state.strength * 100);
-    $('status-label').textContent = `Band ${state.options.recommended_min}–${state.options.recommended_max}`;
   } catch {
     ArtRium.toast('Optionen konnten nicht geladen werden.', true);
   }
-  const d = (state.options && state.options.defaults) || {};
-  state.canvas = d.canvas || state.canvas;
-  state.aspect = d.aspect || state.aspect;
-  state.recipe = d.recipe || state.recipe;
   const lcmOpts = (state.options && state.options.lcm) || null;
   if (lcmOpts) {
     state.lcm.depth = lcmOpts.depth.default;
@@ -2556,16 +2360,11 @@ window.addEventListener('load', async () => {
   // After the defaults above have been applied, so a remembered setup wins
   // over them, and before the renderers, which all read `state`.
   vaceSession.load();
-  $('strength').value = Math.round(state.strength * 100);
   $('lcm-depth').value = Math.round(state.lcm.depth * 100);
   $('lcm-ip').value    = Math.round(state.lcm.ip * 100);
   $('lcm-hires').value = Math.round(state.lcm.hires * 100);
   fillBudgetRow();
-  renderStrength();
-  renderAxes();
-  renderEngine();
   renderLcm();
-  refreshEstimate();
   renderSlots();
   renderRegions();
   renderBaseRef();

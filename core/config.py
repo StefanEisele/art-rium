@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     # Z-Image Turbo prompt enhancer — text-only, community mirror on the Ollama hub.
     # Pulls with: ollama pull kamekichi128/qwen3-4b-instruct-2507
     ollama_prompt_model: str = "kamekichi128/qwen3-4b-instruct-2507:latest"
+    # Iterate loop (services/iterate, prompts/iterate.md). Critic = VLM for the
+    # critic + duel, editor = LLM for brief + edits; empty = ollama_llm_model.
+    # Calibrated 2026-10-08 against the artist's ratings: qwen3-vl 8B separates
+    # five-star from unrated better than Gemma 27B (total Δ +1.33 vs +0.20) at
+    # 8 s instead of 41 s; Gemma picks image A in 8 of 10 duels. As editor
+    # Gemma is the clean one — qwen3-vl leaked colour words and a second idea.
+    ollama_iterate_critic_model: str = "qwen3-vl:8b-instruct"
+    ollama_iterate_editor_model: str = ""
     vlm_analysis_max_edge: int = 512          # downscale before sending to VLM
 
     # ── Instagram (optional) ─────────────────────────────────────────────────
@@ -198,7 +206,7 @@ class Settings(BaseSettings):
 
     @property
     def control_dir(self) -> Path:
-        """Uploaded control tracks for the VACE structure-video workflow —
+        """Uploaded control tracks for the Struktur (AnimateDiff/LCM) workflow —
         Blender depth passes, object-ID mask renders, and ordinary footage that
         DepthAnything turns into depth in-graph.
 

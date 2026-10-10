@@ -656,7 +656,7 @@
     .title-row { display: flex; align-items: center; gap: 8px; }
     .title-row .title-input { flex: 1; min-width: 0; }
 
-    /* ── Title suggestions overlay (the Titler, in place) ──
+    /* ── Title suggestions overlay ──
        Above the detail modal (z-index 100) so it can be opened from inside it
        without the modal having to give up focus or scroll position. */
     #titler-modal {
@@ -835,15 +835,6 @@
     .sd-member-bar button:disabled { opacity: 0.3; cursor: default; }
     .sd-member-bar button.rm:active { background: var(--red); border-color: var(--red); }
     .sd-add-row { display: flex; }
-
-    /* The shared .pass-bar is built for three buttons; a fourth at phone
-       width truncates the longest word, and "Instag…" is not a label. Two
-       rows of two until there is room for one row of four. */
-    #sd-jumps { flex-wrap: wrap; }
-    #sd-jumps .pass-btn { flex: 1 1 calc(50% - 5px); }
-    @media (min-width: 560px) {
-      #sd-jumps .pass-btn { flex: 1 1 0; }
-    }
 
     /* What each tool will actually receive, next to the button that sends it
        there — so trimming is something you see before pressing, not a toast
@@ -1356,7 +1347,7 @@
     .cull-done .row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; justify-content: center; }
 
     @media (min-width: 860px) {
-      .app { max-width: 1600px; }
+      .app { max-width: var(--wide-max); }
       header { padding: 18px 28px; }
       .search-wrap { flex: 0 1 520px; margin: 0 auto; }
       .filter-bar { padding: 12px 28px; }
@@ -1598,6 +1589,10 @@
                 title="z-Image mit Prompt, Modell, Größe, Seed und LoRAs dieses Bildes öffnen">
           <span class="glyph">↗</span><span class="txt">Weiterarbeiten</span>
         </button>
+        <button class="pass-btn" id="iterate-btn" type="button" onclick="iterateFrom()"
+                title="Dieses Bild in Runden weiterentwickeln: rendern, kritisieren, umschreiben">
+          <span class="glyph">↻</span><span class="txt">Iterieren</span>
+        </button>
       </div>
     </div>
 
@@ -1743,7 +1738,11 @@
          it stays hidden for an ordinary finished clip. -->
     <div class="vd-clips" id="vd-clips" style="display:none"></div>
     <div class="vd-chips" id="vd-chips"></div>
-    <input class="title-input" id="vd-title-input" placeholder="No title yet…" maxlength="255">
+    <div class="title-row">
+      <input class="title-input" id="vd-title-input" placeholder="No title yet…" maxlength="255">
+      <button class="wand-btn" id="vd-titler-btn" onclick="suggestVideoTitle()"
+              title="Titel vorschlagen lassen">✨</button>
+    </div>
     <textarea class="notes-textarea" id="vd-notes-input" placeholder="Notes…" rows="3"></textarea>
     <div class="vd-prompt" id="vd-prompt" style="display:none"></div>
     <div style="font-size:12px;color:var(--text-dim)" id="vd-date"></div>
@@ -1826,15 +1825,11 @@
                 oninput="seriesState.dirty = true"></textarea>
     </div>
 
-    <!-- The four handoffs. Each opens its tool with this series already
+    <!-- The three handoffs. Each opens its tool with this series already
          loaded; the caps line under them says what will actually arrive. -->
     <div>
       <div class="section-label">Weitergeben</div>
       <div class="pass-bar" id="sd-jumps">
-        <button class="pass-btn" type="button" onclick="sendSeriesTo('titler')"
-                title="Die Serie durchgehen und jedes Bild betiteln">
-          <span class="glyph">✨</span><span class="txt">Titler</span>
-        </button>
         <button class="pass-btn" type="button" onclick="sendSeriesTo('video')"
                 title="Als Keyframes ins Video-Tool, mit VLM-Prompts">
           <span class="glyph">🎬</span><span class="txt">Video</span>
@@ -4079,9 +4074,8 @@ function onCompareKey(e) {
 // ══════════════════════════════════════════════════════════
 // TITLE SUGGESTIONS (Titler)
 // ══════════════════════════════════════════════════════════
-// The standalone /tools/titler page runs the same endpoint; here it is an
-// overlay on the title field so a title can be picked without leaving the
-// image being looked at.
+// An overlay on the title field so a title can be picked without leaving the
+// image, video or series being looked at.
 // `onPick` is what makes this overlay reusable: the title field and the
 // series sheet run different endpoints but choose from the list the same
 // way, and `rerun` is whatever "↻ Neue Vorschläge" should call this time.
@@ -4124,6 +4118,14 @@ const continueInGenerator = () => {
   const img = state.modal.image;
   if (!img) return;
   location.href = `/tools/z-image/?from=${encodeURIComponent(img.id)}`;
+};
+
+// The third: not a new render from the recipe but N of them, each judged and
+// rewritten — the iterate tool takes this picture's prompt, seed and LoRAs.
+const iterateFrom = () => {
+  const img = state.modal.image;
+  if (!img) return;
+  location.href = `/tools/iterate/?from=${encodeURIComponent(img.id)}`;
 };
 
 const openTitler = () => {
@@ -4632,6 +4634,9 @@ function openVideoDetail(v) {
   notesEl.value = v.notes || '';
   titleEl.oninput = () => { vdDirty = true; };
   notesEl.oninput = () => { vdDirty = true; };
+  // The model is shown sample frames of the finished file; a stack that was
+  // never assembled has none.
+  $('vd-titler-btn').disabled = !v.url;
 
   // Chips: resolution, n_images, frames, fps
   const chips = [
@@ -4737,7 +4742,6 @@ const SERIES_PAGE = 50;
 // Video is per mode (i2v_multi 10, minimax_i2v 6, flf2v 20, minimax_flf 7),
 // so it gets a range.
 const SERIES_CAPS = {
-  titler:    { label: 'Titler',    max: Infinity },
   video:     { label: 'Video',     max: 20, note: '6–20 je Modus' },
   articles:  { label: 'Artikel',   max: 6 },
   instagram: { label: 'Instagram', max: 10 },
@@ -5164,6 +5168,39 @@ async function suggestSeriesTitle() {
   } finally {
     titlerState.busy = false;
     btn.disabled = false;
+    btn.classList.remove('busy');
+  }
+}
+
+/** A title for the open video — three frames sampled from the finished file.
+ *  Lands in the video's title field, saved with the rest of the sheet. */
+async function suggestVideoTitle() {
+  const v = activeVideo;
+  if (!v || titlerState.busy) return;
+  const btn = $('vd-titler-btn');
+  btn.disabled = true;
+  btn.classList.add('busy');
+  titlerState.busy = true;
+  titlerState.onPick = (chosen) => {
+    // The sheet may have moved on to another video while the model worked.
+    if (activeVideo !== v) return;
+    $('vd-title-input').value = chosen;
+    vdDirty = true;
+  };
+  openTitlerBusy('Das Video wird angeschaut…', suggestVideoTitle);
+  try {
+    const r = await apiFetch('/api/titler/run-video', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_id: v.id }),
+    });
+    const d = await r.json();
+    renderTitleSuggestions(d.titles || []);
+  } catch (e) {
+    setTitlerStatus(e.message || 'Der Titler hat nicht geantwortet.', 'error');
+  } finally {
+    titlerState.busy = false;
+    btn.disabled = !v.url;
     btn.classList.remove('busy');
   }
 }
@@ -6052,6 +6089,12 @@ window.addEventListener('load', () => {
   initCrop();
   fetchImages(true);
   loadLoraLabels();
+  // ?series=<id> — tools that build a series (iterate) link straight to it.
+  const seriesParam = new URLSearchParams(location.search).get('series');
+  if (seriesParam) {
+    history.replaceState(null, '', location.pathname);
+    openSeriesDetail(seriesParam);
+  }
   ArtRium.registerSw();
 });
 </script>

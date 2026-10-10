@@ -151,14 +151,27 @@
     }
     #picker-search:focus { border-color: var(--accent); }
 
+    /* The jobs card no longer follows the form card as a sibling (it sits
+       in its own pane), so `.card + .card` cannot space it any more. */
+    #jobs-card { margin-top: 14px; }
+
+    /* ── Desktop (≥860px) ──
+       shared.css .app.wide / .split: budget and the new-video form on the
+       left — the budget stays pinned at the top of that pane, as on a phone —
+       and the jobs on the right as a grid. At the end so it wins the cascade. */
     @media (min-width: 860px) {
-      .app { max-width: 1000px; }
-      main { padding: 18px 28px; }
+      #jobs-card { margin-top: 0; }
+      #jobs {
+        display: grid; gap: 10px; align-items: start;
+        grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      }
+      #jobs > .empty { grid-column: 1 / -1; }
+      .job-card + .job-card { margin-top: 0; }
     }
   </style>
 </head>
 <body>
-<div class="app">
+<div class="app wide">
   <header>
     <a class="back-btn" href="/" title="Dashboard">‹</a>
     <h1>Video Cloud</h1>
@@ -167,7 +180,8 @@
             title="Clear the remembered form and start over">Reset</button>
   </header>
 
-  <main>
+  <main class="split">
+    <div class="split-side bare">
     <div class="not-configured" id="not-configured" style="display:none"></div>
 
     <!-- ── Budget ── -->
@@ -266,11 +280,14 @@
 
       <button class="btn primary" id="generate-btn" onclick="generate()">Generieren</button>
     </div>
+    </div>
 
     <!-- ── Jobs ── -->
-    <div class="card">
+    <div class="split-main bare">
+    <div class="card" id="jobs-card">
       <h2>Aufträge</h2>
       <div id="jobs"></div>
+    </div>
     </div>
   </main>
 </div>

@@ -16,7 +16,7 @@ const ArtRium = (() => {
 
   // Stage labels for ComfyUI progress events used to live here as a node-ID
   // map, which only ever read correctly for the Z-Image workflow — ids are
-  // workflow-local, so SDXL and Ernie showed "Node 12". The server now sends
+  // workflow-local, so SDXL showed "Node 12". The server now sends
   // the label with the event (services/comfy/node_labels.py).
 
   // ── Client-ID / API-key storage ────────────────────────────────────────────

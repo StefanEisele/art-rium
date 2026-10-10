@@ -49,7 +49,7 @@ class Image(Base):
     height: Mapped[int | None] = mapped_column(Integer)
     # [{"name": "<filename>.safetensors", "strength": 0.500}, ...] — one entry
     # per LoRA active at generation time, applied as a chain (order matters
-    # for Z-Image; SDXL/Ernie only ever populate 0 or 1 entry today).
+    # for Z-Image; SDXL only ever populate 0 or 1 entry today).
     loras: Mapped[list[dict] | None] = mapped_column(JSONB)
     workflow_name: Mapped[str | None] = mapped_column(String(128))
     # Detail Daemon dial this was sampled at (services/comfy/zimage.py), kept
@@ -616,7 +616,7 @@ class Video(Base):
 
 
 class ControlTrack(Base):
-    """An uploaded control track for the VACE structure-video workflow.
+    """An uploaded control track for the Struktur (AnimateDiff/LCM) workflow.
 
     A first-class asset rather than a job input, because that is how it is
     used: the same Blender turntable gets rendered at a dozen strengths while
@@ -649,8 +649,7 @@ class ControlTrack(Base):
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
     # Probed on upload, not trusted from the client: `length` is clamped to it
-    # so VACE is never asked for frames the track cannot guide, which it would
-    # otherwise pad with flat grey.
+    # so the render is never asked for frames the track cannot guide.
     frame_count: Mapped[int | None] = mapped_column(Integer)
     fps: Mapped[float | None] = mapped_column(Float)
     # Where a derived track came from: a mask segmented out of some footage, or

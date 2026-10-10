@@ -134,11 +134,35 @@
     #auth-panel.show { display: flex; }
     #auth-panel input { width: 100%; box-sizing: border-box; background: var(--surface2); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); padding: 10px 12px; font-size: 14px; }
     #auth-panel button { padding: 10px; border-radius: 10px; border: none; background: var(--accent); color: var(--on-accent); font-weight: 700; cursor: pointer; }
+
+    /* Steps 2–4, the run's status and result, then earlier runs. A column
+       with its own gap, because the result sits between two cards and
+       `.card + .card` cannot space a card from a plain div. Below the
+       breakpoint the two sections meet at one card gap, as one list did. */
+    .section.split-main { display: flex; flex-direction: column; gap: 14px; }
+    .section.split-main > .card + .card { margin-top: 0; }
+    @media (max-width: 859.98px) {
+      .section.split-side { padding-bottom: 0; }
+      .section.split-main { padding-top: 14px; }
+      /* History used to be a section of its own; keep it set apart. */
+      #recent-card { margin-top: 18px; }
+    }
+
+    /* ── Desktop (≥860px) ──
+       shared.css .app.wide / .split, at half and half: step 1 — the source
+       picker, a grid of videos — on the left, where it can be browsed; the
+       remaining steps, the Generate button, the result and the session
+       history on the right. At the end of the stylesheet so it wins. */
+    @media (min-width: 860px) {
+      .split { --split-side: minmax(0, 1fr); }
+      .section.split-side, .section.split-main { padding: 20px 24px 40px; }
+      .video-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
+    }
   </style>
 </head>
 <body>
 
-<div class="app">
+<div class="app wide">
   <header>
     <a class="back-btn" href="/" title="Dashboard">‹</a>
     <h1>Improv</h1>
@@ -151,9 +175,9 @@
     <button onclick="saveKey()">Connect</button>
   </div>
 
-  <main id="main">
+  <main id="main" class="split">
 
-    <div class="section">
+    <div class="section split-side">
       <div class="card">
         <h2>1. Source Video</h2>
         <p class="hint">Pick a generated video. Open the share link on a second device (iPad) next to your piano so you can watch it while improvising.</p>
@@ -207,6 +231,11 @@
         </div>
       </div>
 
+    </div>
+
+    <!-- Steps 2–4, then what a run makes, then what earlier runs made. On a
+         phone this section simply follows step 1, as it always did. -->
+    <div class="section split-main">
       <div class="card">
         <h2>2. Recording</h2>
         <p class="hint">Upload the MP4 from Blackmagic Camera (iPhone + Scarlett 2i4). Should contain your hands video with the piano audio embedded.</p>
@@ -246,7 +275,6 @@
       </div>
 
       <button class="gen-btn" id="submit-btn" onclick="submitSession()" disabled>Generate mixes</button>
-
       <div class="card" id="status-card">
         <div class="progress-track"><div class="progress-fill"></div></div>
         <div class="hint" id="status-msg">Working…</div>
@@ -258,10 +286,8 @@
           <div class="result-pair" id="result-pair"></div>
         </div>
       </div>
-    </div>
 
-    <div class="section">
-      <div class="card">
+      <div class="card" id="recent-card">
         <h2>Recent sessions</h2>
         <div id="recent-list"><div class="hint">Loading…</div></div>
       </div>

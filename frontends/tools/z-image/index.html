@@ -77,7 +77,7 @@
 
     /* ── LoRA picker — each entry is an independent toggle; enabling one
        reveals its own strength slider inline below it. Z-Image can combine
-       several at once; SDXL/Ernie registries only ever hold 0-1 entries. ── */
+       several at once; the SDXL registry only ever holds 0-1 entries. ── */
     .lora-row {
       display: flex;
       flex-direction: column;
@@ -371,8 +371,11 @@
     .btn-row { display: flex; gap: 10px; }
 
     /* ── Icon buttons (header) ── */
+    /* `color` spelled out: a <button> otherwise paints its glyph in the
+       system's button text colour — black, on this near-black header. */
     .icon-btn {
       background: none; border: none; font-size: 20px; cursor: pointer;
+      color: var(--text-dim);
       padding: 0; margin-right: 10px;
       -webkit-tap-highlight-color: transparent;
     }
@@ -469,9 +472,6 @@
     #negative-prompt-field { display: none; }
     #negative-prompt-field.show { display: flex; }
 
-    /* ── LoRA field hidden entirely for models with no LoRA in the library (e.g. Ernie Turbo) ── */
-    #lora-field.hidden { display: none; }
-
     /* ── Variant mode: source picture + the denoise slider ── */
     #variant-panel { display: none; flex-direction: column; gap: 14px; }
     #variant-panel.show { display: flex; }
@@ -522,7 +522,7 @@
       transition: left 0.18s ease, width 0.18s ease;
     }
     #denoise, #detail { width: 100%; margin: 0; accent-color: var(--accent); display: block; }
-    /* Hidden for SDXL and Ernie, whose graphs have no Detail Daemon.
+    /* Hidden for SDXL, whose graph has no Detail Daemon.
        Same `.show` convention as #negative-prompt-field above — toggling
        inline `display:''` would only fall back to this rule. */
     #detail-field { display: none; }
@@ -542,10 +542,32 @@
       padding: 3px 9px; border-radius: 999px; cursor: pointer;
       white-space: nowrap; margin-top: 2px;
     }
+
+    /* ── Desktop (≥860px) ──
+       The columns are shared.css's .app.wide / .split: the form on the left,
+       progress and results on the right. Both panes are .bare wrappers, so
+       on a phone they vanish and main's own column gap applies as before. */
+    @media (min-width: 860px) {
+      /* space-between spreads five header items across the whole width;
+         keep the title left and everything else together on the right. */
+      header { justify-content: flex-start; }
+      .status { margin-left: auto; margin-right: 6px; }
+      .split-side.bare, .split-main.bare { display: flex; flex-direction: column; gap: 18px; }
+      .split-main:has(#result.show, #progress.show) .split-empty { display: none; }
+      .split-empty { flex: 1; max-height: 520px; }
+
+      /* One picture: as large as the pane allows without scrolling to see
+         all of it. Several: a grid that adds columns as the window widens. */
+      .gallery:not(.multi) { grid-template-columns: minmax(0, 760px); }
+      .gallery:not(.multi) .gallery-item img {
+        width: auto; max-width: 100%; max-height: calc(100dvh - 230px);
+      }
+      .gallery.multi { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+    }
   </style>
 </head>
 <body>
-<div class="app">
+<div class="app wide">
 
   <header>
     <div class="header-left">
@@ -560,13 +582,13 @@
             title="Clear the remembered form and start over">Reset</button>
   </header>
 
-  <main>
+  <main class="split">
+    <div class="split-side bare">
 
     <!-- Model toggle -->
     <div class="mode-toggle" id="model-toggle">
       <button type="button" id="model-zimage" class="active" onclick="setModel('zimage')">Z-Image Turbo</button>
       <button type="button" id="model-sdxl" onclick="setModel('sdxl')">ArtiVision XL</button>
-      <button type="button" id="model-ernie" onclick="setModel('ernie')">Ernie Turbo</button>
     </div>
 
     <!-- Mode toggle -->
@@ -693,7 +715,7 @@
         <div class="batch-row" id="batch-row"></div>
       </div>
 
-      <!-- LoRA — hidden entirely for models with no LoRA in the library.
+      <!-- LoRA —
            Each entry togglable; strength slider appears inline once active. -->
       <div class="field" id="lora-field">
         <label>LoRA Style — tap to combine multiple</label>
@@ -705,6 +727,11 @@
 
     <!-- Generate -->
     <button id="gen-btn" onclick="generate()">Generate</button>
+
+    </div>
+    <div class="split-main bare">
+
+    <div class="split-empty">Die Bilder dieser Sitzung erscheinen hier.</div>
 
     <!-- Progress -->
     <div id="progress">
@@ -732,6 +759,7 @@
       <div class="gallery" id="gallery"></div>
     </div>
 
+    </div>
   </main>
 </div>
 
@@ -815,7 +843,6 @@ const DOM_IDS = {
   modeVariantBtn: 'mode-variant',
   modelZimageBtn: 'model-zimage',
   modelSdxlBtn: 'model-sdxl',
-  modelErnieBtn: 'model-ernie',
   loraField: 'lora-field',
   sizeField: 'size-field',
   variantPanel: 'variant-panel',
@@ -1413,8 +1440,8 @@ const progress = {
   },
 
   // The server labels the node for us (services/comfy/node_labels.py) — it is
-  // the only side that knows which workflow this prompt used, and Z-Image,
-  // SDXL and Ernie number their nodes differently.
+  // the only side that knows which workflow this prompt used, and Z-Image
+  // and SDXL number their nodes differently.
   setNode: (nodeId, label) => {
     setText(DOM_IDS.progNode, label || `Node ${nodeId}`);
   },
@@ -1591,7 +1618,7 @@ const startGenerationRequest = async (extra) => {
         height: state.imgHeight,
         client_id: state.clientId,
         loras: [...state.activeLoras].map(name => ({ name, strength: state.loraStrengths[name] })),
-        // Ignored server-side for SDXL and Ernie, whose graphs have no
+        // Ignored server-side for SDXL, whose graph has no
         // Detail Daemon node — sent unconditionally so there is one body.
         detail: state.detail,
         ...extra,
@@ -1727,8 +1754,8 @@ const syncDetailSlider = () => {
   renderDetail();
 };
 
-/** Only the Z-Image graphs carry the Detail Daemon sampler; the SDXL and
- *  Ernie workflows have no such node, so the dial would be a lie there. */
+/** Only the Z-Image graphs carry the Detail Daemon sampler; the SDXL
+ *  workflow has no such node, so the dial would be a lie there. */
 const updateDetailVisibility = () => {
   const field = $(DOM_IDS.detailField);
   if (field) field.classList.toggle('show', state.model === 'zimage');
@@ -1939,7 +1966,6 @@ const setModel = async (model) => {
 
   $(DOM_IDS.modelZimageBtn).classList.toggle('active', model === 'zimage');
   $(DOM_IDS.modelSdxlBtn).classList.toggle('active', model === 'sdxl');
-  $(DOM_IDS.modelErnieBtn).classList.toggle('active', model === 'ernie');
   updateNegativePromptVisibility();
   updateDetailVisibility();
 
@@ -1975,9 +2001,7 @@ const setMode = (mode) => {
   $(DOM_IDS.modeDirectBtn).classList.toggle('active', mode === 'direct');
   $(DOM_IDS.modeEnhanceBtn).classList.toggle('active', mode === 'enhance');
   $(DOM_IDS.modeVariantBtn).classList.toggle('active', mode === 'variant');
-  [DOM_IDS.modelSdxlBtn, DOM_IDS.modelErnieBtn].forEach(id => {
-    $(id).disabled = mode === 'variant';
-  });
+  $(DOM_IDS.modelSdxlBtn).disabled = mode === 'variant';
   $(DOM_IDS.variantPanel).classList.toggle('show', mode === 'variant');
   // The latent carries the source's size — there is nothing left to choose.
   $(DOM_IDS.sizeField).classList.toggle('hidden', mode === 'variant');
@@ -2344,7 +2368,6 @@ const zSession = ArtRium.session('z-image', {
     if (typeof saved.detail === 'number') state.detail = saved.detail;
     $(DOM_IDS.modelZimageBtn).classList.toggle('active', state.model === 'zimage');
     $(DOM_IDS.modelSdxlBtn).classList.toggle('active', state.model === 'sdxl');
-    $(DOM_IDS.modelErnieBtn).classList.toggle('active', state.model === 'ernie');
     const sizeBtn = [...document.querySelectorAll('.size-btn')].find(b => {
       const m = /setSize\((\d+),\s*(\d+)/.exec(b.getAttribute('onclick') || '');
       return m && Number(m[1]) === state.imgWidth && Number(m[2]) === state.imgHeight;
@@ -2436,11 +2459,6 @@ const buildLoraList = async () => {
   state.loraStrengths = {};
   loraRegistry.list.forEach(l => { state.loraStrengths[l.filename] = 0.5; });
 
-  // Models with no LoRA in the library (e.g. Ernie Turbo) hide the field
-  // entirely rather than showing an empty row.
-  const hasLoras = loraRegistry.list.length > 0;
-  $(DOM_IDS.loraField).classList.toggle('hidden', !hasLoras);
-
   loraRegistry.list.forEach((l, i) => {
     const item = document.createElement('div');
     item.className = 'lora-item' + (state.activeLoras.has(l.filename) ? ' active' : '');
@@ -2491,7 +2509,6 @@ const applyVariantDeepLink = async () => {
 // unrecognised (including the two Z-Image graphs) is Z-Image Turbo.
 const MODEL_BY_WORKFLOW = {
   'artivision_xl': 'sdxl',
-  'ernie_image_turbo': 'ernie',
 };
 
 /** `?from=<image_id>` — the gallery's "Weiterarbeiten" button. Not the

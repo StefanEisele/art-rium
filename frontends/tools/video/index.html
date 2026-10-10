@@ -493,18 +493,65 @@
 
     /* ── Picker modal (base in shared.css; deltas only below) ── */
     .picker-search { padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-    #picker-search { width: 100%; background: var(--surface2); border: 1.5px solid transparent; border-radius: 10px; color: var(--text); font-size: 15px; padding: 9px 14px; outline: none; font-family: inherit; }
-    #picker-search:focus { border-color: var(--accent); }
+    /* The song picker's search field had no rule at all and rendered as a
+       bare browser input; it is the same control as the image picker's. */
+    #picker-search, #song-picker-search { width: 100%; background: var(--surface2); border: 1.5px solid transparent; border-radius: 10px; color: var(--text); font-size: 15px; padding: 9px 14px; outline: none; font-family: inherit; }
+    #picker-search:focus, #song-picker-search:focus { border-color: var(--accent); }
     .picker-count { background: var(--accent); color: var(--on-accent); font-size: 12px; font-weight: 700; border-radius: 10px; padding: 2px 8px; display: none; }
     .picker-count.show { display: inline-block; }
 
     #toast { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 90px); left: 50%; transform: translateX(-50%) translateY(12px); background: var(--surface2); border: 1px solid var(--border); color: var(--text); font-size: 14px; font-weight: 500; padding: 10px 18px; border-radius: 20px; opacity: 0; transition: opacity 0.25s, transform 0.25s; pointer-events: none; white-space: nowrap; z-index: 999; }
     #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
     #toast.error { background: rgba(255,69,58,0.2); color: var(--red); }
+
+    /* ── Desktop (≥860px) ──
+       The two columns are shared.css's .app.wide / .split; these are this
+       page's deltas. Kept at the end of the stylesheet on purpose: an
+       override placed before the rule it overrides loses the cascade. */
+    @media (max-width: 859.98px) {
+      .cut-controls { display: contents; }
+    }
+    @media (min-width: 860px) {
+      #form-section { padding: 20px 24px 40px; border-bottom: none; }
+      /* Bottom room so the floating merge bar never sits on the last row. */
+      #videos-section { padding: 20px 24px 140px; }
+      #videos-list {
+        display: grid; gap: 14px; align-items: start;
+        grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+      }
+      .video-card { margin-bottom: 0; }
+      .video-empty { grid-column: 1 / -1; }
+
+      /* Song picker: the rows side by side instead of one long list. */
+      #song-list {
+        display: grid; align-content: start; gap: 10px;
+        grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+        padding: 12px 24px 24px;
+      }
+      #song-picker-modal .picker-search, .bed-row { padding-left: 24px; padding-right: 24px; }
+      #song-picker-search { max-width: 560px; }
+
+      /* Rhythmusschnitt: the controls on the left, the timeline they shape
+         pinned on the right — so every change can be seen as it is made,
+         instead of scrolling down to the preview after each one. */
+      #cut-body {
+        display: grid; align-items: start; gap: 20px;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+        padding: 20px 24px 28px;
+      }
+      .cut-controls { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+      #cut-preview { position: sticky; top: 0; }
+      #cut-actions { justify-content: flex-end; padding-left: 24px; padding-right: 24px; }
+      #cut-actions button { flex: 0 0 auto; padding: 12px 22px; }
+      #cut-go { min-width: 240px; }
+
+      /* Piano recordings: a list, read at a readable width. */
+      #piano-body { padding: 20px max(24px, calc((100% - 760px) / 2)) 28px; }
+    }
   </style>
 </head>
 <body>
-<div class="app">
+<div class="app wide">
   <header>
     <a class="back-btn" href="/" title="Dashboard">‹</a>
     <h1>Video</h1>
@@ -512,9 +559,9 @@
             title="Clear the remembered form and start over">Reset</button>
   </header>
 
-  <main>
+  <main class="split">
     <!-- Form -->
-    <div id="form-section">
+    <div id="form-section" class="split-side">
       <div class="card">
         <h2>New Video</h2>
 
@@ -696,7 +743,7 @@
     </div>
 
     <!-- Video list -->
-    <div id="videos-section">
+    <div id="videos-section" class="split-main">
       <div class="section-label">Generated Videos</div>
       <div class="library-hint">Tap a clip's thumbnail to play it, tap its row to add it to a merge. ⤢ upscales a single clip.</div>
       <div id="videos-list">
@@ -775,6 +822,9 @@
     <h2>Rhythmusschnitt</h2>
   </div>
   <div id="cut-body">
+    <!-- The controls, as one column next to the timeline on a desktop. On a
+         phone this wrapper is no box at all (display: contents). -->
+    <div class="cut-controls">
     <!-- Two ways to read one beat map. The Rhythmusschnitt deals shots from a
          bag; the Schichtenschnitt stacks renders of ONE control video and
          cross-fades between them at a shared source position, so the form
@@ -952,8 +1002,9 @@
       </label>
       </div>
     </details>
+    </div>
 
-    <div class="cut-card">
+    <div class="cut-card" id="cut-preview">
       <h3>Vorschau</h3>
       <div id="cut-timeline">
         <div id="cut-shots"></div>

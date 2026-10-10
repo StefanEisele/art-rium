@@ -40,6 +40,22 @@ LORAS: list[LoraSpec] = [
         "label":    "Art Vision v2",
         "trigger":  "art_vision",
     },
+    {
+        # Trained 2026-10-06 on Civitai from 46 curated art-rium outputs
+        # (storage/lora_datasets/artvis3_dataset.zip). Checkpoint 7 of 10: the
+        # strongest look that still follows the prompt — 8–10 collapse every
+        # subject into "tiny figure in empty space".
+        "filename": "artvision_v3_epoch7.safetensors",
+        "label":    "Art Vision v3",
+        "trigger":  "artvis3",
+    },
+    {
+        # The same run one checkpoint earlier: keeps the prompted subject
+        # intact (the lighthouse stays a lighthouse) with a lighter touch.
+        "filename": "artvision_v3_epoch6.safetensors",
+        "label":    "Art Vision v3 · treu",
+        "trigger":  "artvis3",
+    },
 ]
 
 ALLOWED_LORAS: set[str] = {lora["filename"] for lora in LORAS}

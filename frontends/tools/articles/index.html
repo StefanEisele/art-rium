@@ -66,6 +66,9 @@
     /* Result cards */
     #result-section { display: none; }
     #result-section.show { display: block; }
+    /* Spelled out because the two sit in their own pane (.split-main), so
+       `.card + .card` no longer reaches them from the generate card. */
+    #status-card, #result-section > .card { margin-top: 14px; }
     .lang-badge { display: inline-block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); }
     .post-card { background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 10px; }
     .post-header { display: flex; align-items: center; gap: 10px; }
@@ -96,7 +99,7 @@
     .sel-wrap .sel-kind { position: absolute; bottom: 4px; right: 4px; background: rgba(0,0,0,0.7); color: #fff; font-size: 8px; font-weight: 700; border-radius: 3px; padding: 1px 4px; text-transform: uppercase; letter-spacing: 0.4px; }
 
     /* Video picker — square thumbs, 3 per row to match the gallery feel */
-    #video-picker-modal #picker-grid { grid-template-columns: repeat(3, 1fr); }
+    #video-picker-grid { flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 8px; }
     .video-cell { position: relative; cursor: pointer; overflow: hidden; border-radius: 6px; background: var(--surface2); display: flex; flex-direction: column; }
     .video-cell .video-thumb-wrap { position: relative; width: 100%; padding-bottom: 100%; background: #000; }
     .video-cell img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
@@ -124,18 +127,39 @@
     #toast { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 90px); left: 50%; transform: translateX(-50%) translateY(12px); background: var(--surface2); border: 1px solid var(--border); color: var(--text); font-size: 14px; font-weight: 500; padding: 10px 18px; border-radius: 20px; opacity: 0; transition: opacity 0.25s, transform 0.25s; pointer-events: none; white-space: nowrap; z-index: 999; }
     #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
     #toast.error { background: rgba(255,69,58,0.2); color: var(--red); }
+
+    /* ── Desktop (≥860px) ──
+       shared.css .app.wide / .split: the brief on the left, the job's
+       progress and the finished posts on the right, each pane scrolling on
+       its own. At the end of the stylesheet so it wins the cascade. */
+    @media (min-width: 860px) {
+      main { min-height: 0; display: flex; flex-direction: column; padding-bottom: 0; }
+      .section.split { padding: 0; }
+      .split-main.bare { display: flex; flex-direction: column; gap: 14px; }
+      .split-main > * { width: 100%; max-width: 900px; }
+      .split-main:has(#status-card.show, #result-section.show) .split-empty { display: none; }
+      #status-card, #result-section > .card { margin-top: 0; }
+
+      .picker-controls { padding-left: 24px; padding-right: 24px; }
+      #picker-search { max-width: 560px; }
+      #video-picker-grid {
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 6px; padding: 6px 24px 24px; align-content: start;
+      }
+    }
   </style>
 </head>
 <body>
-<div class="app">
+<div class="app wide">
   <header>
     <a class="back-btn" href="/">‹</a>
     <h1>Articles</h1>
   </header>
 
   <main>
+    <div class="section split">
     <!-- Form -->
-    <div class="section">
+    <div class="split-side bare">
       <!-- Images -->
       <div class="card">
         <h2>Images</h2>
@@ -245,6 +269,12 @@
         <div class="hint" style="text-align:center">The job runs server-side and takes 5–10 minutes (image upload + VLM + LLM). You can lock the screen, switch tabs, or close the page — when you reopen this tool, it'll reconnect to the running job and show the result.</div>
       </div>
 
+    </div>
+
+    <!-- What the job produces: its progress, then the posts it wrote. -->
+    <div class="split-main bare">
+      <div class="split-empty">Der Fortschritt und die fertigen Artikel erscheinen hier.</div>
+
       <!-- Status -->
       <div class="card" id="status-card">
         <h2>Generating…</h2>
@@ -255,11 +285,12 @@
 
       <!-- Result -->
       <div id="result-section">
-        <div class="card" style="margin-top:14px">
+        <div class="card">
           <h2 id="result-heading">Result</h2>
           <div id="result-list"></div>
         </div>
       </div>
+    </div>
     </div>
   </main>
 </div>
@@ -297,7 +328,7 @@
       <button type="button" class="chip" data-filter="improv"  onclick="setVideoFilter('improv', this)">Improv</button>
     </div>
   </div>
-  <div id="video-picker-grid" style="flex:1;min-height:0;overflow-y:auto;display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:8px"></div>
+  <div id="video-picker-grid"></div>
 </div>
 
 <div id="toast"></div>

@@ -98,13 +98,6 @@ class TestCheckEmbeddings:
         with pytest.raises(HTTPException, match="artrium/rust"):
             await _check_embeddings(form())
 
-    async def test_vace_refuses_region_embeddings(self, monkeypatch):
-        async def known():
-            return ["artrium/rust"]
-        monkeypatch.setattr(vace, "embedding_names", known)
-        with pytest.raises(HTTPException, match="AnimateLCM"):
-            await _check_embeddings(form(engine="vace"))
-
 
 def graph(pattern, seconds, dest):
     cmd = noise_command(pattern, seconds, dest)

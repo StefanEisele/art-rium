@@ -799,10 +799,48 @@
     }
     #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
     #toast.error { background: rgba(255,69,58,0.2); color: var(--red); }
+
+    /* ── Desktop (≥860px) ──
+       Same two columns as every tool (shared.css .app.wide, --split-side),
+       laid out on .app itself because here the form is not inside <main>:
+       on a phone it is the panel docked under the timeline. On a desktop it
+       is the side column, and the timeline gets the rest. Each scrolls alone.
+       At the end of the stylesheet so it wins over the rules above. */
+    @media (min-width: 860px) {
+      .app.wide {
+        display: grid;
+        grid-template-columns: var(--split-side) minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+      .app.wide > header { grid-column: 1 / -1; }
+      #new-post-section {
+        grid-column: 1; grid-row: 2;
+        max-height: none; min-height: 0;
+        border-top: none; border-right: 1px solid var(--border);
+        padding: 20px 24px 40px;
+        overscroll-behavior: contain;
+      }
+      #main-scroll { grid-column: 2; grid-row: 2; min-height: 0; overscroll-behavior: contain; }
+      #timeline-section { padding: 20px 24px 32px; }
+
+      /* Bottom sheets become dialogs: a sheet sliding up from the bottom
+         edge of a 27" screen is a long way from where the eye is. */
+      #detail-modal, #ig-preview-modal { align-items: center; }
+      .detail-sheet, .igp-sheet {
+        border-radius: var(--radius-xl);
+        max-height: 90dvh;
+        padding-bottom: 24px;
+      }
+
+      #vp-grid {
+        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+        gap: 10px; padding: 14px 24px 24px;
+      }
+    }
   </style>
 </head>
 <body>
-<div class="app">
+<div class="app wide">
 
   <header>
     <a class="back-btn" href="/" title="Dashboard">‹</a>

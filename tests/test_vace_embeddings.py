@@ -71,10 +71,6 @@ class TestPlanLadder:
         with pytest.raises(HTTPException):
             plan_ladder(ladder(**kw))
 
-    def test_vace_has_no_ladder(self):
-        with pytest.raises(HTTPException, match="AnimateLCM"):
-            plan_ladder(ladder(request=form(engine="vace")))
-
 
 class TestVariant:
     def test_only_the_target_moves(self):
@@ -116,7 +112,6 @@ class TestBuilderRequest:
         assert _layer_factor(form(embeddings=[
             EmbeddingSpec(name="a", curve="fade_in"), EmbeddingSpec(name="b", curve="swell"),
             EmbeddingSpec(name="c")])) == 3
-        assert _layer_factor(form(engine="vace")) == 1
 
 
 @pytest.mark.asyncio
@@ -142,10 +137,6 @@ class TestCheckEmbeddings:
             return None
         monkeypatch.setattr(vace, "embedding_names", offline)
         await _check_embeddings(form())
-
-    async def test_only_animatelcm_reads_embeddings(self, comfy):
-        with pytest.raises(HTTPException, match="AnimateLCM"):
-            await _check_embeddings(form(engine="vace"))
 
     async def test_an_unknown_curve(self, comfy):
         with pytest.raises(HTTPException, match="Verlauf"):

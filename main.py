@@ -217,11 +217,12 @@ async def gate_frontend(request: Request, call_next):
 
 
 # ── Routers ──────────────────────────────────────────────────────────────────
-from routers import cut, embeddings, generate, images, series, titler, instagram, vace, video, video_api, wordpress, system, improv, music  # noqa: E402  (after app is created)
+from routers import cut, embeddings, generate, images, iterate, series, titler, instagram, vace, video, video_api, wordpress, system, improv, music  # noqa: E402  (after app is created)
 
 app.include_router(generate.router)
 app.include_router(images.router)
 app.include_router(series.router)
+app.include_router(iterate.router)
 app.include_router(titler.router)
 app.include_router(instagram.router)
 app.include_router(video.router)
@@ -242,7 +243,7 @@ _shared = _frontends_dir / "shared"
 if _shared.exists():
     app.mount("/shared", StaticFiles(directory=str(_shared)), name="shared")
 
-_TOOL_NAMES = ("z-image", "gallery", "titler", "instagram", "video", "video-api", "vace", "embeddings", "articles", "improv", "music")
+_TOOL_NAMES = ("z-image", "iterate", "gallery", "instagram", "video", "video-api", "vace", "embeddings", "articles", "improv", "music")
 for _tool in _TOOL_NAMES:
     _dir = _frontends_dir / "tools" / _tool
     if _dir.exists():

@@ -204,9 +204,8 @@ async def probe_video_frames(src: Path) -> tuple[int | None, float | None]:
 
     `nb_frames` is read first because it is exact when the container carries
     it; when it does not, duration × rate is the honest fallback and is
-    rounded down — overstating the length would have VACE pad the tail of a
-    render with flat grey (comfy_extras/nodes_wan.py) and the clip would drift
-    unguided at the end.
+    rounded down — overstating the length would leave the tail of a render
+    with no guidance, and the clip would drift unguided at the end.
     """
     try:
         proc = await asyncio.create_subprocess_exec(

@@ -197,10 +197,23 @@
     /* ── Generating placeholder card ── */
     .song-card.generating { border-color: var(--accent-border); background: var(--accent-soft); }
     .song-card.generating .song-meta { color: var(--accent); }
+
+    /* ── Desktop (≥860px) ──
+       shared.css .app.wide / .split: the form on the left, the library on
+       the right as a grid of cards. At the end so it wins the cascade. */
+    @media (min-width: 860px) {
+      .songs-header { margin-bottom: 14px; }
+      #search { max-width: 320px; }
+      .songs-list {
+        display: grid; gap: 12px; align-items: start;
+        grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      }
+      .songs-list > .empty-state { grid-column: 1 / -1; }
+    }
   </style>
 </head>
 <body>
-<div class="app">
+<div class="app wide">
 
   <header>
     <a class="back-btn" href="/" title="Dashboard">‹</a>
@@ -209,8 +222,9 @@
             title="Clear the remembered form and start over">Reset</button>
   </header>
 
-  <main>
+  <main class="split">
     <!-- ── Generation form ── -->
+    <div class="split-side bare">
     <section class="form-card">
       <div class="field">
         <label for="tags">Tags / Style *</label>
@@ -288,9 +302,10 @@
         <div id="phase-detail"></div>
       </div>
     </section>
+    </div>
 
     <!-- ── Songs list ── -->
-    <section class="songs">
+    <section class="songs split-main">
       <div class="songs-header">
         <h2>Songs</h2>
         <input id="search" type="text" placeholder="Search title / tags…">

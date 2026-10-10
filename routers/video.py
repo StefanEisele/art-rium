@@ -650,13 +650,12 @@ def wan_output_fps(rife_multiplier: int | None) -> int:
 # first frame is the source photo either way; from there the tiny per-step
 # perturbation compounds and the two samples walk apart. Looking at frame 120
 # of each, neither is degraded — same detail, same palette, no artefacts — the
-# paint has simply gone somewhere else. services/comfy/vace.py records the same
-# lesson from the other direction: a seed only means something relative to the
-# exact sampler that consumed it.
+# paint has simply gone somewhere else. A seed only means something relative to
+# the exact sampler that consumed it.
 #
 # That is also the whole reason this is scoped to the two Wan builders rather
 # than switched on globally with ComfyUI's --use-sage-attention flag. Every
-# other model in this project (MiniMax, Z-Image, SEEDVR2, ACE-Step, VACE) was
+# other model in this project (MiniMax, Z-Image, SEEDVR2, ACE-Step) was
 # calibrated against exact attention, and a global flag would silently re-roll
 # all of them. `settings.wan_sage_attention` turns it off without touching code
 # — but note that turning it off does not restore an earlier clip either; it

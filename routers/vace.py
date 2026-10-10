@@ -1,6 +1,6 @@
 """
-VACE structure-video API — geometry decides the form, reference images decide
-the material.
+Struktur API (AnimateDiff/LCM) — geometry decides the form, reference images
+decide the material.
 
 Two halves, and the split matters:
 
@@ -8,12 +8,10 @@ Two halves, and the split matters:
 strengths while the look is being found, so it is uploaded once, probed, and
 referenced by id from then on. That is what `control_tracks` is for.
 
-**A job is a sequence of passes.** With no regions it is one pass. With regions
-it is one pass per region, each taking the *previous pass's render* as its
-control video — see services/comfy/vace.py for why chaining masked blocks into
-a single pass renders the depth map instead.
+**A job is one graph.** AnimateLCM renders every colour region in a single
+sampler pass, with one IP-Adapter reference (or an embedding stack) per region.
 
-**AnimateLCM renders in two stages by default.** Its base pass costs about a
+**It renders in two stages by default.** Its base pass costs about a
 third of the graph and already decides everything worth deciding — the
 composition, the motion, whether the reference picture's material came through
 at all — while the hires pass that follows is the expensive two thirds and only
@@ -74,7 +72,7 @@ from services.segment import (
     run_segmentation,
     trim_filters,
 )
-from services.comfy.client import embedding_names, free_memory, poll_history, post_workflow
+from services.comfy.client import embedding_names, poll_history, post_workflow
 from services.comfy.vram import free_vram_for
 from services.comfy.animatelcm import (
     DEPTH_SWEEP as LCM_DEPTH_SWEEP,
@@ -128,33 +126,7 @@ from services.comfy.animatelcm import (
 from services.comfy.animatelcm import (
     canvas_size as lcm_canvas,
 )
-from services.comfy.vace import (
-    DEFAULT_ASPECT,
-    DEFAULT_CANVAS,
-    DEFAULT_FIT,
-    DEFAULT_RECIPE,
-    FITS,
-    FPS,
-    STRENGTH_DEFAULT,
-    STRENGTH_MAX,
-    STRENGTH_MIN,
-    SWEET_MAX,
-    SWEET_MIN,
-    Region,
-    VaceRequest,
-    aspect_options,
-    build_vace_workflow,
-    canvas_options,
-    canvas_size,
-    clamp_strength,
-    describe_strength,
-    estimate_seconds,
-    loop_length,
-    plan_region_passes,
-    recipe_options,
-    snap_length,
-    strength_bands,
-)
+from services.comfy.wan_frames import FPS, loop_length, snap_length
 from services.image.rendition import original_path
 from workers.comfy_listener import get_listener
 
@@ -170,26 +142,21 @@ _KINDS = ("depth", "footage", "mask")
 # ComfyUI and a card still held by the render before, not to gate a job that
 # would have fit.
 _LCM_MIN_FREE_VRAM = 6.0 * 1024**3
-_JOB_TIMEOUT = 7200          # a 720 region sequence is three ~12-minute passes
+_JOB_TIMEOUT = 7200          # two stages, with a long hires pass
 _MAX_UPLOAD_BYTES = 600 * 1024 * 1024
 
 
 class RegionSpec(BaseModel):
     color: tuple[int, int, int]
     # Reference picture, from the gallery. Optional for AnimateLCM once the
-    # region carries embeddings of its own; VACE always needs one.
+    # region carries embeddings of its own.
     image_id: Optional[uuid.UUID] = None
-    # VACE only: how freely that region's pass may repaint. AnimateLCM has no
-    # per-region denoise — it renders every region in one sampler pass — so it
-    # reads `ip_weight` instead, and reading this one there would silently wire
-    # the "Wörtlich ↔ Frei" slider to a reference weight.
-    strength: float = STRENGTH_DEFAULT
-    # AnimateLCM only: how hard this region's picture is pressed into its mask.
-    # None follows the job's global ip_weight, which is what every render did
-    # before the dial existed.
+    # How hard this region's picture is pressed into its mask. None follows
+    # the job's global ip_weight, which is what every render did before the
+    # dial existed.
     ip_weight: Optional[float] = None
     threshold: int = 20
-    # AnimateLCM only: kentskooking's RGB masks — this colour's own embedding
+    # kentskooking's RGB masks — this colour's own embedding
     # stack, a conditioning layer keyed on the region's mask. Held for the
     # whole clip; a curve here is ignored.
     embeddings: list["EmbeddingSpec"] = []
@@ -230,16 +197,6 @@ class GenerateRequest(BaseModel):
     base_image_id: Optional[uuid.UUID] = None
     base_weight: float = LCM_BASE_DEFAULT
     regions: list[RegionSpec] = []
-    # Which graph renders this. `animatelcm` is the rebuild of the user's own
-    # AnimateDiff workflow and is the default: measured 2026-08-19, VACE cannot
-    # carry material from a reference picture, because it repaints from noise
-    # where the other refines an existing frame at denoise 0.4.
-    engine: str = "animatelcm"                # animatelcm | vace
-    canvas: str = DEFAULT_CANVAS              # vace: render size
-    aspect: str = DEFAULT_ASPECT              # vace: wide | tall | square
-    recipe: str = DEFAULT_RECIPE              # vace: sampler
-    fit: str = DEFAULT_FIT                    # pad | crop | stretch
-
     # ── AnimateLCM dials ─────────────────────────────────────────────────────
     # "auto" follows the control track's own shape, which is what makes a
     # portrait clip come back portrait without anyone choosing a format.
@@ -256,26 +213,16 @@ class GenerateRequest(BaseModel):
     # Ordinary footage rather than a rendered depth pass: DepthAnythingV2
     # derives the depth in-graph. Set from the track's own `kind`, not by hand.
     derive_depth: bool = False
-    strength: float = STRENGTH_DEFAULT
-    length: Optional[int] = None              # None = as much of the track as Wan takes
+    length: Optional[int] = None              # None = as much of the track as the model takes
     seed: int = -1
     negative: Optional[str] = None
-    # AnimateLCM only: textual-inversion embeddings joined into the prompt —
+    # Textual-inversion embeddings joined into the prompt —
     # kentskooking's material channel. With at least one, the reference picture
     # becomes optional: the embeddings are then the material.
     embeddings: list[EmbeddingSpec] = []
     embedding_join: str = DEFAULT_EMBEDDING_JOIN
     injection: Optional[InjectionSpec] = None
 
-
-# Valid values for the three axes, read off the builder's own tables so a new
-# canvas or recipe never has to be declared twice.
-CANVASES = {c["key"] for c in canvas_options()}
-ASPECTS = {a["key"] for a in aspect_options()}
-RECIPES = {r["key"] for r in recipe_options()}
-
-
-# ── Control tracks ───────────────────────────────────────────────────────────
 
 def _track_rel(track_id: uuid.UUID, suffix: str) -> str:
     return f"control/{track_id}{suffix}"
@@ -291,8 +238,8 @@ def _serialize_track(t: ControlTrack) -> dict:
         "height": t.height,
         "frame_count": t.frame_count,
         "fps": t.fps,
-        # What a job on this track can actually ask for: Wan samples 4n+1
-        # frames and VACE pads anything beyond the track with flat grey.
+        # What a job on this track can actually ask for: the model samples 4n+1
+        # frames and anything beyond the track would be flat grey.
         "usable_frames": loop_length(t.frame_count) if t.frame_count else None,
         "url": f"/api/vace/tracks/{t.id}/file",
         "thumb_url": f"/api/vace/tracks/{t.id}/thumb" if t.thumbnail_path else None,
@@ -941,18 +888,9 @@ async def get_track_preview(track_id: uuid.UUID, db: AsyncSession = Depends(get_
 
 @router.get("/options")
 async def vace_options():
-    """The strength range and what each part of it does.
-
-    Server-side because the bands were measured off this workflow (see
-    services/comfy/vace.py) and would drift the moment the sampler is retuned.
-    """
+    """Dial ranges and defaults. Server-side so the page cannot drift away
+    from the graph's own sweeps."""
     return {
-        "strength_min": STRENGTH_MIN,
-        "strength_max": STRENGTH_MAX,
-        "strength_default": STRENGTH_DEFAULT,
-        "recommended_min": SWEET_MIN,
-        "recommended_max": SWEET_MAX,
-        "bands": strength_bands(),
         "fps": FPS,
         "max_regions": MAX_REGIONS,
         # Automatic colour-ID masks. The palette is not a preference: ColorToMask
@@ -973,18 +911,6 @@ async def vace_options():
                     "Modell nicht: „tomato\" deckt den halben Frame ab, "
                     "„Tomate\" gar nichts.",
         },
-        # The two engines, and what each one is actually good at. Written here
-        # because both sentences are measurements, not opinions.
-        "engines": [
-            {"key": "animatelcm", "label": "AnimateLCM · Refine",
-             "hint": "Der Nachbau des eigenen Workflows. Zieht Material aus dem "
-                     "Referenzbild und verdoppelt die Auflösung in einem zweiten "
-                     "Durchgang bei denoise 0.4. Die erste Wahl."},
-            {"key": "vace", "label": "Wan VACE · Repaint",
-             "hint": "Erfindet Umgebung und Licht frei, überschreibt dabei aber "
-                     "das Material der Vorlage — gemessen. Nur für Fälle, in denen "
-                     "die Vorlage wirklich verschwinden soll."},
-        ],
         "lcm": {
             "depth": {"default": LCM_DEPTH_DEFAULT, "sweep": list(LCM_DEPTH_SWEEP),
                       "hint": "Wie wörtlich die Geometrie genommen wird."},
@@ -995,54 +921,13 @@ async def vace_options():
                               "Das Original stand fest auf 0.40."},
             "rife": [1, 2, 3, 4],
         },
-        "canvases": canvas_options(),
-        "aspects": aspect_options(),
-        "recipes": recipe_options(),
-        "defaults": {
-            "canvas": DEFAULT_CANVAS,
-            "aspect": DEFAULT_ASPECT,
-            "recipe": DEFAULT_RECIPE,
-            "fit": DEFAULT_FIT,
-        },
     }
-
-
-@router.get("/estimate")
-async def vace_estimate(
-    canvas: str = DEFAULT_CANVAS,
-    aspect: str = DEFAULT_ASPECT,
-    recipe: str = DEFAULT_RECIPE,
-    length: int = 81,
-    passes: int = 1,
-):
-    """Wall-clock guess for the whole job, so nobody starts a 50-minute render
-    by accident. Server-side because the cost model is anchored on renders
-    measured off this graph, and a client copy of it would drift silently."""
-    width, height = canvas_size(canvas, aspect)
-    frames = snap_length(length)
-    passes = max(1, passes)
-    seconds = estimate_seconds(canvas, aspect, recipe, frames) * passes
-    return {
-        "seconds": seconds,
-        "width": width,
-        "height": height,
-        "frames": frames,
-        "passes": passes,
-        "label": _duration_label(seconds),
-    }
-
-
-def _duration_label(seconds: int) -> str:
-    if seconds < 90:
-        return f"{seconds} s"
-    minutes = round(seconds / 60)
-    return f"rund {minutes} Min." if minutes < 60 else f"rund {minutes // 60} h {minutes % 60} Min."
 
 
 # ── Generation ───────────────────────────────────────────────────────────────
 
 async def _reference_for(image_id: uuid.UUID, db: AsyncSession) -> Path:
-    """Absolute path of a gallery picture to hand VACE as a reference.
+    """Absolute path of a gallery picture to hand the graph as a reference.
 
     The untouched original, per services/image/rendition.py: a model reading
     the picture is not a viewer, and an enhanced or grained rendition would
@@ -1150,9 +1035,6 @@ async def _check_embeddings(body: GenerateRequest) -> None:
     every = list(body.embeddings) + [e for r in body.regions for e in r.embeddings]
     if not every:
         return
-    if body.engine != "animatelcm":
-        raise HTTPException(status_code=400,
-                            detail="Embeddings gibt es nur in der AnimateLCM-Engine")
     if body.embedding_join not in EMBEDDING_JOINS:
         raise HTTPException(status_code=400,
                             detail=f"embedding_join muss eins von {EMBEDDING_JOINS} sein")
@@ -1184,36 +1066,19 @@ async def _prepare(body: GenerateRequest, db: AsyncSession) -> _Prepared:
         raise HTTPException(status_code=400, detail="At most 3 regions")
     if body.regions and not body.mask_track_id:
         raise HTTPException(status_code=400, detail="Regions need a mask track")
-    lcm = body.engine == "animatelcm"
-    embeddings_only = lcm and bool(body.embeddings)
+    embeddings_only = bool(body.embeddings)
     for i, r in enumerate(body.regions):
-        if not r.image_id and not (lcm and r.embeddings):
+        if not r.image_id and not r.embeddings:
             raise HTTPException(
                 status_code=400,
-                detail=f"Region {i + 1} braucht ein Referenzbild"
-                       + (" oder ein Embedding" if lcm else ""),
+                detail=f"Region {i + 1} braucht ein Referenzbild oder ein Embedding",
             )
-    if body.injection and not lcm:
-        raise HTTPException(status_code=400,
-                            detail="Image Injection gibt es nur in der AnimateLCM-Engine")
     if body.injection and body.injection.color is not None and not body.mask_track_id:
         raise HTTPException(status_code=400,
                             detail="Eine Injektion in eine Region braucht ein Maskenvideo")
     if not body.regions and not body.image_id and not embeddings_only:
         raise HTTPException(status_code=400,
                             detail="Ein Referenzbild oder ein Embedding ist nötig")
-    if body.engine not in ("animatelcm", "vace"):
-        raise HTTPException(status_code=400, detail=f"Unknown engine: {body.engine}")
-    if body.engine == "animatelcm" and body.regions and len(body.regions) > 3:
-        raise HTTPException(status_code=400, detail="At most 3 regions")
-    if body.canvas not in CANVASES:
-        raise HTTPException(status_code=400, detail=f"Unknown canvas: {body.canvas}")
-    if body.aspect not in ASPECTS:
-        raise HTTPException(status_code=400, detail=f"Unknown aspect: {body.aspect}")
-    if body.recipe not in RECIPES:
-        raise HTTPException(status_code=400, detail=f"Unknown recipe: {body.recipe}")
-    if body.fit not in FITS:
-        raise HTTPException(status_code=400, detail=f"Unknown fit: {body.fit}")
     await _check_embeddings(body)
 
     mask = None
@@ -1223,8 +1088,8 @@ async def _prepare(body: GenerateRequest, db: AsyncSession) -> _Prepared:
             raise HTTPException(status_code=404, detail="Mask track missing on disk")
         _validate_mask_pairing(control, mask)
 
-    # Never ask for frames the track cannot guide — VACE pads the surplus with
-    # flat grey and the tail of the clip drifts with nothing steering it.
+    # Never ask for frames the track cannot guide — the tail of the clip would
+    # drift with nothing steering it.
     usable = loop_length(control.frame_count or 0)
     length = snap_length(min(body.length, usable)) if body.length else usable
     if length < 5:
@@ -1280,47 +1145,31 @@ async def generate(body: GenerateRequest, db: AsyncSession = Depends(get_db)):
     db.add(video)
     await db.commit()
 
-    two_stage = body.engine == "animatelcm" and body.preview_first and body.hires
-    if body.engine == "animatelcm":
-        # The image ids travel with the job, not just their resolved paths:
-        # stage two runs in a different process lifetime and has to find the
-        # same pictures again from the sidecar.
-        runner = _run_lcm(
-            video.id, body, control.filepath, mask.filepath if mask else None,
-            references, length, (control.width, control.height), control.kind,
-            image_ids=image_ids, injection=prep.injection,
-        )
-    else:
-        runner = _run_vace(
-            video.id, body, control.filepath, mask.filepath if mask else None,
-            references, length, (control.width, control.height), control.kind,
-        )
-    safe_create_task(runner, name=f"{body.engine}:{video.id}")
-    # AnimateLCM renders every region in one sampler pass; VACE needs one full
-    # render per region, each repainting the last.
-    passes = 1 if body.engine == "animatelcm" else max(1, len(body.regions))
-    total_seconds = (
-        _lcm_seconds(body, control.width, control.height, length)
-        if body.engine == "animatelcm"
-        else estimate_seconds(body.canvas, body.aspect, body.recipe, length) * passes
+    two_stage = body.preview_first and body.hires
+    # The image ids travel with the job, not just their resolved paths:
+    # stage two runs in a different process lifetime and has to find the
+    # same pictures again from the sidecar.
+    runner = _run_lcm(
+        video.id, body, control.filepath, mask.filepath if mask else None,
+        references, length, (control.width, control.height), control.kind,
+        image_ids=image_ids, injection=prep.injection,
     )
+    safe_create_task(runner, name=f"animatelcm:{video.id}")
+    total_seconds = _lcm_seconds(body, control.width, control.height, length)
     # With a preview stage the number the user is waiting on is the base pass,
     # not the whole graph — quoting the total would make the wait look three
     # times longer than the one that actually ends in something to look at.
     seconds = max(20, int(total_seconds * _LCM_BASE_SHARE)) if two_stage else total_seconds
     logger.info(
-        "Queued VACE job %s — %s/%s/%s, %d frames, %d pass(es), ~%d s",
-        video.id, body.canvas, body.aspect, body.recipe, length, passes, seconds,
+        "Queued AnimateLCM job %s — %d frames, ~%d s", video.id, length, seconds,
     )
     return {
         "video_id": str(video.id),
         "status": "generating",
         "length": length,
-        "passes": passes,
         "seconds": seconds,
         "total_seconds": total_seconds,
         "two_stage": two_stage,
-        **describe_strength(body.strength),
     }
 
 
@@ -1363,7 +1212,7 @@ async def _submit_outputs(
     # This path had no pre-flight at all while it was the only GPU consumer in
     # the tool. Segmentation made it a second one, so it needs the same manners
     # as routers/video.py.
-    await free_vram_for(_LCM_MIN_FREE_VRAM, "AnimateLCM/VACE")
+    await free_vram_for(_LCM_MIN_FREE_VRAM, "AnimateLCM")
     async with httpx.AsyncClient(timeout=240) as client:
         prompt_id = await post_workflow(client, wf)
         listener = get_listener()
@@ -1409,8 +1258,6 @@ def _layer_factor(req: "GenerateRequest") -> int:
     """UNet evaluations per step: one, plus one per embedding with a curve and
     one per region with embeddings — each is a conditioning layer of its own,
     sampled beside the base."""
-    if req.engine != "animatelcm":
-        return 1
     return (1 + sum(1 for e in req.embeddings if e.curve)
             + sum(1 for r in req.regions if r.embeddings))
 
@@ -1511,7 +1358,6 @@ def _lcm_request(
         invert_depth=not derive,
         filename_prefix=f"artrium_lcm_{video_id.hex[:8]}",
         # Per-region weight when one was sent, the job's global one otherwise.
-        # Never `r.strength`: that is VACE's denoise and means nothing here.
         regions=[
             LcmRegion(
                 color=tuple(r.color), reference=staged[i], threshold=r.threshold,
@@ -1646,8 +1492,8 @@ async def _run_lcm(
     injection: Optional[tuple[str, Optional[int]]] = None,
 ) -> None:
     """Background job: one graph, one sampler pass per stage, whatever the
-    region count. Simpler than the VACE runner precisely because the adapters
-    carry their own masks instead of needing a render each.
+    region count — the adapters carry their own masks, so a region needs no
+    render of its own.
 
     Splits in two when the caller asked for a preview *and* there is a hires
     pass to hold back — otherwise there is nothing to decide and the job runs
@@ -1814,124 +1660,6 @@ async def keep_lcm_preview(video_id: uuid.UUID, db: AsyncSession = Depends(get_d
     return {"video_id": str(video_id), "status": "done"}
 
 
-async def _run_vace(
-    video_id: uuid.UUID,
-    req: GenerateRequest,
-    control_rel: str,
-    mask_rel: str | None,
-    references: list[Path],
-    length: int,
-    source_size: tuple[int | None, int | None] = (None, None),
-    track_kind: str = "depth",
-) -> None:
-    """Background job: one pass without regions, one pass per region with them.
-
-    Each region pass takes the previous pass's *render* as its control video —
-    a mask asks VACE to preserve the unmasked part of whatever it is given, and
-    preserving a depth pass just reproduces the grey.
-    """
-    key = str(video_id)
-    settings.videos_dir.mkdir(parents=True, exist_ok=True)
-    staged: list[str] = []
-    try:
-        control_abs = str(settings.storage_dir / control_rel)
-        mask_abs = str(settings.storage_dir / mask_rel) if mask_rel else None
-
-        for i, path in enumerate(references):
-            staged.append(_stage_image(path, f"artrium_vace_ref_{video_id.hex[:8]}_{i}.png"))
-
-        base = VaceRequest(
-            control_video=control_abs,
-            prompt=req.prompt,
-            canvas=req.canvas,
-            aspect=req.aspect,
-            recipe=req.recipe,
-            fit=req.fit,
-            reference_image=staged[0],
-            mask_video=mask_abs,
-            length=length,
-            source_frames=length,
-            strength=clamp_strength(req.strength),
-            seed=req.seed,
-            derive_depth=False,      # set per-pass below
-            filename_prefix=f"artrium_vace_{video_id.hex[:8]}",
-            regions=[
-                Region(color=tuple(r.color), reference=staged[i],
-                       strength=clamp_strength(r.strength), threshold=r.threshold)
-                for i, r in enumerate(req.regions)
-            ],
-        )
-        if req.negative:
-            base.negative = req.negative
-
-        passes = plan_region_passes(base)
-        total = len(passes)
-        produced: Path | None = None
-
-        for i, step in enumerate(passes):
-            if i:
-                # From pass 1 on the control track is a finished render, so it
-                # is neither inverted nor run through DepthAnything — that is
-                # already set by plan_region_passes, and the path is what only
-                # the runner can know.
-                step.control_video = str(produced)
-                step.source_frames = length
-            message = (
-                f"Durchlauf {i + 1} / {total}…" if total > 1
-                else "Struktur wird gerendert…"
-            )
-            _set_progress(key, "generating", message, 5 + int(90 * i / total))
-            wf, save_node = build_vace_workflow(step)
-            band = (5 + int(90 * i / total), 5 + int(90 * (i + 1) / total))
-            produced = await _submit(wf, save_node, key, band, message)
-            if i + 1 < total:
-                async with httpx.AsyncClient(timeout=60) as client:
-                    await free_memory(client)
-
-        _set_progress(key, "finalizing", "Wird gespeichert…", 96)
-        filename = f"vace_{video_id}.mp4"
-        dest = settings.videos_dir / filename
-        shutil.copy2(produced, dest)
-        produced.unlink(missing_ok=True)
-        width, height = await probe_video_dimensions(dest)
-        # The gallery card looks for this by convention — videos_dir /
-        # "<id>_thumb.jpg" — and without it the preview is a black rectangle
-        # with a play button, which is exactly what a 404'd <img> looks like.
-        try:
-            await make_video_thumbnail(dest, settings.videos_dir / f"{video_id}_thumb.jpg")
-        except Exception as exc:
-            logger.warning("Thumbnail failed for %s: %s", video_id, exc)
-
-        async with AsyncSessionLocal() as db:
-            video = await db.get(Video, video_id)
-            if video:
-                video.filename = filename
-                video.filepath = str(dest.relative_to(settings.storage_dir)).replace("\\", "/")
-                video.width, video.height = width, height
-                video.status = "done"
-                video.error = None
-                await db.commit()
-
-        _set_progress(key, "done", "Fertig", 100)
-        logger.info("VACE job %s finished (%sx%s, %d frames)", video_id, width, height, length)
-
-    except Exception as exc:
-        logger.exception("VACE job %s failed", video_id)
-        async with AsyncSessionLocal() as db:
-            video = await db.get(Video, video_id)
-            if video:
-                video.status = "failed"
-                video.error = f"{type(exc).__name__}: {exc}"[:2000]
-                await db.commit()
-        _set_progress(key, "failed", f"{type(exc).__name__}: {exc}", 0)
-    finally:
-        inp = settings.comfyui_output_dir.parent / "input"
-        for name in staged:
-            (inp / name).unlink(missing_ok=True)
-        if _progress.get(key, {}).get("phase") == "done":
-            _progress.pop(key, None)
-
-
 # ── Embedding ladder ─────────────────────────────────────────────────────────
 # The measured lesson of 2026-09-28 (scripts/embedding_sweep.py): stacked
 # embeddings do not blend, one of them wins, and the weight window in which two
@@ -1971,8 +1699,6 @@ class LadderRequest(BaseModel):
 def plan_ladder(body: LadderRequest) -> list[dict]:
     """The rungs, validated. Pure, so the rules can be tested without a GPU."""
     req = body.request
-    if req.engine != "animatelcm":
-        raise HTTPException(status_code=400, detail="Die Leiter gibt es nur für AnimateLCM")
     if not any(e.name == body.target for e in req.embeddings):
         raise HTTPException(status_code=400,
                             detail="Das Embedding der Leiter muss im Render ausgewählt sein")

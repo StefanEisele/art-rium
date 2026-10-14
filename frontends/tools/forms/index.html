@@ -1,0 +1,2538 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e1013">
+<title>Formen</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="/shared/shared.css">
+<style>
+  /* ── Shell (deltas from shared.css) ── */
+  .app { min-height: 100dvh; max-width: 620px; padding-bottom: env(safe-area-inset-bottom); }
+  header { justify-content: space-between; padding: 14px 20px; }
+  .header-left { display: flex; align-items: center; gap: 10px; }
+  main {
+    flex: 1; overflow-y: auto; padding: 18px 20px 40px;
+    display: flex; flex-direction: column; gap: 14px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .card h2 {
+    font-size: 15px; font-weight: 700; letter-spacing: -0.2px;
+    display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px;
+  }
+  .card h2 .count {
+    font-size: 11px; font-weight: 700; color: var(--accent);
+    text-transform: uppercase; letter-spacing: 0.6px;
+  }
+  .hint { font-size: 11px; color: var(--text-dim); line-height: 1.45; }
+  label.lbl {
+    font-size: 11px; font-weight: 700; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.7px;
+  }
+
+  /* ── Stage: the live preview. On a phone it comes first, above the
+       controls — the picture is what every dial is for. ── */
+  .stage-card { order: -1; display: flex; flex-direction: column; gap: 10px; }
+  .stage {
+    position: relative; background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    padding: 10px; min-height: 220px;
+  }
+  #view {
+    display: block; border-radius: 6px; background: #fff;
+    max-width: 100%; max-height: 62vh; touch-action: manipulation;
+  }
+  .stage-msg {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; font-size: 13px; color: var(--text-dim); line-height: 1.5;
+    background: var(--surface);
+  }
+  .stage-msg.show { display: flex; }
+  .stage-msg pre { white-space: pre-wrap; text-align: left; font-size: 11px; color: var(--red); }
+  .stage-badge {
+    position: absolute; left: 18px; top: 18px; padding: 4px 9px; border-radius: 999px;
+    background: rgba(10,10,12,0.72); color: #fff; font-size: 11px; font-weight: 700;
+    letter-spacing: .3px; pointer-events: none; font-variant-numeric: tabular-nums;
+  }
+  .timeline { display: flex; align-items: center; gap: 10px; }
+  .play-btn {
+    width: 38px; height: 38px; flex: none; border-radius: 50%;
+    border: 1.5px solid var(--border-strong); background: var(--surface2); color: var(--text);
+    font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .play-btn:hover { border-color: var(--accent-border); }
+  #scrub { flex: 1; min-width: 0; accent-color: var(--accent); }
+  .frame-readout {
+    font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+    min-width: 92px; text-align: right;
+  }
+  .stage-tools { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+
+  /* ── Segmented control (same shape as the Struktur page's tier rows) ── */
+  .seg {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
+    background: var(--surface2); border-radius: 10px; padding: 3px; gap: 0;
+  }
+  .seg button {
+    background: transparent; border: none; color: var(--text-dim);
+    font: inherit; font-size: 12px; font-weight: 600; padding: 7px 4px; border-radius: 8px;
+    cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .seg button small { display: block; font-size: 10px; font-weight: 500; opacity: .75; }
+  .seg button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,0.25); }
+  .seg.compact { display: inline-grid; grid-template-columns: repeat(3, auto); }
+  #format-row { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  #format-row button { padding: 7px 0; font-size: 11px; }
+  .seg.compact button { padding: 6px 12px; }
+
+  /* ── Motif picker: each motif is its own little live-rendered depth still ── */
+  .motif-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  .motif {
+    position: relative; border: 2px solid transparent; border-radius: 10px; overflow: hidden;
+    background: var(--surface2); cursor: pointer; padding: 0; color: var(--text);
+    display: flex; flex-direction: column; align-items: stretch;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .motif canvas { width: 100%; aspect-ratio: 1; display: block; background: #fff; }
+  .motif span { font-size: 10px; font-weight: 600; padding: 4px 2px; text-align: center; color: var(--text-dim); }
+  .motif.on { border-color: var(--accent); }
+  .motif.broken, .variant.broken { opacity: .35; }
+  .motif.on span { color: var(--accent); }
+  .dice-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
+  .seed-chip { margin-left: auto; font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+  /* ── Dials ── */
+  .dial + .dial, .dial + .seg-field, .seg-field + .dial, .seg-field + .seg-field { margin-top: 14px; }
+  .dial input[type=range] { width: 100%; margin: 0; accent-color: var(--accent); display: block; }
+  .dial-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .dial-head .val { font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+  .seg-field .lbl { display: block; margin-bottom: 6px; }
+  .sub-title { font-size: 12px; font-weight: 700; color: var(--text); margin: 18px 0 8px; }
+  .sub-title:first-child { margin-top: 2px; }
+  .row-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+
+  /* ── Variants: six live alternatives of the current motif ── */
+  .variants { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .variant {
+    position: relative; border: 2px solid transparent; border-radius: 10px; overflow: hidden;
+    background: #fff; cursor: pointer; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-tap-highlight-color: transparent; transition: border-color .15s, transform .1s;
+  }
+  .variant:hover { border-color: var(--accent-border); }
+  .variant:active { transform: scale(0.98); }
+  /* A portrait thumbnail at full column width would be taller than the
+     stage on a desktop; capped, it stays a strip. */
+  .variant canvas { width: auto; height: auto; max-width: 100%; max-height: 200px; display: block; }
+  .variant .tag {
+    position: absolute; left: 5px; bottom: 5px; font-size: 10px; font-weight: 700;
+    background: rgba(10,10,12,0.72); color: #fff; padding: 2px 7px; border-radius: 999px;
+  }
+
+  /* ── Save / collection / library ── */
+  .title-input {
+    width: 100%; background: var(--surface2); border: 1.5px solid var(--border);
+    border-radius: 10px; color: var(--text); font-size: 15px; padding: 11px 12px;
+    outline: none; font-family: inherit;
+  }
+  .title-input:focus { border-color: var(--accent); }
+  #save-btn {
+    width: 100%; background: var(--accent); color: var(--on-accent);
+    font-size: 16px; font-weight: 700; padding: 14px; border: none;
+    border-radius: var(--radius-pill); cursor: pointer; font-family: inherit; margin-top: 10px;
+  }
+  #save-btn:hover:not(:disabled) { background: var(--accent-hover); }
+  #save-btn:disabled { opacity: .45; cursor: not-allowed; }
+  .save-meta { font-size: 12px; color: var(--text-dim); margin-top: 8px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+  .progress { margin-top: 10px; display: none; }
+  .progress.show { display: block; }
+  .progress .progress-text { font-size: 12px; color: var(--text-dim); margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .result {
+    display: none; margin-top: 12px; padding: 12px; border-radius: var(--radius);
+    background: var(--surface2); border: 1px solid var(--border-strong);
+  }
+  .result.show { display: block; }
+  .result-head { display: flex; gap: 12px; align-items: center; }
+  .result-head img { width: 64px; height: 64px; object-fit: contain; background: #fff; border-radius: 6px; flex: none; }
+  .result-head b { display: block; font-size: 14px; }
+  .result-head span { font-size: 12px; color: var(--text-dim); }
+  .swatches { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; font-size: 11px; color: var(--text-dim); }
+  .swatch { display: inline-flex; align-items: center; gap: 5px; }
+  .swatch i { width: 11px; height: 11px; border-radius: 3px; display: inline-block; border: 1px solid rgba(255,255,255,.25); }
+  .result .btn { margin-top: 12px; }
+  .strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+  .tile {
+    position: relative; border-radius: 10px; overflow: hidden; background: #fff; cursor: pointer;
+    border: 1.5px solid var(--border);
+  }
+  .tile canvas, .tile img { width: 100%; aspect-ratio: 1; object-fit: contain; display: block; background: #fff; }
+  .tile .cap {
+    font-size: 10px; padding: 4px 6px; background: var(--surface2); color: var(--text-dim);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tile .x {
+    position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border-radius: 50%;
+    border: none; background: rgba(10,10,12,0.75); color: #fff; font-size: 12px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .tile .x:hover { background: var(--red); }
+  .tile .go {
+    position: absolute; top: 4px; left: 4px; padding: 2px 7px; border-radius: 999px;
+    background: rgba(10,10,12,0.75); color: #fff; font-size: 10px; font-weight: 700; text-decoration: none;
+  }
+  .tile .go:hover { background: var(--accent); }
+  .empty-note { font-size: 12px; color: var(--text-faint); line-height: 1.5; grid-column: 1 / -1; }
+
+  /* ── Desktop: controls left, picture right ── */
+  @media (min-width: 860px) {
+    .split { --split-side: clamp(380px, 30vw, 470px); }
+    .split-side.bare, .split-main.bare { display: flex; flex-direction: column; gap: 14px; }
+    .stage-card { order: 0; }
+    #view { max-height: calc(100dvh - 330px); }
+    .variants { grid-template-columns: repeat(6, 1fr); }
+    .main-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+    .main-row > .card + .card { margin-top: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="app wide">
+
+  <header>
+    <div class="header-left">
+      <a class="back-btn" href="/" title="Dashboard">‹</a>
+      <h1>Formen</h1>
+    </div>
+    <button class="chip-btn" onclick="resetSession()" title="Gemerkte Einstellungen verwerfen">Reset</button>
+  </header>
+
+  <main class="split">
+    <div class="split-side bare">
+
+      <section class="card">
+        <h2>Motiv <span class="count" id="motif-name"></span></h2>
+        <div class="motif-grid" id="motif-grid"></div>
+        <div class="dice-row">
+          <button class="chip-btn" onclick="rollVariants(false)" title="Sechs neue Varianten dieses Motivs">🎲 Varianten</button>
+          <button class="chip-btn" onclick="rollVariants(true)" title="Sechs Varianten quer durch alle Motive, mit Umgebung und Komposition">🎲 Wild</button>
+          <button class="chip-btn" onclick="resetMotif()" title="Dieses Motiv auf seine Grundeinstellung">Grundform</button>
+          <span class="seed-chip" id="seed-chip"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Format</h2>
+        <div class="seg" id="format-row"></div>
+        <div class="seg" id="length-row" style="margin-top:8px"></div>
+        <div class="hint" id="format-hint" style="margin-top:8px"></div>
+      </section>
+
+      <details class="fold" id="fold-form" open>
+        <summary><span class="fold-title">Form</span><span class="fold-value" id="v-form"></span></summary>
+        <div class="fold-body" id="form-dials"></div>
+      </details>
+
+      <details class="fold" id="fold-cam">
+        <summary><span class="fold-title">Kamera</span><span class="fold-value" id="v-cam"></span></summary>
+        <div class="fold-body" id="cam-dials"></div>
+      </details>
+
+      <details class="fold" id="fold-comp">
+        <summary><span class="fold-title">Komposition</span><span class="fold-value" id="v-comp"></span></summary>
+        <div class="fold-body" id="comp-dials"></div>
+      </details>
+
+      <details class="fold" id="fold-surf">
+        <summary><span class="fold-title">Oberfläche</span><span class="fold-value" id="v-surf"></span></summary>
+        <div class="fold-body" id="surf-dials"></div>
+      </details>
+
+      <details class="fold" id="fold-depth">
+        <summary><span class="fold-title">Tiefe</span><span class="fold-value" id="v-depth"></span></summary>
+        <div class="fold-body">
+          <div id="depth-dials"></div>
+          <div class="row-actions">
+            <button class="chip-btn" id="auto-btn" onclick="toggleAuto()">Auto</button>
+          </div>
+          <div class="hint" style="margin-top:8px">
+            Wie in Blender: nah = dunkel, Hintergrund = weiß. Struktur dreht das vor dem
+            Rendern um. „Auto“ misst die Szene über den ganzen Loop und legt den
+            Bereich so, dass das Motiv von Schwarz bis Hellgrau reicht.
+          </div>
+        </div>
+      </details>
+
+      <details class="fold" id="fold-mask">
+        <summary><span class="fold-title">Maske</span><span class="fold-value" id="v-mask"></span></summary>
+        <div class="fold-body">
+          <div class="seg" id="mask-row"></div>
+          <div class="swatches" id="mask-swatches"></div>
+          <div class="hint" style="margin-top:8px">
+            Ein zweites Video aus derselben Szene: jede Fläche in reinem Rot, Grün oder
+            Blau, ohne Kantenglättung — Struktur keyt daraus die Regionen, und jede Farbe
+            bekommt ihr eigenes Referenzbild oder Embedding.
+          </div>
+        </div>
+      </details>
+    </div>
+
+    <div class="split-main bare">
+
+      <section class="stage-card">
+        <div class="stage" id="stage">
+          <canvas id="view" width="320" height="320"></canvas>
+          <span class="stage-badge" id="stage-badge"></span>
+          <div class="stage-msg" id="stage-msg"></div>
+        </div>
+        <div class="timeline">
+          <button class="play-btn" id="play-btn" onclick="togglePlay()" title="Abspielen / Anhalten (Leertaste)">❚❚</button>
+          <input type="range" id="scrub" min="0" max="48" step="1" value="0">
+          <span class="frame-readout" id="frame-readout"></span>
+        </div>
+        <div class="stage-tools">
+          <div class="seg compact" id="view-row"></div>
+          <button class="chip-btn" id="step-btn" onclick="toggleStepped()"
+                  title="Zeigt nur die Frames, die tatsächlich gerendert werden (8 fps)">Frames</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Varianten <span class="count" id="variants-count"></span></h2>
+        <div class="variants" id="variants"></div>
+        <div class="hint" style="margin-top:8px">Tippen übernimmt eine Variante in den Editor.</div>
+      </section>
+
+      <div class="main-row">
+        <section class="card">
+          <h2>Speichern</h2>
+          <input class="title-input" id="title" placeholder="Titel">
+          <div class="save-meta" id="save-meta"></div>
+          <button id="save-btn" onclick="saveCurrent()">In die Struktur-Bibliothek</button>
+          <div class="row-actions">
+            <button class="chip-btn" onclick="collect()" title="Diesen Loop für eine Serie merken">★ Zur Sammlung</button>
+          </div>
+          <div class="progress" id="save-progress">
+            <div class="progress-track"><div class="progress-fill" id="save-fill" style="width:0%"></div></div>
+            <div class="progress-text" id="save-text"></div>
+          </div>
+          <div class="result" id="save-result"></div>
+        </section>
+
+        <section class="card">
+          <h2>Sammlung <span class="count" id="coll-count"></span></h2>
+          <div class="strip" id="coll-strip"></div>
+          <div class="hint" id="coll-hint" style="margin-top:8px"></div>
+          <div class="row-actions">
+            <button class="chip-btn apply" id="coll-save-btn" onclick="saveCollection()">Alle speichern</button>
+            <button class="chip-btn remove" onclick="clearCollection()">Leeren</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2>Meine Loops <span class="count" id="lib-count"></span></h2>
+        <div class="strip" id="lib-strip"></div>
+        <div class="hint" style="margin-top:8px">
+          Tippen lädt das Rezept zurück in den Editor. ↗ öffnet den Loop direkt in Struktur.
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+<div id="toast"></div>
+
+<script src="/shared/shared.js"></script>
+<script>
+'use strict';
+// ═══════════════════════════════════════════════════════════════════════════
+// Formen — generated, seamlessly looping depth tracks for the Struktur tool.
+//
+// One WebGL2 fragment shader raymarches signed-distance scenes. Every motion
+// in it is a function of the loop phase φ ∈ [0,1) through whole numbers of
+// cycles (sin(2π·k·φ), k an integer; a camera orbit of whole turns; a fly-
+// through that advances exactly one repeat of its own world), so frame N is
+// frame 0 by construction — not by a cross-fade.
+//
+// The same scene draws three things:
+//   depth  Blender's convention, near = dark, background = white, 2×2
+//          supersampled — what routers/vace.py expects of a "depth" track
+//          (it inverts before the ControlNet).
+//   mask   the group each surface belongs to as a pure primary, ONE sample
+//          per pixel at its centre: an anti-aliased edge would be a ramp of
+//          colours ColorToMask cannot key.
+//   lit    shaded, for reading the composition; never exported.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const TAU = Math.PI * 2;
+const $ = (id) => document.getElementById(id);
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+// ── Motifs ──────────────────────────────────────────────────────────────────
+// `gl` is the shader's motif index. Parameter ORDER is the uniform slot order
+// (uP[0..9]) and has to match the GLSL below.
+const P = (k, l, min, max, def, o = {}) => ({
+  k, l, min, max, def,
+  int: !!o.int,
+  step: o.step ?? (o.int ? 1 : (max - min) / 200),
+  dice: o.dice || [min, max],
+  opts: o.opts || null,
+  // Chance a roll leaves this at `min` — for dials whose minimum means "off".
+  off: o.off || 0,
+  // Never roll 0: for a dial that is the motif's only motion, 0 is a still.
+  nonzero: !!o.nonzero,
+  fmt: o.fmt || null,
+});
+const TEMPO = (v) => `×${v}`;
+const TURNS = (v) => (v === 0 ? 'steht' : `${v > 0 ? '+' : ''}${v}`);
+
+const MOTIFS = [
+  { id: 'balls', gl: 0, name: 'Kugeln', groups: ['Kugeln A', 'Kugeln B'], whole: 'Kugeln',
+    params: [
+      P('count', 'Anzahl', 2, 18, 9, { int: true, dice: [4, 16] }),
+      P('radius', 'Größe', 0.15, 0.9, 0.42, { dice: [0.2, 0.55] }),
+      P('spread', 'Streuung', 0.4, 2.6, 1.5, { dice: [1.0, 2.3] }),
+      P('blend', 'Verschmelzen', 0, 1.2, 0, { dice: [0, 0.9], off: 0.4 }),
+      P('mix', 'Größenmix', 0, 1, 0.5),
+      P('tempo', 'Tempo', 1, 3, 1, { int: true, dice: [1, 2], fmt: TEMPO }),
+      P('height', 'Höhe der Bahnen', 0, 1.2, 0.7, { dice: [0.2, 1.1] }),
+    ],
+    cam: { yaw: 0.5, pitch: 0.22, zoom: 1, fov: 40 } },
+  { id: 'blob', gl: 1, name: 'Blob', groups: ['Beulen', 'Mulden'], whole: 'Blob',
+    params: [
+      P('shape', 'Kugel ↔ Würfel', 0, 1, 0.3),
+      P('size', 'Größe', 0.6, 1.6, 1.1, { dice: [0.85, 1.4] }),
+      P('amp', 'Beulen', 0, 0.6, 0.28, { dice: [0.1, 0.5] }),
+      P('freq', 'Frequenz', 0.8, 6, 2.2, { dice: [1.2, 4.5] }),
+      P('twist', 'Verdrehung', -2, 2, 0.4, { dice: [-1.5, 1.5] }),
+      P('tempo', 'Morph-Tempo', 1, 3, 1, { int: true, dice: [1, 2], fmt: TEMPO }),
+      P('spin', 'Drehung', -2, 2, 1, { int: true, dice: [-1, 1], fmt: TURNS }),
+      P('tumble', 'Taumeln', 0, 1, 0.3, { dice: [0, 0.8] }),
+    ],
+    cam: { yaw: 0.3, pitch: 0.25, zoom: 1, fov: 40 } },
+  { id: 'rings', gl: 6, name: 'Ringe', groups: ['Ringe A', 'Ringe B'], whole: 'Ringe',
+    params: [
+      P('n', 'Ringe', 1, 7, 4, { int: true, dice: [2, 7] }),
+      P('R', 'Außenradius', 0.8, 2.2, 1.6, { dice: [1.2, 2] }),
+      P('step', 'Abstand', 0.08, 0.5, 0.25, { dice: [0.12, 0.4] }),
+      P('th', 'Stärke', 0.03, 0.3, 0.09, { dice: [0.04, 0.2] }),
+      P('tempo', 'Tempo', 1, 3, 1, { int: true, dice: [1, 2], fmt: TEMPO }),
+      P('tilt', 'Schräge', 0, 1, 0.4),
+      P('profile', 'Profil', 0, 1, 0, { int: true, opts: ['rund', 'eckig'] }),
+      P('core', 'Kern', 0, 0.8, 0.35, { dice: [0, 0.6], off: 0.3 }),
+    ],
+    cam: { yaw: 0.6, pitch: 0.3, zoom: 1, fov: 40 } },
+  { id: 'fractal', gl: 7, name: 'Fraktal', groups: ['Hälfte A', 'Hälfte B'], whole: 'Fraktal',
+    params: [
+      P('iter', 'Tiefe', 2, 6, 5, { int: true, dice: [3, 5] }),
+      P('scale', 'Skalierung', 1.5, 2.8, 2.0, { dice: [1.7, 2.5] }),
+      P('off', 'Versatz', 0.3, 1.6, 1.0, { dice: [0.6, 1.4] }),
+      P('fold', 'Faltung', -0.6, 0.6, 0.15, { dice: [-0.5, 0.5] }),
+      P('breath', 'Atmung', 0, 0.5, 0.12, { dice: [0, 0.2] }),
+      P('btempo', 'Atem-Tempo', 1, 3, 1, { int: true, dice: [1, 2], fmt: TEMPO }),
+      P('spin', 'Drehung', -2, 2, 1, { int: true, dice: [-1, 1], nonzero: true, fmt: TURNS }),
+      P('size', 'Größe', 0.6, 1.8, 1.2, { dice: [0.9, 1.5] }),
+      P('family', 'Familie', 0, 1, 0, { int: true, opts: ['Tetraeder', 'Menger'] }),
+      P('fill', 'Füllung', 0.3, 1.2, 1, { dice: [0.6, 1.05] }),
+    ],
+    cam: { yaw: 0.7, pitch: 0.35, zoom: 1, fov: 40 } },
+  { id: 'helix', gl: 8, name: 'Spirale', groups: ['Strang A', 'Strang B'], whole: 'Spirale',
+    params: [
+      P('strands', 'Stränge', 1, 4, 2, { int: true }),
+      P('per', 'Glieder je Windung', 4, 16, 9, { int: true, dice: [5, 14] }),
+      P('R', 'Radius', 0.3, 1.5, 0.9, { dice: [0.5, 1.3] }),
+      P('sz', 'Gliedgröße', 0.08, 0.5, 0.22, { dice: [0.12, 0.4] }),
+      P('pitch', 'Steigung', 0.4, 3, 1.4, { dice: [0.8, 2.4] }),
+      P('spin', 'Drehung', -3, 3, 1, { int: true, dice: [-2, 2], nonzero: true, fmt: TURNS }),
+      P('link', 'Glied', 0, 2, 0, { int: true, opts: ['Kugel', 'Würfel', 'Scheibe'] }),
+      P('taper', 'Verjüngung', -0.8, 0.8, 0, { dice: [-0.6, 0.6] }),
+    ],
+    // Seen steeply from above a dense helix projects to a closed ring whose
+    // turning cannot be seen, so a roll keeps the camera nearer the side.
+    cam: { yaw: 0.2, pitch: 0.12, zoom: 1, fov: 40 }, pitchDice: [-0.35, 0.6] },
+  { id: 'pillars', gl: 5, name: 'Säulen', groups: ['Säulen A', 'Säulen B'], whole: 'Säulen', env: 1,
+    params: [
+      P('N', 'Raster', 3, 14, 8, { int: true, dice: [4, 12] }),
+      P('gap', 'Fuge', 0, 0.8, 0.18, { dice: [0.05, 0.5] }),
+      P('wave', 'Welle', 0, 3, 0, { int: true, opts: ['Ring', 'Diagonal', 'Puls', 'Interferenz'] }),
+      P('amp', 'Hub', 0, 2.5, 1.2, { dice: [0.5, 2] }),
+      P('freq', 'Wellenlänge', 0.3, 3, 1.2, { dice: [0.6, 2.2] }),
+      P('tempo', 'Tempo', 1, 3, 1, { int: true, dice: [1, 2], fmt: TEMPO }),
+      P('round', 'Rundung', 0, 0.9, 0.1, { dice: [0, 0.6] }),
+    ],
+    cam: { yaw: 0.6, pitch: 0.6, zoom: 1, fov: 38 } },
+  { id: 'tunnel', gl: 2, name: 'Tunnel', fly: true, groups: ['Rahmen A', 'Rahmen B'], whole: 'Rahmen', envLabel: 'Röhre',
+    params: [
+      P('shape', 'Form', 0, 4, 0, { int: true, opts: ['Quadrat', 'Kreis', 'Sechseck', 'Dreieck', 'Raute'] }),
+      P('size', 'Öffnung', 0.6, 3, 1.4, { dice: [0.9, 2.2] }),
+      P('thick', 'Rahmentiefe', 0.05, 1.5, 0.35, { dice: [0.1, 1] }),
+      P('border', 'Rahmenbreite', 0.1, 2, 0.6, { dice: [0.2, 1.2] }),
+      P('S', 'Abstand', 0.6, 3, 1.4, { dice: [0.8, 2.4] }),
+      P('twist', 'Drall', -0.6, 0.6, 0.12, { dice: [-0.4, 0.4] }),
+      P('tempo', 'Flug', 0, 3, 1, { int: true, dice: [1, 2], fmt: (v) => (v ? `${2 * v} Rahmen` : 'steht') }),
+      P('tube', 'Röhre', 0, 1.5, 0, { dice: [0.1, 1], off: 0.5, fmt: (v) => (v < 0.005 ? 'aus' : v.toFixed(2)) }),
+      P('roll', 'Rollen', -1, 1, 0, { int: true, fmt: TURNS }),
+      P('wob', 'Versatz', 0, 0.8, 0, { dice: [0.05, 0.5], off: 0.4 }),
+    ],
+    cam: { yaw: 0, pitch: 0, height: 0, fov: 62 } },
+  { id: 'layers', gl: 4, name: 'Kulissen', fly: true, groups: ['Ebenen A', 'Ebenen B'], whole: 'Kulissen',
+    params: [
+      P('n', 'Ebenen', 2, 10, 6, { int: true, dice: [3, 9] }),
+      P('gap', 'Abstand', 0.3, 2, 0.8, { dice: [0.4, 1.4] }),
+      P('amp', 'Kammhöhe', 0.1, 1.5, 0.55, { dice: [0.2, 1.1] }),
+      P('freq', 'Welligkeit', 0.3, 4, 1.3, { dice: [0.5, 3] }),
+      P('curv', 'Krümmung', -1.5, 1.5, 0.8, { dice: [-1, 1.2] }),
+      P('tempo', 'Tempo', 1, 3, 1, { int: true, dice: [1, 2], fmt: TEMPO }),
+      P('sway', 'Schwingen', 0, 1, 0.35),
+      P('rise', 'Anstieg', -0.3, 0.6, 0.22, { dice: [0, 0.45] }),
+    ],
+    cam: { yaw: 0, pitch: 0.05, height: 0, fov: 52 } },
+  { id: 'land', gl: 3, name: 'Landschaft', fly: true, groups: ['Höhen', 'Täler'], whole: 'Gelände', envLabel: 'Wasser',
+    params: [
+      P('amp', 'Höhe', 0.2, 2.5, 1, { dice: [0.5, 1.8] }),
+      P('freq', 'Maßstab', 0.2, 1.5, 0.55, { dice: [0.3, 1] }),
+      P('ridge', 'Grate', 0, 1, 0.4),
+      P('terr', 'Terrassen', 0, 10, 0, { int: true, dice: [3, 9], off: 0.6, fmt: (v) => (v < 2 ? 'aus' : `${v}`) }),
+      P('fly', 'Flug', 0, 3, 1, { int: true, dice: [1, 2], fmt: (v) => (v ? `×${v}` : 'steht') }),
+      P('und', 'Wogen', 0, 1, 0.2, { dice: [0, 0.6] }),
+      P('utempo', 'Wogen-Tempo', 1, 3, 1, { int: true, dice: [1, 2], fmt: TEMPO }),
+      P('water', 'Wasser', -1, 1, -1, { dice: [-0.6, 0.4], off: 0.6, fmt: (v) => (v <= -0.95 ? 'aus' : v.toFixed(2)) }),
+    ],
+    cam: { yaw: 0, pitch: -0.28, height: 1.6, fov: 55 }, curve: 'persp' },
+  { id: 'cloth', gl: 9, name: 'Tuch', fly: true, groups: ['Wellenberge', 'Wellentäler'], whole: 'Tuch',
+    params: [
+      P('amp', 'Höhe', 0.05, 1.2, 0.6, { dice: [0.3, 1] }),
+      P('scale', 'Maßstab', 0.3, 4, 2.2, { dice: [1.2, 3.2] }),
+      P('n', 'Wellen', 1, 4, 3, { int: true, dice: [2, 4] }),
+      P('sharp', 'Schärfe', 0.5, 2.5, 1, { dice: [0.6, 2] }),
+      P('tempo', 'Tempo', 1, 3, 1, { int: true, dice: [1, 2], fmt: TEMPO }),
+      P('warp', 'Knautschen', 0, 1.2, 0.5, { dice: [0, 0.9] }),
+    ],
+    // Straight down: the depth map is then the relief itself. Seen at an
+    // angle, the floor's slope was most of the grey range.
+    cam: { yaw: 0, pitch: -1.45, height: 2.2, fov: 50 } },
+];
+const MOTIF = Object.fromEntries(MOTIFS.map((m) => [m.id, m]));
+
+const ENVS = [
+  { k: 0, l: 'Leer' }, { k: 1, l: 'Boden' }, { k: 2, l: 'Wand' },
+  { k: 3, l: 'Ecke', label: 'Boden + Wand' }, { k: 4, l: 'Raum' },
+];
+const VIEW = { depth: 0, mask: 1, lit: 2, raw: 3 };
+const RAW_FAR = 120;
+const MASK_COLORS = [[255, 0, 0], [0, 255, 0], [0, 0, 255]];
+
+// Fallbacks for when /api/forms/options cannot be reached: the preview works
+// offline; only saving needs the server.
+const FALLBACK_OPTIONS = {
+  fps: 8,
+  durations: [{ seconds: 4, frames: 33 }, { seconds: 6, frames: 49 },
+              { seconds: 8, frames: 65 }, { seconds: 10, frames: 81 }],
+  default_seconds: 6, default_format: '9:16',
+  formats: [
+    { key: '9:16', label: 'Reel', ratio: [9, 16], track: [576, 1024] },
+    { key: '2:3', label: 'Hoch', ratio: [2, 3], track: [680, 1024] },
+    { key: '4:5', label: 'Feed', ratio: [4, 5], track: [816, 1024] },
+    { key: '1:1', label: 'Quadrat', ratio: [1, 1], track: [1024, 1024] },
+    { key: '3:2', label: 'Quer', ratio: [3, 2], track: [1024, 680] },
+    { key: '16:9', label: 'Breit', ratio: [16, 9], track: [1024, 576] },
+    { key: '21:9', label: 'Kino', ratio: [21, 9], track: [1024, 440] },
+  ],
+};
+
+// ── Shader ──────────────────────────────────────────────────────────────────
+const VERT = `#version 300 es
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const FRAG = `#version 300 es
+precision highp float;
+precision highp int;
+out vec4 fragColor;
+
+uniform vec2  uRes;
+uniform float uPhase;
+uniform float uP[10];
+uniform int   uSeed;
+uniform vec4  uCam;       // yaw, pitch, distance (object) | height (fly), fov°
+uniform vec4  uCamAnim;   // orbit turns, sway, breath, roll
+uniform vec2  uPan;       // object camera shifted in its own image plane, in half-frames
+uniform vec4  uComp;      // copies, wreath radius, wreath turns (sectors), mirror
+uniform float uMirrorOff;
+uniform vec4  uEnvA;      // kind, relief, tempo, floor y
+uniform vec2  uEnvB;      // backdrop distance, room radius (absolute; the page scales it to the camera)
+uniform vec3  uSurf;      // relief, scale, tempo
+uniform vec4  uDepth;     // near, far, gamma, curve (0 linear, 1 perspective)
+uniform int   uView;      // 0 depth, 1 mask, 2 lit, 3 raw
+uniform int   uGroups;    // 2: motif|environment, 3: A|B|environment
+uniform int   uAA;
+uniform int   uFlip;
+uniform float uBound;
+uniform int   uBallN;
+uniform vec4  uBalls[18];
+// Always 0. Every loop starts from it so the bound is not a compile-time
+// constant: Chrome on Windows translates to HLSL, and fxc unrolls constant
+// loops — the 3x3 supersampling loop alone copied the whole raymarcher with
+// all ten motifs nine times. Measured: 65.7 s to link, 6.6 s on ANGLE's GL
+// backend. (Inigo Quilez's ZERO trick.)
+uniform int   uZero;
+
+const float TAU = 6.28318530718;
+const float PI  = 3.14159265359;
+const float LAND_P = 8.0;
+
+float gPh;          // TAU * phase
+bool  gFly;
+vec3  gTarget;
+vec3  gFwd;
+float gLp;          // z period of a fly-through world (0 = static camera)
+vec3  gW;           // world position of the last motif sample, for relief
+
+// Integer hash — identical on every GPU, so a recipe draws the same loop
+// wherever it is opened again.
+uvec3 pcg3d(uvec3 v) {
+  v = v * 1664525u + 1013904223u;
+  v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+  v ^= v >> 16u;
+  v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+  return v;
+}
+vec3 rnd3(int a, int salt) {
+  return vec3(pcg3d(uvec3(uint(a + 4096), uint(uSeed), uint(salt)))) * (1.0 / 4294967295.0);
+}
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+float sdBox(vec3 p, vec3 b) {
+  vec3 q = abs(p) - b;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+vec2 sminG(vec2 a, vec2 b, float k) {
+  if (k < 1e-4) return a.x < b.x ? a : b;
+  float h = clamp(0.5 + 0.5 * (b.x - a.x) / k, 0.0, 1.0);
+  return vec2(mix(b.x, a.x, h) - k * h * (1.0 - h), h > 0.5 ? a.y : b.y);
+}
+// Four seeded plane waves, each a whole number of cycles per loop.
+float wave3(vec3 p, float t, int salt) {
+  float s = 0.0;
+  for (int k = uZero; k < 4; k++) {
+    vec3 r = rnd3(k, salt);
+    vec3 dir = normalize(r * 2.0 - 1.0 + 1e-3);
+    float m = floor(r.x * 2.0) + 1.0;
+    s += sin(dot(p, dir) * (1.0 + 0.45 * float(k)) + t * m + r.y * TAU);
+  }
+  return s * 0.25;
+}
+// The same for a world that flies past: along z only whole periods of gLp,
+// or the relief would jump where the loop wraps.
+float waveFly(vec3 w, float t, int salt) {
+  float s = 0.0;
+  for (int k = uZero; k < 4; k++) {
+    vec3 r = rnd3(k, salt);
+    vec2 dir = normalize(r.xy * 2.0 - 1.0 + 1e-3);
+    float nz = floor(r.z * 4.0) + 1.0 + float(k);
+    float m = floor(r.x * 2.0) + 1.0;
+    s += sin(dot(w.xy, dir) * (1.0 + 0.45 * float(k)) + TAU * nz * w.z / gLp + t * m + r.y * TAU);
+  }
+  return s * 0.25;
+}
+
+// ── Motifs: each returns (distance, group 0|1) ─────────────────────────────
+#if MOTIF == 0
+// Only the two nearest balls are blended. A smooth union folded over all of
+// them subtracts up to k/4 per ball, and with a dozen overlapping balls the
+// field sank by several units — the blob outgrew its bounding sphere and
+// swallowed the camera (measured: whole frame covered, nothing moving).
+// Blending the nearest pair is bounded by min - k/4 whatever the count.
+vec2 mBalls(vec3 p) {
+  vec2 a = vec2(1e9, 0.0), b = vec2(1e9, 0.0);
+  for (int i = uZero; i < 18; i++) {
+    if (i >= uBallN) break;
+    vec4 s = uBalls[i];
+    vec2 c = vec2(length(p - s.xyz) - s.w, float(i % 2));
+    if (c.x < a.x) { b = a; a = c; } else if (c.x < b.x) { b = c; }
+  }
+  return sminG(a, b, uP[3]);
+}
+#endif
+
+#if MOTIF == 1
+vec2 mBlob(vec3 p) {
+  p.xz *= rot(gPh * uP[6]);
+  p.yz *= rot(sin(gPh) * uP[7] * 0.7);
+  p.xz *= rot(p.y * uP[4]);
+  float s = uP[1];
+  float d = mix(length(p) - s, sdBox(p, vec3(s * 0.72)) - s * 0.08, uP[0]);
+  float w = wave3(p * uP[3], gPh * uP[5], 11);
+  d -= uP[2] * w;
+  float lip = 1.0 + abs(uP[4]) * s * 1.3 + uP[2] * uP[3] * 1.8;
+  return vec2(d / lip, w > 0.0 ? 0.0 : 1.0);
+}
+#endif
+
+#if MOTIF == 2
+float shape2(vec2 q, int kind) {
+  if (kind == 0) return max(abs(q.x), abs(q.y));
+  if (kind == 1) return length(q);
+  if (kind == 2) { q = abs(q); return max(q.y, dot(q, vec2(0.8660254, 0.5))); }
+  if (kind == 3) return max(-q.y, dot(vec2(abs(q.x), q.y), vec2(0.8660254, 0.5)));
+  return (abs(q.x) + abs(q.y)) * 0.70710678;
+}
+vec2 tunnelCell(vec2 xy, float zw, float idx, float S) {
+  // A per-frame offset, periodic in the frame index with the number of
+  // frames that pass per loop — so the frame arriving at the end of the loop
+  // carries the offset of the one that started it.
+  vec2 off = vec2(0.0);
+  if (uP[9] > 0.0) {
+    float per = uP[6] > 0.0 ? 2.0 * uP[6] : 6.0;
+    vec3 r = rnd3(0, 21);
+    off = uP[9] * vec2(cos(TAU * idx / per + r.x * TAU), sin(TAU * idx / per + r.y * TAU));
+  }
+  vec2 q = rot(uP[5] * idx) * xy - off;
+  float ring = abs(shape2(q, int(uP[0])) - uP[1] - uP[3] * 0.5) - uP[3] * 0.5;
+  float slab = abs(zw - idx * S) - uP[2] * 0.5;
+  return vec2(max(ring, slab), mod(idx, 2.0));
+}
+vec2 mTunnel(vec3 p) {
+  float S = uP[4];
+  float L = 2.0 * S * uP[6];
+  gLp = 2.0 * S;
+  // Pre-rotating by exactly the twist the passing frames accumulate cancels
+  // it at the wrap; whole extra turns are the "Rollen" dial.
+  p.xy = rot((uP[5] * 2.0 * uP[6] + TAU * uP[8]) * uPhase) * p.xy;
+  float zw = p.z - L * uPhase;
+  // Relief in the frame of the continuous twist (as the tube): the pre-turn
+  // above alone leaves it rotated by the accumulated twist at the wrap.
+  gW = vec3(rot(uP[5] * zw / S) * p.xy, zw);
+  float idx = floor(zw / S + 0.5);
+  vec2 a = tunnelCell(p.xy, zw, idx, S);
+  vec2 b = tunnelCell(p.xy, zw, idx + (zw - idx * S > 0.0 ? 1.0 : -1.0), S);
+  vec2 r = a.x < b.x ? a : b;
+  if (uP[7] > 0.004) {
+    float tube = uP[1] + uP[3] + uP[7] - shape2(rot(uP[5] * zw / S) * p.xy, int(uP[0]));
+    if (tube < r.x) r = vec2(tube, 2.0);
+  }
+  return r;
+}
+#endif
+
+#if MOTIF == 3
+float terrain(float x, float z) {
+  float h = 0.0, amp = 1.0, norm = 0.0;
+  for (int k = uZero; k < 4; k++) {
+    vec3 r = rnd3(k, 31);
+    float nz = (floor(r.x * 2.0) + 1.0) * float(k + 1);
+    float kx = (r.y * 2.0 - 1.0) * uP[1] * 1.5 * float(k + 1);
+    float w = sin(TAU * nz * z / LAND_P + kx * x + r.z * TAU);
+    w = mix(w, 1.0 - 2.0 * abs(w), uP[2]);
+    h += amp * w; norm += amp; amp *= 0.55;
+  }
+  h /= norm;
+  vec3 r = rnd3(9, 31);
+  h += uP[5] * 0.6 * sin(x * uP[1] * 1.7 + gPh * uP[6] + r.x * TAU)
+                    * cos(TAU * 2.0 * z / LAND_P + gPh * uP[6] * (floor(r.y * 2.0) + 1.0));
+  if (uP[3] >= 2.0) {
+    float hs = h * uP[3];
+    h = (floor(hs) + smoothstep(0.72, 1.0, fract(hs))) / uP[3];
+  }
+  return h * uP[0];
+}
+vec2 mLand(vec3 p) {
+  gLp = LAND_P;
+  float zw = p.z - LAND_P * uP[4] * uPhase;
+  gW = vec3(p.x, p.y, zw);
+  float h = terrain(p.x, zw);
+  float lip = min(7.0, 1.0 + uP[0] * (uP[1] * 3.0 + (uP[3] >= 2.0 ? uP[3] * 1.2 : 0.0)));
+  vec2 r = vec2((p.y - h) / lip, h > 0.0 ? 0.0 : 1.0);
+  if (uP[7] > -0.95) {
+    float dw = p.y - uP[7] * uP[0] * 0.8;
+    if (dw < r.x) r = vec2(dw, 2.0);
+  }
+  return r;
+}
+#endif
+
+#if MOTIF == 4
+vec2 mLayers(vec3 p) {
+  gW = p;
+  int n = int(uP[0]);
+  vec2 r = vec2(1e9, 0.0);
+  for (int i = uZero; i < 10; i++) {
+    if (i >= n) break;
+    float fi = float(i);
+    vec3 rr = rnd3(i, 41);
+    float m = (floor(rr.x * 2.0) + 1.0) * uP[5];
+    float zz = p.z + 1.2 + fi * uP[1] - uP[4] * 0.12 * p.x * p.x
+             + uP[6] * 0.35 * sin(gPh * m + rr.y * TAU);
+    float ridge = -0.9 + fi * uP[7]
+      + uP[2] * (0.62 * sin(p.x * uP[3] * (0.7 + rr.z) + rr.y * TAU + gPh * m * (rr.z > 0.5 ? 1.0 : -1.0))
+               + 0.38 * sin(p.x * uP[3] * (1.9 + rr.x) + rr.z * TAU - gPh * uP[5]));
+    float d = max(abs(zz) - 0.04, (p.y - ridge) / (1.0 + uP[2] * uP[3] * 2.5));
+    d /= 1.0 + abs(uP[4]) * 0.24 * abs(p.x);
+    if (d < r.x) r = vec2(d, mod(fi, 2.0));
+  }
+  return r;
+}
+#endif
+
+#if MOTIF == 5
+float pillarWave(vec2 id, vec2 ctr) {
+  int t = int(uP[2]);
+  float m = uP[5];
+  if (t == 0) return sin(length(ctr) * uP[4] * 2.0 - gPh * m);
+  if (t == 1) return sin((ctr.x + ctr.y) * uP[4] * 1.4 - gPh * m);
+  if (t == 2) {
+    vec3 r = rnd3(int(id.x) * 64 + int(id.y), 51);
+    return sin(gPh * m * (floor(r.y * 2.0) + 1.0) + r.x * TAU);
+  }
+  return 0.5 * (sin(length(ctr - vec2(1.2, 0.3)) * uP[4] * 2.6 - gPh * m)
+              + sin(length(ctr + vec2(0.9, 1.0)) * uP[4] * 2.6 - gPh * m));
+}
+vec2 mPillars(vec3 p) {
+  float N = uP[0];
+  float ext = 2.2;
+  float c = 2.0 * ext / N;
+  float hw = c * 0.5 * (1.0 - uP[1]);
+  float rr = min(uP[6], 0.95) * hw;
+  float base = uEnvA.w;
+  float top = 0.25 + uP[3];
+  float bound = sdBox(p - vec3(0.0, base + top * 0.5, 0.0), vec3(ext, top * 0.5, ext));
+  if (bound > 0.05) return vec2(bound, 0.0);
+  vec2 q = p.xz / c + N * 0.5;
+  vec2 cell = floor(q);
+  vec2 f = q - cell;
+  vec2 o = vec2(f.x < 0.5 ? -1.0 : 0.0, f.y < 0.5 ? -1.0 : 0.0);
+  vec2 r = vec2(c * 0.5, 0.0);
+  // The four nearest cells as ONE loop. Written as a 2x2 nested loop it
+  // failed to link on Chrome/Windows (ANGLE -> HLSL), silently, with an
+  // empty info log; bisected to the nesting itself.
+  for (int k = uZero; k < 4; k++) {
+    vec2 id = cell + o + vec2(float(k & 1), float(k >> 1));
+    if (id.x >= 0.0 && id.y >= 0.0 && id.x <= N - 1.0 && id.y <= N - 1.0) {
+      vec2 ctr = (id + 0.5 - N * 0.5) * c;
+      float hgt = 0.25 + uP[3] * (0.5 + 0.5 * pillarWave(id, ctr));
+      vec3 lp = p - vec3(ctr.x, base + hgt * 0.5, ctr.y);
+      float d = sdBox(lp, vec3(hw - rr, max(hgt * 0.5 - rr, 0.001), hw - rr)) - rr;
+      if (d < r.x) r = vec2(d, mod(id.x + id.y, 2.0));
+    }
+  }
+  return r;
+}
+#endif
+
+#if MOTIF == 6
+vec2 mRings(vec3 p) {
+  int n = int(uP[0]);
+  vec2 r = vec2(1e9, 0.0);
+  vec3 q = p;
+  for (int i = uZero; i < 7; i++) {
+    if (i >= n) break;
+    vec3 rr = rnd3(i, 61);
+    float R = uP[1] - float(i) * uP[2];
+    if (R < uP[3] * 2.5) break;
+    // Gimbals: each ring turns inside the frame of the one around it.
+    q.xy *= rot((rr.x - 0.5) * uP[5] * PI);
+    q.yz *= rot(gPh * (floor(rr.y * 2.0) + 1.0) * uP[4] * (rr.z > 0.5 ? 1.0 : -1.0));
+    vec2 cs = vec2(length(q.xz) - R, q.y);
+    float d = int(uP[6]) == 0 ? length(cs) - uP[3] : max(abs(cs.x), abs(cs.y)) - uP[3];
+    if (d < r.x) r = vec2(d, mod(float(i), 2.0));
+  }
+  if (uP[7] > 0.01) {
+    float d = length(p) - uP[7];
+    if (d < r.x) r = vec2(d, 1.0);
+  }
+  return r;
+}
+#endif
+
+#if MOTIF == 7
+// Two fold families, both kaleidoscopic IFS: reflect the point into one
+// fundamental region, turn it, scale it away from a corner, repeat.
+//   Tetraeder  Sierpinski — open, branching, triangular holes.
+//   Menger     the sponge — a cube with square tunnels, at scale+1 (so the
+//              shared default 2.0 gives Menger's own 3).
+// The fold angle ("Faltung", breathing over the loop) bends both away from
+// their textbook shapes; the seed tilts the tetrahedron's corner a little.
+vec2 mFractal(vec3 p) {
+  p.xz *= rot(gPh * uP[6]);
+  vec3 p0 = p;
+  float sz = uP[7];
+  p /= sz;
+  bool tetra = uP[8] < 0.5;
+  float sc = tetra ? uP[1] : uP[1] + 1.0;
+  vec3 off = (tetra ? mix(vec3(1.0), rnd3(0, 77) * 2.0, 0.18) : vec3(1.0)) * uP[2];
+  float a = uP[3] + uP[4] * sin(gPh * uP[5]);
+  float s = 1.0;
+  int it = int(uP[0]);
+  for (int i = uZero; i < 6; i++) {
+    if (i >= it) break;
+    if (tetra) {
+      if (p.x + p.y < 0.0) p.xy = -p.yx;
+      if (p.x + p.z < 0.0) p.xz = -p.zx;
+      if (p.y + p.z < 0.0) p.zy = -p.yz;
+    } else {
+      p = abs(p);
+      if (p.x < p.y) p.xy = p.yx;
+      if (p.x < p.z) p.xz = p.zx;
+      if (p.y < p.z) p.yz = p.zy;
+    }
+    p.xy *= rot(a);
+    p.yz *= rot(a * 0.618);
+    if (tetra) {
+      p = p * sc - off * (sc - 1.0);
+    } else {
+      p.xy = p.xy * sc - off.xy * (sc - 1.0);
+      p.z *= sc;
+      if (p.z > 0.5 * off.z * (sc - 1.0)) p.z -= off.z * (sc - 1.0);
+    }
+    s *= sc;
+  }
+  // uP[9] is the element's size against the spacing of its folded copies:
+  // near 1 they touch, around 0.5 there is air between them.
+  float d = (tetra ? length(p) - uP[9] * 1.25 : sdBox(p, vec3(uP[9]))) / s * sz;
+  return vec2(d, p0.x * p0.z > 0.0 ? 0.0 : 1.0);
+}
+#endif
+
+#if MOTIF == 8
+float linkShape(vec3 q, float sz) {
+  int t = int(uP[6]);
+  if (t == 0) return length(q) - sz;
+  if (t == 1) return sdBox(q, vec3(sz * 0.8)) - sz * 0.12;
+  vec2 dsk = vec2(length(q.xy) - sz, abs(q.z) - sz * 0.22);
+  return min(max(dsk.x, dsk.y), 0.0) + length(max(dsk, 0.0));
+}
+vec2 mHelix(vec3 p) {
+  float strands = uP[0], per = uP[1], R = uP[2], sz = uP[3], pitch = uP[4];
+  float spin = gPh * uP[5];
+  float K = ceil(2.6 / pitch * per);
+  float colR = R * (1.0 + abs(uP[7])) + sz + 0.2;
+  float bound = max(length(p.xz) - colR, abs(p.y) - (K * pitch / per + sz + 0.2));
+  if (bound > 0.1) return vec2(bound, 0.0);
+  float ang = atan(p.z, p.x);
+  vec2 res = vec2(0.3, 0.0);
+  for (int s = uZero; s < 4; s++) {
+    if (float(s) >= strands) break;
+    float off = float(s) * TAU / strands + spin;
+    float u = fract((ang - off) / TAU);
+    float m0 = floor(p.y / pitch - u + 0.5);
+    float m1 = m0 + (p.y / pitch - u - m0 > 0.0 ? 1.0 : -1.0);
+    for (int dm = uZero; dm < 2; dm++) {
+      float m = dm == 0 ? m0 : m1;
+      float k0 = floor((u + m) * per + 0.5);
+      for (int dk = uZero - 1; dk <= 1; dk++) {
+        float k = k0 + float(dk);
+        if (abs(k) > K) continue;
+        float a = k * TAU / per + off;
+        float yk = k * pitch / per;
+        float rk = R * (1.0 + uP[7] * yk / 2.6);
+        vec3 q = p - vec3(cos(a) * rk, yk, sin(a) * rk);
+        q.xz *= rot(a);
+        float d = linkShape(q, sz);
+        if (d < res.x) res = vec2(d, mod(float(s), 2.0));
+      }
+    }
+  }
+  return res;
+}
+#endif
+
+#if MOTIF == 9
+vec2 mCloth(vec3 p) {
+  gW = p;
+  vec2 q = p.xz * uP[1];
+  float t = gPh * uP[4];
+  q += uP[5] * vec2(sin(q.y * 1.3 + t), sin(q.x * 1.1 - t));
+  float h = 0.0;
+  int n = int(uP[2]);
+  for (int k = uZero; k < 4; k++) {
+    if (k >= n) break;
+    vec3 r = rnd3(k, 91);
+    vec2 dir = vec2(cos(r.x * TAU), sin(r.x * TAU));
+    float m = floor(r.y * 2.0) + 1.0;
+    h += sin(dot(q, dir) * (0.7 + r.z * 1.3) - t * m + r.z * TAU) / (1.0 + float(k) * 0.4);
+  }
+  h /= max(1.0, float(n) * 0.7);
+  h = sign(h) * pow(abs(h), uP[3]);
+  float lip = 1.0 + uP[0] * uP[1] * 2.2 * (1.0 + uP[5]) * max(1.0, 1.0 / uP[3]);
+  return vec2((p.y - h * uP[0]) / lip, h > 0.0 ? 0.0 : 1.0);
+}
+#endif
+
+// One program per motif: MOTIF is #defined by the page when it compiles the
+// shader, so only that motif's code is ever handed to the driver.
+vec2 motif(vec3 p) {
+#if MOTIF == 0
+  return mBalls(p);
+#elif MOTIF == 1
+  return mBlob(p);
+#elif MOTIF == 2
+  return mTunnel(p);
+#elif MOTIF == 3
+  return mLand(p);
+#elif MOTIF == 4
+  return mLayers(p);
+#elif MOTIF == 5
+  return mPillars(p);
+#elif MOTIF == 6
+  return mRings(p);
+#elif MOTIF == 7
+  return mFractal(p);
+#elif MOTIF == 8
+  return mHelix(p);
+#else
+  return mCloth(p);
+#endif
+}
+
+vec2 object(vec3 p) {
+  if (!gFly) {
+    int mir = int(uComp.w);
+    if (mir >= 1) p.x = abs(p.x) - uMirrorOff;
+    if (mir >= 2) p.y = abs(p.y) - uMirrorOff;
+    if (uComp.x > 1.5) {
+      // A wreath of copies around the vertical axis; turning it by whole
+      // sectors maps it onto itself, so it loops.
+      float sector = TAU / uComp.x;
+      float a = atan(p.z, p.x) - sector * uComp.z * uPhase;
+      a = mod(a + sector * 0.5, sector) - sector * 0.5;
+      p.xz = vec2(cos(a), sin(a)) * length(p.xz);
+      p.x -= uComp.y;
+    }
+    gW = p;
+  }
+  vec2 r = motif(p);
+  if (uSurf.x > 0.0) {
+    float w = (gFly && gLp > 0.0) ? waveFly(gW * vec3(uSurf.y, uSurf.y, 1.0), gPh * uSurf.z, 71)
+                                  : wave3(gW * uSurf.y, gPh * uSurf.z, 71);
+    if (r.y < 1.5) r.x = (r.x - uSurf.x * w) / (1.0 + uSurf.x * uSurf.y * 1.8);
+  }
+  return r;
+}
+
+float envWave(vec3 p) {
+  float t = gPh * uEnvA.z;
+  return sin(p.x * 1.6 + t) * sin(p.z * 1.3 - t + 1.7) + 0.5 * sin((p.x + p.z) * 2.9 + 2.0 * t);
+}
+vec2 envMap(vec3 p) {
+  int kind = int(uEnvA.x + 0.5);
+  float rel = uEnvA.y * envWave(p);
+  float d = 1e9;
+  if (kind == 1 || kind == 3) d = min(d, p.y - uEnvA.w - rel);
+  if (kind == 2 || kind == 3) d = min(d, -dot(p - (gTarget + gFwd * uEnvB.x), gFwd) - rel);
+  if (kind == 4) d = min(d, uEnvB.y - length(p) - rel);
+  return vec2(d / (1.0 + uEnvA.y * 3.0), 2.0);
+}
+
+vec2 map(vec3 p) {
+  vec2 r = object(p);
+  if (!gFly && uEnvA.x > 0.5) {
+    vec2 e = envMap(p);
+    if (e.x < r.x) r = e;
+  }
+  return r;
+}
+
+vec3 normalAt(vec3 p, float t) {
+  // Tetrahedral gradient as a loop, so map() is compiled in once, not four
+  // times (see uZero).
+  float h = 0.0008 + 0.0004 * t;
+  vec3 n = vec3(0.0);
+  for (int i = uZero; i < 4; i++) {
+    vec3 e = 0.5773 * (2.0 * vec3(float(((i + 3) >> 1) & 1), float((i >> 1) & 1), float(i & 1)) - 1.0);
+    n += e * map(p + e * h).x;
+  }
+  return normalize(n);
+}
+
+void camera(vec2 uv, out vec3 ro, out vec3 rd) {
+  float yaw = uCam.x, pitch = uCam.y;
+  float fl = 1.0 / tan(radians(uCam.w) * 0.5);
+  float dist = uCam.z;
+  vec3 fwd;
+  if (gFly) {
+    ro = vec3(0.0, MOTIF == 2 ? 0.0 : uCam.z, 0.0);
+    fwd = normalize(vec3(sin(yaw) * cos(pitch), sin(pitch), -cos(yaw) * cos(pitch)));
+    gTarget = ro + fwd * 4.0;
+  } else {
+    yaw += gPh * uCamAnim.x;
+    pitch += uCamAnim.y * sin(gPh);
+    dist = uCam.z * (1.0 + uCamAnim.z * sin(gPh));
+    gTarget = vec3(0.0);
+    ro = gTarget + dist * vec3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw));
+    fwd = normalize(gTarget - ro);
+  }
+  gFwd = fwd;
+  vec3 right = normalize(cross(fwd, vec3(0.0, 1.0, 0.0)));
+  vec3 up = cross(right, fwd);
+  if (!gFly) {
+    // A pan, not a turn: the orbit still circles the motif, the frame just
+    // sits beside it. Moves with the camera, so it holds through an orbit.
+    vec3 pan = (right * uPan.x + up * uPan.y) * dist / fl;
+    ro += pan;
+    gTarget += pan;
+  }
+  float c = cos(uCamAnim.w), s = sin(uCamAnim.w);
+  rd = normalize(fwd * fl + uv.x * (c * right + s * up) + uv.y * (-s * right + c * up));
+}
+
+// t along the ray and the group hit; t < 0 for a miss.
+float march(vec3 ro, vec3 rd, out float g) {
+  g = -1.0;
+  float cosA = max(dot(rd, gFwd), 0.05);
+  float tmax = uDepth.y / cosA;
+  if (uView == 3) tmax = ${RAW_FAR.toFixed(1)} / cosA;
+  float t = 0.0;
+  if (!gFly && uEnvA.x < 0.5) {
+    vec3 oc = ro;                       // the motif is built around the origin
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - uBound * uBound;
+    float h = b * b - c;
+    if (h < 0.0) return -1.0;
+    h = sqrt(h);
+    t = max(-b - h, 0.0);
+    tmax = min(tmax, -b + h);
+    if (tmax < 0.0) return -1.0;
+  }
+  vec2 hit = vec2(1e9, 0.0);
+  for (int i = uZero; i < 220; i++) {
+    hit = map(ro + rd * t);
+    if (hit.x < 0.0004 * t + 0.0004) { g = hit.y; return t; }
+    t += hit.x;
+    if (t > tmax) return -1.0;
+  }
+  // Out of steps while still inside the range: a grazing ray that was
+  // converging. Counting it as a hit avoids white pin-holes along silhouettes.
+  g = hit.y;
+  return t;
+}
+
+// Linear is what a normalised Blender Z pass is. Perspective is inverse
+// depth — the falloff MiDaS-style maps have, which the depth ControlNet was
+// trained on — and the one a landscape needs: linear spends the whole grey
+// range on the distance to the horizon and leaves the near ground black.
+float depthValue(float z) {
+  float n = max(uDepth.x, 1e-3), f = max(uDepth.y, n + 1e-3);
+  float v = uDepth.w > 0.5
+    ? 1.0 - clamp((1.0 / max(z, 1e-3) - 1.0 / f) / (1.0 / n - 1.0 / f), 0.0, 1.0)
+    : clamp((z - uDepth.x) / max(uDepth.y - uDepth.x, 1e-3), 0.0, 1.0);
+  return pow(v, uDepth.z);
+}
+
+vec3 groupColor(float g) {
+  if (g > 1.5) return vec3(0.0, 0.0, 1.0);
+  if (uGroups == 2) return vec3(1.0, 0.0, 0.0);
+  return g > 0.5 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+}
+
+void main() {
+  gPh = TAU * uPhase;
+  gFly = MOTIF == 2 || MOTIF == 3 || MOTIF == 4 || MOTIF == 9;
+  gLp = 0.0;
+  gW = vec3(0.0);
+  vec2 fc = gl_FragCoord.xy;
+  if (uFlip == 1) fc.y = uRes.y - fc.y;
+  int n = clamp(uAA, 1, 3);
+  if (uView != 0) n = 1;
+  vec3 acc = vec3(0.0);
+  for (int j = uZero; j < 3; j++) {
+    if (j >= n) break;
+    for (int i = uZero; i < 3; i++) {
+      if (i >= n) break;
+      vec2 o = (vec2(float(i), float(j)) + 0.5) / float(n) - 0.5;
+      vec2 uv = (2.0 * (fc + o) - uRes) / min(uRes.x, uRes.y);
+      vec3 ro, rd;
+      camera(uv, ro, rd);
+      float g;
+      float t = march(ro, rd, g);
+      float z = t * dot(rd, gFwd);
+      if (uView == 0) {
+        acc += vec3(t < 0.0 ? 1.0 : depthValue(z));
+      } else if (uView == 1) {
+        acc += t < 0.0 ? vec3(0.0) : groupColor(g);
+      } else if (uView == 3) {
+        float v = t < 0.0 ? 0.0 : clamp(z / ${RAW_FAR.toFixed(1)}, 0.0, 1.0);
+        float hi = floor(v * 255.0);
+        // Blue carries the group, so the auto range can tell the motif from
+        // the floor it stands on.
+        acc += vec3(hi / 255.0, fract(v * 255.0), t < 0.0 ? 0.0 : (g + 1.0) / 3.0);
+      } else {
+        if (t < 0.0) { acc += vec3(0.07, 0.07, 0.08); }
+        else {
+          vec3 p = ro + rd * t;
+          vec3 nr = normalAt(p, t);
+          vec3 L = normalize(vec3(0.55, 0.8, 0.35));
+          float dif = max(dot(nr, L), 0.0);
+          float rim = pow(1.0 - max(dot(nr, -rd), 0.0), 3.0);
+          vec3 base = g > 1.5 ? vec3(0.55) : (g > 0.5 ? vec3(0.42, 0.56, 0.71) : vec3(0.88, 0.48, 0.23));
+          vec3 col = base * (0.18 + 0.82 * dif) + 0.25 * rim;
+          float fog = clamp((z - uDepth.x) / max(uDepth.y - uDepth.x, 1e-3), 0.0, 1.0);
+          acc += mix(col, vec3(0.07, 0.07, 0.08), fog * fog * 0.8);
+        }
+      }
+    }
+  }
+  fragColor = vec4(acc / float(n * n), 1.0);
+}`;
+
+// ── GL plumbing ─────────────────────────────────────────────────────────────
+// One program per motif (FRAG with `#define MOTIF n`). A single program with
+// all ten motifs took 14 s to link on Chrome/Windows even after the uZero fix
+// — the HLSL compiler sees every motif inlined at every map() call site. Each
+// motif alone is a fraction of that, the current one is compiled first, and
+// with KHR_parallel_shader_compile the rest link on driver threads while the
+// page is already in use.
+const UNIFORMS = ['uRes', 'uPhase', 'uP', 'uSeed', 'uCam', 'uCamAnim', 'uPan', 'uComp',
+                  'uMirrorOff', 'uEnvA', 'uEnvB', 'uSurf', 'uDepth', 'uView', 'uGroups',
+                  'uAA', 'uFlip', 'uBound', 'uBallN', 'uBalls', 'uZero'];
+const gfx = { gl: null, vs: null, ext: null, progs: new Map(), current: null, fbos: new Map(), ok: false };
+
+function initGL() {
+  const canvas = $('view');
+  const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: false });
+  if (!gl) {
+    stageMessage('Dieses Gerät kann kein WebGL2 — der Editor braucht es für die Vorschau.');
+    return false;
+  }
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, VERT);
+  gl.compileShader(vs);
+  if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+    stageMessage('Shader-Fehler', gl.getShaderInfoLog(vs) || 'vertex shader');
+    return false;
+  }
+  gfx.vs = vs;
+  gfx.ext = gl.getExtension('KHR_parallel_shader_compile');
+  if (gfx.ext && gfx.ext.maxShaderCompilerThreadsKHR) gfx.ext.maxShaderCompilerThreadsKHR(0xFFFFFFFF);
+  gl.bindVertexArray(gl.createVertexArray());
+  canvas.addEventListener('webglcontextlost', (e) => {
+    e.preventDefault();
+    gfx.ok = false;
+    stageMessage('Die Grafikkarte hat den Kontext verloren — Seite neu laden.');
+  });
+  gfx.gl = gl;
+  gfx.ok = true;
+  return true;
+}
+
+/** Start compiling a motif's program, without waiting for it. */
+function requestProgram(idx) {
+  let e = gfx.progs.get(idx);
+  if (e) return e;
+  const gl = gfx.gl;
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, FRAG.replace('#version 300 es', `#version 300 es\n#define MOTIF ${idx}`));
+  gl.compileShader(fs);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, gfx.vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  e = { prog, fs, U: null };
+  gfx.progs.set(idx, e);
+  return e;
+}
+
+/** Linked yet? Never blocks. Without the extension there is no asking
+ *  without waiting, so the answer is "not until it has been used" — the frame
+ *  loop links those one per frame (see linkOneMore). */
+function programReady(idx) {
+  const e = requestProgram(idx);
+  if (e.U) return true;
+  if (e.failed || !gfx.ext) return false;
+  return gfx.gl.getProgramParameter(e.prog, gfx.ext.COMPLETION_STATUS_KHR);
+}
+const programFailed = (idx) => !!(gfx.progs.get(idx) || {}).failed;
+
+/** Without parallel compile: link the next waiting program, at most one per
+ *  frame — a stutter while the page warms up instead of one long freeze. */
+function linkOneMore() {
+  if (gfx.ext) return;
+  for (const q of pendingPaints) {
+    const idx = MOTIF[q.r.motif].gl;
+    const e = requestProgram(idx);
+    if (e.U || e.failed) continue;
+    try { useProgram(idx); } catch (_) { /* marked failed */ }
+    return;
+  }
+}
+
+/** Make a motif's program current, waiting for its link if it is not done. */
+function useProgram(idx) {
+  const gl = gfx.gl;
+  const e = requestProgram(idx);
+  if (e.failed) throw new Error(e.failed);
+  if (!e.U) {
+    if (!gl.getProgramParameter(e.prog, gl.LINK_STATUS)) {
+      // One motif that will not link must not take the others with it.
+      e.failed = gl.getShaderInfoLog(e.fs) || gl.getProgramInfoLog(e.prog) || 'link failed';
+      console.error(`Formen: Motiv ${idx} lässt sich nicht übersetzen`, e.failed);
+      throw new Error(e.failed);
+    }
+    e.U = Object.fromEntries(UNIFORMS.map((n) => [n, gl.getUniformLocation(e.prog, n)]));
+  }
+  if (gfx.current !== idx) { gl.useProgram(e.prog); gfx.current = idx; }
+  return e.U;
+}
+
+// Thumbnails whose program is still linking: painted by the frame loop once
+// it is, one per frame.
+const pendingPaints = [];
+function paintWhenReady(canvas, r, phase, view, prep = false) {
+  if (!gfx.ok) return;
+  if (programReady(MOTIF[r.motif].gl)) paintNow({ canvas, r, phase, view, prep });
+  else pendingPaints.push({ canvas, r, phase, view, prep });
+}
+function paintNow(q) {
+  try {
+    if (q.prep) { autoFrame(q.r); autoRange(q.r); }
+    paintCanvas(q.canvas, q.r, q.phase, q.view);
+  } catch (_) {
+    q.canvas.closest('.motif, .tile, .variant')?.classList.add('broken');
+  }
+}
+
+function stageMessage(text, detail) {
+  const el = $('stage-msg');
+  el.innerHTML = ArtRium.escHtml(text) + (detail ? `<pre>${ArtRium.escHtml(detail)}</pre>` : '');
+  el.classList.add('show');
+}
+
+function fbo(w, h) {
+  const key = `${w}x${h}`;
+  let f = gfx.fbos.get(key);
+  if (f) return f;
+  const gl = gfx.gl;
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  f = { fb, tex, w, h, buf: new Uint8Array(w * h * 4) };
+  // Thumbnails come in a handful of sizes; anything else is a one-off.
+  if (gfx.fbos.size > 24) {
+    const [k0, f0] = gfx.fbos.entries().next().value;
+    gl.deleteFramebuffer(f0.fb); gl.deleteTexture(f0.tex); gfx.fbos.delete(k0);
+  }
+  gfx.fbos.set(key, f);
+  return f;
+}
+
+// ── Scene maths shared with the shader ─────────────────────────────────────
+// mulberry32: the balls' orbits are computed here, once per frame, rather
+// than re-derived from a hash at every step of every ray.
+function mulberry32(a) {
+  return () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const _balls = new Float32Array(72);
+function ballsFor(r, phase) {
+  const p = r.p;
+  const n = Math.round(p[0]);
+  const rng = mulberry32(r.seed * 7919 + 17);
+  const ph = TAU * phase;
+  const cyc = Math.round(p[5]);
+  _balls.fill(0);
+  for (let i = 0; i < n; i++) {
+    const h = [rng(), rng(), rng(), rng(), rng(), rng(), rng()];
+    const f = [1 + Math.floor(h[0] * 3), 1 + Math.floor(h[1] * 3), 1 + Math.floor(h[2] * 3)];
+    _balls[i * 4] = Math.sin(ph * cyc * f[0] + h[3] * TAU) * p[2];
+    _balls[i * 4 + 1] = Math.sin(ph * cyc * f[1] + h[4] * TAU) * p[2] * p[6];
+    _balls[i * 4 + 2] = Math.cos(ph * cyc * f[2] + h[5] * TAU) * p[2];
+    _balls[i * 4 + 3] = p[1] * (1 - p[4] * h[6] * 0.75);
+  }
+  return _balls;
+}
+
+// A sphere the motif never leaves — used to frame the camera and to skip
+// rays that cannot hit anything.
+function motifBound(r) {
+  const p = r.p;
+  switch (r.motif) {
+    case 'balls': return p[2] * Math.sqrt(2 + p[6] * p[6]) + p[1] + p[3] + 0.2;
+    case 'blob': return p[1] * 1.45 + p[2] + 0.15;
+    case 'rings': return p[1] + p[3] + 0.15;
+    case 'fractal': return p[7] * (p[2] * 1.75 + 1.8 / Math.pow(p[1], p[0]) + 0.25);
+    case 'helix': return Math.hypot(p[2] * (1 + Math.abs(p[7])) + p[3], 2.6 + p[3]) + 0.2;
+    case 'pillars': {
+      const fl = r.env.floor;
+      return Math.hypot(2.2 * Math.SQRT2, Math.max(Math.abs(fl), Math.abs(fl + 0.25 + p[3]))) + 0.2;
+    }
+    default: return 4;
+  }
+}
+function boundOf(r) {
+  let b = motifBound(r) + r.surf.relief * 1.5;
+  if (r.comp.mirror >= 1) b += r.comp.mirrorOff * (r.comp.mirror >= 2 ? Math.SQRT2 : 1);
+  if (r.comp.copies > 1) b += r.comp.radius;
+  return b;
+}
+// The camera distance at which the bounding sphere exactly fills the short
+// side of the frame (a sphere's silhouette subtends asin(r/d), hence sin);
+// "Zoom" scales it.
+function cameraDistance(r) {
+  const half = (r.cam.fov * Math.PI / 180) / 2;
+  return boundOf(r) / Math.sin(half) / Math.max(0.2, r.cam.zoom) * (r.cam.fit || 1);
+}
+
+// ── Framing ─────────────────────────────────────────────────────────────────
+// The bounding sphere is a guarantee, not a picture: most motifs fill a
+// fraction of it, and a frame fitted to it shows a small thing in a lot of
+// white. This measures what the motif actually covers over the whole loop and
+// moves the camera so it fills ~80% of the frame. Run on a new variant, a
+// motif switch and "Grundform" — never while a dial is dragged, or "Größe"
+// would appear to do nothing because the camera backed away.
+// Returns the share of the frame the motif covers — the loop's mean and its
+// thinnest phase — or null for a fly-through, which fills the frame by
+// construction.
+function autoFrame(r) {
+  if (!gfx.ok || MOTIF[r.motif].fly) return null;
+  const coverage = { mean: 0, min: 0 };
+  const [w, h] = smallSize(r.format, 64);
+  const zoom = r.cam.zoom;
+  r.cam.zoom = 1;
+  r.cam.panX = 0; r.cam.panY = 0;
+  const half = Math.min(w, h) / 2;
+  for (let pass = 0; pass < 3; pass++) {
+    let x0 = w, x1 = -1, y0 = h, y1 = -1, hits = 0, thinnest = Infinity;
+    for (let k = 0; k < 8; k++) {
+      const px = renderPixels(r, k / 8, w, h, VIEW.raw, 1);
+      const before = hits;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const b = px[(y * w + x) * 4 + 2];
+          if (b < 40 || b >= 213) continue;
+          hits++;
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+      }
+      thinnest = Math.min(thinnest, hits - before);
+    }
+    coverage.mean = hits / (8 * w * h);
+    coverage.min = thinnest / (w * h);
+    if (x1 < 0) break;
+    // Centre of what the loop covers, in half-short-sides; screen y is down.
+    const cx = ((x0 + x1 + 1) / 2 - w / 2) / half;
+    const cy = -((y0 + y1 + 1) / 2 - h / 2) / half;
+    const ex = (x1 + 1 - x0) / 2 / half, ey = (y1 + 1 - y0) / 2 / half;
+    // 80% of each half-extent of the frame, more room along the long axis.
+    const s = clamp(Math.max(ex / (0.8 * (w / 2) / half), ey / (0.8 * (h / 2) / half)), 0.3, 3);
+    r.cam.panX = clamp(r.cam.panX + cx, -2, 2);
+    r.cam.panY = clamp(r.cam.panY + cy, -2, 2);
+    r.cam.fit = clamp((r.cam.fit || 1) * s, 0.25, 2.5);
+    // The pan was measured at the old distance; it is a share of the frame,
+    // and the frame grows with the distance, so it holds.
+  }
+  r.cam.fit = +r.cam.fit.toFixed(3);
+  r.cam.panX = +r.cam.panX.toFixed(3);
+  r.cam.panY = +r.cam.panY.toFixed(3);
+  r.cam.zoom = zoom;
+  return coverage;
+}
+
+// With a floor, the orbit may not dip under it (the camera would start inside
+// the ground and every ray end at once). The sway rides on top, so its
+// amplitude is kept clear too.
+function scenePitch(r, dist) {
+  const m = MOTIF[r.motif];
+  if (m.fly || !(r.env.kind === 1 || r.env.kind === 3)) return r.cam.pitch;
+  const lowest = Math.asin(clamp((r.env.floor + 0.3) / Math.max(dist * (1 - r.cam.breath), 0.1), -1, 1));
+  return Math.max(r.cam.pitch, lowest + r.cam.sway);
+}
+
+let _pbuf = new Float32Array(10);
+function setScene(r, phase, w, h, view, aa, flip) {
+  const gl = gfx.gl;
+  const m = MOTIF[r.motif];
+  const U = useProgram(m.gl);
+  gl.uniform2f(U.uRes, w, h);
+  gl.uniform1f(U.uPhase, phase);
+  _pbuf = new Float32Array(10);
+  r.p.forEach((v, i) => { _pbuf[i] = v; });
+  gl.uniform1fv(U.uP, _pbuf);
+  gl.uniform1i(U.uSeed, r.seed | 0);
+  const dist = m.fly ? r.cam.height : cameraDistance(r);
+  gl.uniform4f(U.uCam, r.cam.yaw, scenePitch(r, dist), dist, r.cam.fov);
+  gl.uniform4f(U.uCamAnim, m.fly ? 0 : r.cam.turns, m.fly ? 0 : r.cam.sway,
+               m.fly ? 0 : r.cam.breath, r.cam.roll);
+  gl.uniform2f(U.uPan, r.cam.panX || 0, r.cam.panY || 0);
+  gl.uniform4f(U.uComp, m.fly ? 1 : r.comp.copies, r.comp.radius, r.comp.turns, m.fly ? 0 : r.comp.mirror);
+  gl.uniform1f(U.uMirrorOff, r.comp.mirrorOff);
+  gl.uniform4f(U.uEnvA, m.fly ? 0 : r.env.kind, r.env.relief, r.env.tempo, r.env.floor);
+  // The room is sized against the camera's orbit — a fixed radius left a
+  // camera that framed a wide motif outside its own room, where every ray
+  // starts inside the wall.
+  gl.uniform2f(U.uEnvB, r.env.wall, r.env.room * (m.fly ? 1 : dist * (1 + r.cam.breath)));
+  gl.uniform3f(U.uSurf, r.surf.relief, r.surf.scale, r.surf.tempo);
+  gl.uniform4f(U.uDepth, r.depth.near, Math.max(r.depth.far, r.depth.near + 0.1), r.depth.gamma,
+               r.depth.curve === 'persp' ? 1 : 0);
+  gl.uniform1i(U.uView, view);
+  gl.uniform1i(U.uGroups, r.mask === '2' ? 2 : 3);
+  gl.uniform1i(U.uAA, aa);
+  gl.uniform1i(U.uFlip, flip);
+  gl.uniform1i(U.uZero, 0);
+  gl.uniform1f(U.uBound, boundOf(r) + 0.1);
+  if (r.motif === 'balls') {
+    gl.uniform1i(U.uBallN, Math.round(r.p[0]));
+    gl.uniform4fv(U.uBalls, ballsFor(r, phase));
+  } else {
+    gl.uniform1i(U.uBallN, 0);
+  }
+}
+
+/** Draw into an offscreen target and read it back, top row first. */
+function renderPixels(r, phase, w, h, view, aa = 1) {
+  const gl = gfx.gl;
+  const f = fbo(w, h);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f.fb);
+  gl.viewport(0, 0, w, h);
+  setScene(r, phase, w, h, view, aa, 1);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, f.buf);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return f.buf;
+}
+
+function paintCanvas(canvas, r, phase, view) {
+  const w = canvas.width, h = canvas.height;
+  const px = renderPixels(r, phase, w, h, view, 1);
+  const ctx = canvas.getContext('2d');
+  if (!canvas._img || canvas._img.width !== w || canvas._img.height !== h) {
+    canvas._img = ctx.createImageData(w, h);
+  }
+  canvas._img.data.set(px);
+  ctx.putImageData(canvas._img, 0, 0);
+}
+
+// ── Auto depth range ────────────────────────────────────────────────────────
+// Measures the scene over the whole loop (eight phases at a small size) and
+// places near/far so the motif runs from black to light grey — the Blender
+// passes this replaces sit at about 0.08–0.6 with the background white. The
+// headroom keeps the motif's far side from dissolving into the background.
+//
+// An object motif is measured on itself, not on the floor or wall around it:
+// measured on everything, a floor running to the horizon stretched the range
+// so far that the motif came out as one dark smudge. Measured on the motif,
+// the floor behind it fades to white like mist — which is also what a
+// Blender scene with a set Z range does.
+function autoRange(r) {
+  if (!gfx.ok) return;
+  const m = MOTIF[r.motif];
+  const [w, h] = smallSize(r.format, 64);
+  const all = [], own = [];
+  for (let k = 0; k < 8; k++) {
+    const px = renderPixels(r, k / 8, w, h, VIEW.raw, 1);
+    for (let i = 0; i < px.length; i += 4) {
+      const b = px[i + 2];
+      if (b < 40) continue;                       // miss
+      const z = (px[i] + px[i + 1] / 255) / 255 * RAW_FAR;
+      all.push(z);
+      if (b < 213) own.push(z);                   // group A or B, not the environment
+    }
+  }
+  const useOwn = !m.fly && own.length >= Math.max(12, all.length * 0.02);
+  const zs = useOwn ? own : all;
+  if (zs.length < 12) { r.depth.near = 1; r.depth.far = 12; return; }
+  // Everything at the lens means the camera sits inside something; a range
+  // fitted to that would be a black frame. Keep a usable one instead.
+  if (zs[Math.floor(zs.length / 2)] < 0.05) { r.depth.near = 1; r.depth.far = 12; return; }
+  zs.sort((a, b) => a - b);
+  const q = (f) => zs[Math.min(zs.length - 1, Math.floor(f * zs.length))];
+  const lo = q(0.005), hi = q(useOwn || !m.fly ? 0.995 : 0.9);
+  const span = Math.max(hi - lo, 0.3);
+  if (r.depth.curve === 'persp') {
+    // Inverse depth: the near end sets the contrast, and must not reach 0.
+    r.depth.near = +Math.max(0.25, lo * 0.9).toFixed(2);
+    r.depth.far = +(hi * 1.25).toFixed(2);
+  } else {
+    r.depth.near = Math.max(0, +(lo - span * 0.04).toFixed(2));
+    r.depth.far = +(hi + span * (m.fly ? 0.06 : 0.35)).toFixed(2);
+  }
+}
+
+// ── State ───────────────────────────────────────────────────────────────────
+const state = {
+  apiKey: ArtRium.getApiKey(),
+  options: FALLBACK_OPTIONS,
+  recipe: null,           // what the editor shows
+  store: {},              // last recipe per motif, so switching back keeps it
+  view: 'depth',
+  playing: true,
+  stepped: false,
+  frame: 0,
+  variants: [],
+  collection: [],         // [{recipe, title}]
+  library: [],
+  saving: false,
+};
+const api = ArtRium.makeApiFetch(() => state.apiKey);
+const withAuth = (u) => ArtRium.withAuth(u, state.apiKey);
+const clone = (o) => JSON.parse(JSON.stringify(o));
+
+function defaultRecipe(id) {
+  const m = MOTIF[id];
+  return {
+    v: 1, motif: id, p: m.params.map((d) => d.def), seed: 1234,
+    cam: { yaw: m.cam.yaw, pitch: m.cam.pitch, zoom: m.cam.zoom ?? 1.2, height: m.cam.height ?? 0,
+           fov: m.cam.fov, turns: 0, sway: 0, breath: 0, roll: 0, fit: 1, panX: 0, panY: 0 },
+    comp: { copies: 1, radius: 2.4, turns: 0, mirror: 0, mirrorOff: 0.9 },
+    env: { kind: m.env ?? 0, relief: 0, tempo: 1, floor: -1.3, wall: 2.6, room: 1.6 },
+    surf: { relief: 0, scale: 5, tempo: 1 },
+    depth: { auto: true, near: 3, far: 10, gamma: 1, curve: m.curve || 'linear' },
+    mask: '3', format: state.options.default_format || '9:16',
+    seconds: state.options.default_seconds || 6,
+  };
+}
+
+// A recipe from an older page or another device: fill what is missing from
+// the motif's defaults instead of trusting it whole.
+function normalizeRecipe(r) {
+  if (!r || !MOTIF[r.motif]) return null;
+  const d = defaultRecipe(r.motif);
+  const out = { ...d, ...r };
+  for (const k of ['cam', 'comp', 'env', 'surf', 'depth']) out[k] = { ...d[k], ...(r[k] || {}) };
+  const m = MOTIF[r.motif];
+  out.p = m.params.map((def, i) => {
+    const v = Array.isArray(r.p) ? Number(r.p[i]) : NaN;
+    return Number.isFinite(v) ? clamp(v, def.min, def.max) : def.def;
+  });
+  if (!formatOf(out.format)) out.format = d.format;
+  if (!state.options.durations.some((x) => x.seconds === out.seconds)) out.seconds = d.seconds;
+  if (!['off', '2', '3'].includes(out.mask)) out.mask = '3';
+  if (!['linear', 'persp'].includes(out.depth.curve)) out.depth.curve = d.depth.curve;
+  out.env.room = clamp(Number(out.env.room) || d.env.room, 1.15, 4);
+  return out;
+}
+
+const formatOf = (key) => state.options.formats.find((f) => f.key === key);
+const framesOf = (seconds) =>
+  (state.options.durations.find((d) => d.seconds === seconds) || state.options.durations[1]).frames;
+function smallSize(formatKey, longEdge) {
+  const f = formatOf(formatKey) || formatOf('1:1') || { track: [1, 1] };
+  const [w, h] = f.track;
+  const s = longEdge / Math.max(w, h);
+  return [Math.max(8, Math.round(w * s)), Math.max(8, Math.round(h * s))];
+}
+
+// ── Session cache ───────────────────────────────────────────────────────────
+const formsSession = ArtRium.session('forms', {
+  version: 1,
+  fields: ['title'],
+  snapshot: () => ({
+    recipe: state.recipe, store: state.store, view: state.view, stepped: state.stepped,
+    collection: state.collection, variants: state.variants,
+  }),
+  restore: (s) => {
+    const r = normalizeRecipe(s.recipe);
+    if (r) state.recipe = r;
+    if (s.store && typeof s.store === 'object') {
+      for (const [k, v] of Object.entries(s.store)) {
+        const n = normalizeRecipe(v);
+        if (n) state.store[k] = n;
+      }
+    }
+    if (VIEW[s.view] !== undefined && s.view !== 'raw') state.view = s.view;
+    state.stepped = !!s.stepped;
+    if (Array.isArray(s.collection)) {
+      state.collection = s.collection
+        .map((c) => ({ title: String(c.title || ''), recipe: normalizeRecipe(c.recipe) }))
+        .filter((c) => c.recipe);
+    }
+    if (Array.isArray(s.variants)) state.variants = s.variants.map(normalizeRecipe).filter(Boolean);
+  },
+});
+function resetSession() {
+  if (!confirm('Alles zurücksetzen?\n\nMotiv, Regler, Varianten und Sammlung werden geleert. Gespeicherte Loops bleiben.')) return;
+  formsSession.reset();
+}
+
+// ── Editing ─────────────────────────────────────────────────────────────────
+let _autoTimer = null;
+function changed({ geometry = true, rerender = true } = {}) {
+  const r = state.recipe;
+  if (geometry && r.depth.auto) {
+    clearTimeout(_autoTimer);
+    _autoTimer = setTimeout(() => { autoRange(r); renderDepthDials(); renderSummaries(); }, 120);
+  }
+  if (rerender) renderSummaries();
+  suggestTitle();
+}
+
+function setMotif(id) {
+  const cur = state.recipe;
+  state.store[cur.motif] = clone(cur);
+  const next = state.store[id] ? clone(state.store[id]) : defaultRecipe(id);
+  // The format, the loop length and the mask are decisions about the output,
+  // not about the motif, and they carry over.
+  next.format = cur.format; next.seconds = cur.seconds; next.mask = cur.mask;
+  state.recipe = next;
+  if (!state.store[id]) autoFrame(next);
+  if (next.depth.auto) autoRange(next);
+  renderAll();
+  rollVariants(false, { quiet: true });
+}
+
+function resetMotif() {
+  const r = state.recipe;
+  const d = defaultRecipe(r.motif);
+  d.format = r.format; d.seconds = r.seconds; d.mask = r.mask;
+  state.recipe = d;
+  autoFrame(d);
+  autoRange(d);
+  renderAll();
+}
+
+function fitCamera() {
+  const r = state.recipe;
+  r.cam.zoom = 1;
+  autoFrame(r);
+  if (r.depth.auto) autoRange(r);
+  renderCamDials();
+  renderDepthDials();
+  renderSummaries();
+}
+
+function adopt(recipe) {
+  const r = normalizeRecipe(clone(recipe));
+  if (!r) return;
+  state.store[state.recipe.motif] = clone(state.recipe);
+  state.recipe = r;
+  if (r.depth.auto) autoRange(r);
+  renderAll();
+}
+
+// ── Dice ────────────────────────────────────────────────────────────────────
+function rollParam(d) {
+  if (d.off && Math.random() < d.off) return d.min;
+  const [a, b] = d.dice;
+  if (d.int) {
+    const v = a + Math.floor(Math.random() * (b - a + 1));
+    return d.nonzero && v === 0 ? pick([-1, 1]) : v;
+  }
+  return +(a + Math.random() * (b - a)).toFixed(3);
+}
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+// A roll that leaves the frame nearly empty — four small balls, a fractal
+// whose breathing folds it into dust for half the loop — gives the depth
+// ControlNet nothing to hold. Measured over the loop while framing: the mean,
+// and the thinnest phase, since a motif that vanishes mid-loop is no better.
+const MIN_COVERAGE = 0.04;
+const MIN_PHASE_COVERAGE = 0.015;
+
+function diceRecipe(base, wild) {
+  let best = null;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const roll = rollOnce(base, wild);
+    const c = roll.coverage;
+    if (c === null) { best = roll; break; }
+    if (!best || c.min > best.coverage.min) best = roll;
+    if (c.mean >= MIN_COVERAGE && c.min >= MIN_PHASE_COVERAGE) break;
+  }
+  const r = best.r;
+  r.depth.auto = true;
+  autoRange(r);
+  return r;
+}
+
+function rollOnce(base, wild) {
+  let r;
+  if (wild) {
+    r = defaultRecipe(pick(MOTIFS).id);
+    r.format = base.format; r.seconds = base.seconds; r.mask = base.mask;
+  } else {
+    r = clone(base);
+  }
+  const m = MOTIF[r.motif];
+  r.p = m.params.map(rollParam);
+  // Small balls spread wide frame as specks in an empty picture.
+  if (r.motif === 'balls') r.p[1] = Math.max(r.p[1], +(0.17 * r.p[2] + 0.08).toFixed(3));
+  // Frames as deep as their spacing close into a smooth pipe, and flying
+  // through a smooth pipe looks like standing still.
+  if (r.motif === 'tunnel') r.p[2] = Math.min(r.p[2], +(0.6 * r.p[4]).toFixed(3));
+  r.seed = 1 + Math.floor(Math.random() * 9998);
+  const camDef = defaultRecipe(r.motif).cam;
+  if (m.fly) {
+    r.cam.yaw = +((Math.random() - 0.5) * 0.3).toFixed(3);
+    r.cam.pitch = +(camDef.pitch + (Math.random() - 0.5) * 0.2).toFixed(3);
+    r.cam.roll = Math.random() < 0.25 ? +((Math.random() - 0.5) * 0.6).toFixed(3) : 0;
+  } else {
+    r.cam.yaw = +(Math.random() * TAU).toFixed(3);
+    const [lo, hi] = m.pitchDice || [-0.5, 1.2];
+    r.cam.pitch = +clamp(camDef.pitch + (Math.random() - 0.4) * 0.7, lo, hi).toFixed(3);
+    // An orbit at the motif's own spin rate, the other way round, cancels it
+    // into a still — measured on a helix. A motif that turns gets no orbit.
+    const spin = m.params.findIndex((d) => d.k === 'spin');
+    r.cam.turns = spin >= 0 && r.p[spin] !== 0 ? 0 : pick([0, 0, 0, 1, -1]);
+    r.cam.sway = Math.random() < 0.3 ? +(Math.random() * 0.15).toFixed(3) : 0;
+  }
+  if (wild && !m.fly) {
+    r.env.kind = m.env ?? pick([0, 0, 1, 2, 3, 4]);
+    r.env.relief = r.env.kind && Math.random() < 0.4 ? +(Math.random() * 0.25).toFixed(3) : 0;
+    if (Math.random() < 0.25) { r.comp.copies = pick([3, 4, 5, 6]); r.comp.turns = pick([0, 1, -1]); }
+    if (Math.random() < 0.18) r.comp.mirror = 1;
+  }
+  if (wild) r.surf.relief = Math.random() < 0.3 ? +(Math.random() * 0.07).toFixed(3) : 0;
+  r.cam.zoom = 1;
+  const coverage = autoFrame(r);
+  return { r, coverage };
+}
+
+function rollVariants(wild, { quiet = false } = {}) {
+  if (!gfx.ok) return;
+  state.variants = Array.from({ length: 6 }, () => diceRecipe(state.recipe, wild));
+  state.variantsWild = wild;
+  renderVariants();
+  if (!quiet) ArtRium.toast(wild ? 'Sechs wilde Varianten' : `Sechs neue ${MOTIF[state.recipe.motif].name}-Varianten`);
+}
+
+// ── Controls ────────────────────────────────────────────────────────────────
+function fmtVal(d, v) {
+  if (d.fmt) return d.fmt(v);
+  if (d.opts) return d.opts[Math.round(v)] ?? v;
+  if (d.int) return String(Math.round(v));
+  return Math.abs(d.max - d.min) >= 10 ? v.toFixed(1) : v.toFixed(2);
+}
+
+// A dial is a slider, or — for a small set of whole numbers — a row of
+// buttons, which is what a choice of three values actually is.
+function dial(container, d, get, set, { onInput } = {}) {
+  const v = get();
+  if (d.int && (d.opts || d.max - d.min <= 4)) {
+    const wrap = document.createElement('div');
+    wrap.className = 'seg-field';
+    wrap.innerHTML = `<span class="lbl">${ArtRium.escHtml(d.l)}</span>`;
+    const seg = document.createElement('div');
+    seg.className = 'seg';
+    for (let x = d.min; x <= d.max; x++) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = d.opts ? d.opts[x - d.min] : fmtVal(d, x);
+      b.className = Math.round(v) === x ? 'active' : '';
+      b.onclick = () => {
+        set(x);
+        seg.querySelectorAll('button').forEach((n) => n.classList.remove('active'));
+        b.classList.add('active');
+        (onInput || changed)();
+      };
+      seg.appendChild(b);
+    }
+    wrap.appendChild(seg);
+    container.appendChild(wrap);
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = 'dial';
+  wrap.innerHTML = `<div class="dial-head"><label class="lbl">${ArtRium.escHtml(d.l)}</label><span class="val"></span></div>`;
+  const val = wrap.querySelector('.val');
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = d.min; input.max = d.max; input.step = d.step;
+  input.value = v;
+  val.textContent = fmtVal(d, v);
+  input.oninput = () => {
+    const x = d.int ? Math.round(+input.value) : +input.value;
+    set(x);
+    val.textContent = fmtVal(d, x);
+    (onInput || changed)();
+  };
+  wrap.appendChild(input);
+  container.appendChild(wrap);
+}
+
+function renderMotifGrid() {
+  const grid = $('motif-grid');
+  if (!grid.children.length) {
+    for (const m of MOTIFS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'motif';
+      b.dataset.id = m.id;
+      b.title = m.name;
+      const c = document.createElement('canvas');
+      c.width = 72; c.height = 72;
+      b.append(c, Object.assign(document.createElement('span'), { textContent: m.name }));
+      b.onclick = () => { if (state.recipe.motif !== m.id) setMotif(m.id); };
+      grid.appendChild(b);
+      if (gfx.ok) {
+        const r = defaultRecipe(m.id);
+        r.format = '1:1';
+        paintWhenReady(c, r, 0.15, VIEW.depth, true);
+      }
+    }
+  }
+  for (const b of grid.children) b.classList.toggle('on', b.dataset.id === state.recipe.motif);
+  $('motif-name').textContent = MOTIF[state.recipe.motif].name;
+  $('seed-chip').textContent = `#${state.recipe.seed}`;
+}
+
+function renderFormat() {
+  const r = state.recipe;
+  const row = $('format-row');
+  row.innerHTML = '';
+  for (const f of state.options.formats) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = f.key === r.format ? 'active' : '';
+    b.innerHTML = `${ArtRium.escHtml(f.key)}<small>${ArtRium.escHtml(f.label)}</small>`;
+    b.onclick = () => { r.format = f.key; renderFormat(); resizeView(); changed(); renderVariants(); };
+    row.appendChild(b);
+  }
+  const lrow = $('length-row');
+  lrow.innerHTML = '';
+  for (const d of state.options.durations) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = d.seconds === r.seconds ? 'active' : '';
+    b.innerHTML = `${d.seconds} s<small>${d.frames} Frames</small>`;
+    b.onclick = () => { r.seconds = d.seconds; renderFormat(); setupScrub(); changed({ geometry: false }); };
+    lrow.appendChild(b);
+  }
+  const f = formatOf(r.format);
+  const n = framesOf(r.seconds);
+  const fps = state.options.fps;
+  $('format-hint').textContent = f
+    ? `Spur ${f.track[0]}×${f.track[1]}` +
+      (f.canvas ? ` · AnimateLCM rendert ${f.canvas[0]}×${f.canvas[1]}, nach dem zweiten Durchgang ${f.output[0]}×${f.output[1]}` : '') +
+      ` · ${n} Frames bei ${fps} fps = ${(n / fps).toFixed(2).replace('.', ',')} s.`
+    : '';
+}
+
+function renderFormDials() {
+  const r = state.recipe;
+  const m = MOTIF[r.motif];
+  const box = $('form-dials');
+  box.innerHTML = '';
+  m.params.forEach((d, i) => dial(box, d, () => r.p[i], (v) => { r.p[i] = v; }));
+}
+
+function renderCamDials() {
+  const r = state.recipe;
+  const m = MOTIF[r.motif];
+  const box = $('cam-dials');
+  box.innerHTML = '';
+  const c = r.cam;
+  const D = (k, l, min, max, o = {}) => dial(box, P(k, l, min, max, 0, o), () => c[k], (v) => { c[k] = v; });
+  if (m.fly) {
+    D('yaw', 'Schwenk', -0.8, 0.8);
+    D('pitch', 'Neigung', -1.3, 0.6);
+    if (m.id !== 'tunnel') D('height', 'Höhe', -1, 5);
+    D('fov', 'Brennweite (Bildwinkel °)', 20, 100, { step: 1 });
+    D('roll', 'Kippen', -1.2, 1.2);
+  } else {
+    D('yaw', 'Blickwinkel', 0, TAU);
+    D('pitch', 'Neigung', -1.2, 1.4);
+    D('zoom', 'Zoom', 0.4, 2.5);
+    D('fov', 'Brennweite (Bildwinkel °)', 15, 90, { step: 1 });
+    D('panX', 'Bildausschnitt ↔', -1.5, 1.5);
+    D('panY', 'Bildausschnitt ↕', -1.5, 1.5);
+    D('turns', 'Umkreisen', -2, 2, { int: true, fmt: TURNS });
+    D('sway', 'Schwanken', 0, 0.4);
+    D('breath', 'Atmen (Zoom-Puls)', 0, 0.3);
+    D('roll', 'Kippen', -1.2, 1.2);
+    box.insertAdjacentHTML('beforeend', `<div class="row-actions">
+      <button class="chip-btn" type="button" onclick="fitCamera()" title="Kamera so setzen, dass das Motiv über den ganzen Loop das Bild füllt">Einpassen</button></div>`);
+  }
+}
+
+function renderCompDials() {
+  const r = state.recipe;
+  const m = MOTIF[r.motif];
+  const box = $('comp-dials');
+  box.innerHTML = '';
+  if (m.fly) {
+    box.innerHTML = `<div class="hint">${ArtRium.escHtml(m.name)} ist eine Welt, durch die die Kamera
+      schaut — Umgebung, Kranz und Spiegelung gibt es nur für Objekt-Motive.
+      ${m.envLabel ? `Die dritte Maskenfarbe ist hier die ${ArtRium.escHtml(m.envLabel)}.` : ''}</div>`;
+    return;
+  }
+  const add = (d, obj, key, after) => dial(box, d, () => obj[key], (v) => { obj[key] = v; },
+                                           { onInput: () => { changed(); if (after) after(); } });
+  box.insertAdjacentHTML('beforeend', '<div class="sub-title">Umgebung</div>');
+  add(P('kind', 'Umgebung', 0, 4, 0, { int: true, opts: ENVS.map((e) => e.l) }), r.env, 'kind',
+      () => renderCompDials());
+  if (r.env.kind) {
+    add(P('relief', 'Relief', 0, 0.6, 0), r.env, 'relief');
+    if (r.env.relief > 0) add(P('tempo', 'Relief-Tempo', 0, 3, 1, { int: true, fmt: (v) => (v ? `×${v}` : 'steht') }), r.env, 'tempo');
+    if (r.env.kind === 1 || r.env.kind === 3) add(P('floor', 'Bodenhöhe', -3, 0.5, 0), r.env, 'floor');
+    if (r.env.kind === 2 || r.env.kind === 3) add(P('wall', 'Wandabstand', 0.5, 8, 0), r.env, 'wall');
+    if (r.env.kind === 4) add(P('room', 'Raumgröße (× Kameraabstand)', 1.15, 4, 0), r.env, 'room');
+  }
+  box.insertAdjacentHTML('beforeend', '<div class="sub-title">Kranz</div>');
+  add(P('copies', 'Kopien im Kreis', 1, 8, 1, { int: true }), r.comp, 'copies', () => renderCompDials());
+  if (r.comp.copies > 1) {
+    add(P('radius', 'Kranzradius', 0.5, 6, 0), r.comp, 'radius');
+    add(P('turns', 'Kranz drehen', -2, 2, 0, { int: true, fmt: (v) => (v ? `${v > 0 ? '+' : ''}${v} Platz` : 'steht') }), r.comp, 'turns');
+  }
+  box.insertAdjacentHTML('beforeend', '<div class="sub-title">Spiegeln</div>');
+  add(P('mirror', 'Spiegelung', 0, 2, 0, { int: true, opts: ['aus', 'links/rechts', '4-fach'] }), r.comp, 'mirror',
+      () => renderCompDials());
+  if (r.comp.mirror) add(P('mirrorOff', 'Abstand der Hälften', 0, 3, 0), r.comp, 'mirrorOff');
+}
+
+function renderSurfDials() {
+  const s = state.recipe.surf;
+  const box = $('surf-dials');
+  box.innerHTML = '';
+  const add = (d, k) => dial(box, d, () => s[k], (v) => { s[k] = v; });
+  add(P('relief', 'Relief', 0, 0.3, 0), 'relief');
+  add(P('scale', 'Körnung', 1, 14, 5), 'scale');
+  add(P('tempo', 'Relief-Tempo', 0, 3, 1, { int: true, fmt: (v) => (v ? `×${v}` : 'steht') }), 'tempo');
+  box.insertAdjacentHTML('beforeend', '<div class="hint" style="margin-top:8px">Feine Wellen auf jeder Fläche — AnimateLCM liest sie als Struktur und Textur.</div>');
+}
+
+function renderDepthDials() {
+  const dpt = state.recipe.depth;
+  const box = $('depth-dials');
+  box.innerHTML = '';
+  const add = (d, k, geometry) => dial(box, d, () => dpt[k], (v) => {
+    dpt[k] = v;
+    if (geometry) { dpt.auto = false; $('auto-btn').classList.remove('on'); }
+  }, { onInput: () => changed({ geometry: false }) });
+  add(P('near', 'Nah (schwarz)', 0, 40, 0, { step: 0.05 }), 'near', true);
+  add(P('far', 'Fern (weiß)', 0.5, 80, 0, { step: 0.05 }), 'far', true);
+  add(P('gamma', 'Kontrast', 0.35, 2.5, 1), 'gamma', false);
+  dial(box, P('curve', 'Verlauf', 0, 1, 0, { int: true, opts: ['Linear', 'Perspektive'] }),
+       () => (dpt.curve === 'persp' ? 1 : 0),
+       (v) => { dpt.curve = v ? 'persp' : 'linear'; },
+       { onInput: () => { if (dpt.auto) autoRange(state.recipe); renderDepthDials(); renderSummaries(); } });
+  $('auto-btn').classList.toggle('on', !!dpt.auto);
+}
+function toggleAuto() {
+  const d = state.recipe.depth;
+  d.auto = !d.auto;
+  if (d.auto) autoRange(state.recipe);
+  renderDepthDials();
+  renderSummaries();
+}
+
+function maskLabels(r) {
+  const m = MOTIF[r.motif];
+  const env = m.fly ? (m.envLabel || 'Umgebung')
+    : ((ENVS.find((e) => e.k === r.env.kind) || {}).label || (ENVS.find((e) => e.k === r.env.kind) || {}).l || 'Umgebung');
+  return r.mask === '2' ? [m.whole, m.groups[1], env] : [m.groups[0], m.groups[1], env];
+}
+// Which colours can actually occur, for the legend.
+function maskLegend(r) {
+  const m = MOTIF[r.motif];
+  const labels = maskLabels(r);
+  const hasEnv = m.fly ? (r.motif === 'tunnel' ? r.p[7] > 0.004 : r.motif === 'land' ? r.p[7] > -0.95 : false)
+                       : r.env.kind > 0;
+  const out = [];
+  out.push({ c: MASK_COLORS[0], l: labels[0] });
+  if (r.mask === '3') out.push({ c: MASK_COLORS[1], l: labels[1] });
+  if (hasEnv) out.push({ c: MASK_COLORS[2], l: labels[2] });
+  return out;
+}
+function renderMask() {
+  const r = state.recipe;
+  const row = $('mask-row');
+  row.innerHTML = '';
+  for (const [k, l] of [['off', 'Keine'], ['2', 'Motiv + Umgebung'], ['3', 'A + B + Umgebung']]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = l;
+    b.className = r.mask === k ? 'active' : '';
+    b.onclick = () => { r.mask = k; renderMask(); renderSummaries(); };
+    row.appendChild(b);
+  }
+  $('mask-swatches').innerHTML = r.mask === 'off' ? '' : maskLegend(r).map((x) =>
+    `<span class="swatch"><i style="background:rgb(${x.c.join(',')})"></i>${ArtRium.escHtml(x.l)}</span>`).join('');
+}
+
+function renderViewRow() {
+  const row = $('view-row');
+  row.innerHTML = '';
+  for (const [k, l] of [['depth', 'Tiefe'], ['mask', 'Maske'], ['lit', 'Licht']]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = l;
+    b.className = state.view === k ? 'active' : '';
+    b.onclick = () => { state.view = k; renderViewRow(); };
+    row.appendChild(b);
+  }
+  $('step-btn').classList.toggle('on', state.stepped);
+}
+
+function renderSummaries() {
+  const r = state.recipe;
+  const m = MOTIF[r.motif];
+  const p = m.params.slice(0, 3).map((d, i) => `${d.l} ${fmtVal(d, r.p[i])}`);
+  $('v-form').textContent = p.join(' · ');
+  $('v-cam').textContent = m.fly
+    ? `${Math.round(r.cam.fov)}° · Neigung ${r.cam.pitch.toFixed(2)}`
+    : `${Math.round(r.cam.fov)}° · Zoom ${r.cam.zoom.toFixed(2)}${r.cam.turns ? ` · ${TURNS(r.cam.turns)} Umkreisung` : ''}`;
+  if (m.fly) $('v-comp').textContent = '—';
+  else {
+    const parts = [(ENVS.find((e) => e.k === r.env.kind) || ENVS[0]).l];
+    if (r.comp.copies > 1) parts.push(`Kranz ×${r.comp.copies}`);
+    if (r.comp.mirror) parts.push(r.comp.mirror === 2 ? '4-fach gespiegelt' : 'gespiegelt');
+    $('v-comp').textContent = parts.join(' · ');
+  }
+  $('v-surf').textContent = r.surf.relief > 0 ? `Relief ${r.surf.relief.toFixed(2)}` : 'glatt';
+  $('v-depth').textContent = `${r.depth.auto ? 'Auto · ' : ''}${r.depth.near.toFixed(1)}–${r.depth.far.toFixed(1)}`
+    + (Math.abs(r.depth.gamma - 1) > 0.01 ? ` · γ ${r.depth.gamma.toFixed(2)}` : '')
+    + (r.depth.curve === 'persp' ? ' · perspektivisch' : '');
+  $('v-mask').textContent = r.mask === 'off' ? 'keine' : maskLegend(r).map((x) => x.l).join(' · ');
+  $('seed-chip').textContent = `#${r.seed}`;
+  renderSaveMeta();
+}
+
+function renderAll() {
+  renderMotifGrid();
+  renderFormat();
+  renderFormDials();
+  renderCamDials();
+  renderCompDials();
+  renderSurfDials();
+  renderDepthDials();
+  renderMask();
+  renderViewRow();
+  renderSummaries();
+  resizeView();
+  setupScrub();
+  suggestTitle(true);
+}
+
+// ── Variants ────────────────────────────────────────────────────────────────
+function renderVariants() {
+  const box = $('variants');
+  box.innerHTML = '';
+  // Drawn at about the size it is shown, so it is not upscaled into mush.
+  const [w, h] = smallSize(state.recipe.format, 200 * Math.min(window.devicePixelRatio || 1, 1.5));
+  state.variants.forEach((r, i) => {
+    r.format = state.recipe.format;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'variant';
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    b.appendChild(c);
+    if (state.variantsWild || r.motif !== state.recipe.motif) {
+      b.insertAdjacentHTML('beforeend', `<span class="tag">${ArtRium.escHtml(MOTIF[r.motif].name)}</span>`);
+    }
+    b.onclick = () => adopt(r);
+    box.appendChild(b);
+    if (gfx.ok) paintCanvas(c, r, phaseNow(), viewIndex());
+  });
+  $('variants-count').textContent = state.variants.length ? (state.variantsWild ? 'wild' : MOTIF[state.recipe.motif].name) : '';
+}
+
+// ── Preview loop ────────────────────────────────────────────────────────────
+const clock = { t0: performance.now(), phase: 0, scale: 1, slow: 0, fast: 0, last: 0, tick: 0 };
+const viewIndex = () => VIEW[state.view] ?? 0;
+const loopSeconds = () => framesOf(state.recipe.seconds) / state.options.fps;
+
+function phaseNow() {
+  const n = framesOf(state.recipe.seconds);
+  return state.stepped || !state.playing ? Math.floor(clock.phase * n + 1e-6) / n : clock.phase;
+}
+
+function resizeView() {
+  const f = formatOf(state.recipe.format);
+  if (!f) return;
+  const canvas = $('view');
+  const stage = $('stage');
+  const [tw, th] = f.track;
+  const maxW = Math.max(160, stage.clientWidth - 22);
+  const maxH = Math.max(160, Math.min(window.innerHeight * (window.innerWidth >= 860 ? 1 : 0.62),
+                                      window.innerWidth >= 860 ? window.innerHeight - 330 : 1e9));
+  const s = Math.min(maxW / tw, maxH / th);
+  const cssW = Math.floor(tw * s), cssH = Math.floor(th * s);
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const scale = clock.scale;
+  canvas.width = Math.max(64, Math.min(tw, Math.round(cssW * dpr * scale)));
+  canvas.height = Math.max(64, Math.min(th, Math.round(cssH * dpr * scale)));
+}
+
+function setupScrub() {
+  const n = framesOf(state.recipe.seconds);
+  $('scrub').max = n - 1;
+}
+
+function frameLoop(now) {
+  requestAnimationFrame(frameLoop);
+  if (!gfx.ok || !state.recipe) return;
+  const dt = now - (clock.last || now);
+  clock.last = now;
+  if (state.playing) {
+    clock.phase = (((now - clock.t0) / 1000) / loopSeconds()) % 1;
+  }
+  const r = state.recipe;
+  const n = framesOf(r.seconds);
+  const ph = phaseNow();
+  const gl = gfx.gl;
+  const canvas = $('view');
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  try {
+    setScene(r, ph, canvas.width, canvas.height, viewIndex(), 1, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    $('stage-msg').classList.remove('show');
+  } catch (e) {
+    stageMessage(`${MOTIF[r.motif].name} lässt sich auf dieser Grafikkarte nicht übersetzen.`, String(e.message || e));
+  }
+
+  const f = Math.min(n - 1, Math.floor(ph * n + 1e-6));
+  if (f !== state.frame) {
+    state.frame = f;
+    if (document.activeElement !== $('scrub')) $('scrub').value = f;
+    $('frame-readout').textContent = `${f + 1} / ${n} · ${((f) / state.options.fps).toFixed(1)} s`;
+  }
+  $('stage-badge').textContent = { depth: 'Tiefe', mask: 'Maske', lit: 'Licht' }[state.view];
+
+  // Two variant thumbnails per frame, round robin: each animates at ~20 fps
+  // and the stage keeps the card's attention.
+  const cells = $('variants').querySelectorAll('canvas');
+  for (let k = 0; k < 2 && cells.length; k++) {
+    const i = (clock.tick + k * 3) % cells.length;
+    const v = state.variants[i];
+    if (v && programReady(MOTIF[v.motif].gl)) paintCanvas(cells[i], v, ph, viewIndex());
+  }
+  clock.tick++;
+  linkOneMore();
+  for (let k = 0; k < pendingPaints.length; k++) {
+    const q = pendingPaints[k];
+    const idx = MOTIF[q.r.motif].gl;
+    if (programFailed(idx)) { pendingPaints.splice(k, 1); paintNow(q); break; }
+    if (!programReady(idx)) continue;
+    pendingPaints.splice(k, 1);
+    paintNow(q);
+    break;
+  }
+
+  // Adaptive resolution: a heavy scene on a phone gets fewer preview pixels
+  // rather than a stuttering loop. Exports always render at full size.
+  if (dt > 0 && dt < 500) {
+    if (dt > 34) { clock.slow++; clock.fast = 0; } else if (dt < 19) { clock.fast++; clock.slow = 0; }
+    if (clock.slow > 20 && clock.scale > 0.35) { clock.scale *= 0.8; clock.slow = 0; resizeView(); }
+    if (clock.fast > 90 && clock.scale < 1) { clock.scale = Math.min(1, clock.scale * 1.15); clock.fast = 0; resizeView(); }
+  }
+}
+
+function togglePlay() {
+  state.playing = !state.playing;
+  if (state.playing) {
+    clock.t0 = performance.now() - clock.phase * loopSeconds() * 1000;
+  }
+  $('play-btn').textContent = state.playing ? '❚❚' : '▶';
+}
+function toggleStepped() { state.stepped = !state.stepped; renderViewRow(); }
+function seek(frame) {
+  const n = framesOf(state.recipe.seconds);
+  clock.phase = ((frame % n) + n) % n / n;
+  if (state.playing) togglePlay();
+}
+
+// ── Save ────────────────────────────────────────────────────────────────────
+function suggestTitle(force = false) {
+  const el = $('title');
+  const r = state.recipe;
+  const auto = `${MOTIF[r.motif].name} · ${r.format} · ${r.seconds} s · #${r.seed}`;
+  if (force || !el.value || el.dataset.auto === el.value) {
+    el.value = auto;
+    el.dataset.auto = auto;
+  }
+}
+
+function renderSaveMeta() {
+  const r = state.recipe;
+  const f = formatOf(r.format);
+  const n = framesOf(r.seconds);
+  $('save-meta').textContent = f
+    ? `${n} Frames · ${f.track[0]}×${f.track[1]} · ${r.mask === 'off' ? 'ohne Maske' : 'mit Maske (' + maskLegend(r).length + ' Farben)'}`
+    : '';
+}
+
+const blobOf = (canvas) => new Promise((res, rej) =>
+  canvas.toBlob((b) => (b ? res(b) : rej(new Error('PNG-Kodierung fehlgeschlagen'))), 'image/png'));
+const nextTick = () => new Promise((res) => setTimeout(res, 0));
+
+/** Render every frame of a loop at track size: depth (2×2 supersampled) and,
+ *  when asked for, the mask (one sample per pixel). */
+async function renderFrames(r, onProgress) {
+  const f = formatOf(r.format);
+  const [W, H] = f.track;
+  const n = framesOf(r.seconds);
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(W, H);
+  const depth = [], mask = [];
+  for (let i = 0; i < n; i++) {
+    img.data.set(renderPixels(r, i / n, W, H, VIEW.depth, 2));
+    ctx.putImageData(img, 0, 0);
+    depth.push(await blobOf(cv));
+    if (r.mask !== 'off') {
+      img.data.set(renderPixels(r, i / n, W, H, VIEW.mask, 1));
+      ctx.putImageData(img, 0, 0);
+      mask.push(await blobOf(cv));
+    }
+    onProgress(i + 1, n);
+    await nextTick();
+  }
+  return { depth, mask };
+}
+
+function upload(fd, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/forms/loops');
+    for (const [k, v] of Object.entries(ArtRium.getAuthHeaders(state.apiKey))) xhr.setRequestHeader(k, v);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    xhr.upload.onload = () => onProgress(1);
+    xhr.onerror = () => reject(new Error('Netzwerkfehler beim Hochladen'));
+    xhr.onload = () => {
+      if (xhr.status === 401) { ArtRium.clearApiKey(); location.href = '/'; return; }
+      let body = {};
+      try { body = JSON.parse(xhr.responseText || '{}'); } catch (_) {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+      else reject(new Error(typeof body.detail === 'string' ? body.detail : `Fehler ${xhr.status}`));
+    };
+    xhr.send(fd);
+  });
+}
+
+function progress(pct, text) {
+  $('save-progress').classList.add('show');
+  $('save-fill').style.width = `${Math.round(pct * 100)}%`;
+  $('save-text').textContent = text;
+}
+
+async function exportLoop(recipe, title, label = '') {
+  const r = normalizeRecipe(clone(recipe));
+  if (r.depth.auto) autoRange(r);
+  const frames = await renderFrames(r, (i, n) =>
+    progress(0.6 * i / n, `${label}Frames rendern ${i} / ${n}`));
+  const fd = new FormData();
+  frames.depth.forEach((b, i) => fd.append('depth', b, `d_${String(i).padStart(4, '0')}.png`));
+  frames.mask.forEach((b, i) => fd.append('mask', b, `m_${String(i).padStart(4, '0')}.png`));
+  fd.append('title', title);
+  fd.append('recipe', JSON.stringify(r));
+  if (r.mask !== 'off') fd.append('labels', JSON.stringify(maskLabels(r)));
+  const result = await upload(fd, (p) =>
+    progress(0.6 + 0.35 * p, p < 1 ? `${label}Hochladen ${Math.round(p * 100)} %` : `${label}Video wird kodiert…`));
+  return result;
+}
+
+function showResult(results) {
+  const el = $('save-result');
+  el.innerHTML = results.map((res) => {
+    const d = res.depth;
+    const regions = (res.mask && res.mask.regions) || [];
+    return `<div class="result-head">
+        ${d.thumb_url ? `<img src="${ArtRium.escHtml(withAuth(d.thumb_url))}" alt="">` : ''}
+        <div><b>${ArtRium.escHtml(d.title || d.filename)}</b>
+          <span>${d.frame_count} Frames · ${d.width}×${d.height} · ${d.fps ? d.fps.toFixed(0) : '?'} fps${res.mask ? ' · mit Maske' : ''}</span></div>
+      </div>
+      ${regions.length ? `<div class="swatches">${regions.map((x) =>
+        `<span class="swatch"><i style="background:rgb(${x.color.join(',')})"></i>${ArtRium.escHtml(x.label)} · ${(x.coverage * 100).toFixed(0)} %</span>`).join('')}</div>` : ''}
+      <a class="btn primary" href="${ArtRium.escHtml(res.struktur_url)}">In Struktur öffnen →</a>`;
+  }).join('<hr style="border:none;border-top:1px solid var(--border);margin:12px 0">');
+  el.classList.add('show');
+}
+
+async function saveCurrent() {
+  if (state.saving || !gfx.ok) return;
+  state.saving = true;
+  $('save-btn').disabled = true;
+  $('save-result').classList.remove('show');
+  try {
+    const res = await exportLoop(state.recipe, $('title').value.trim());
+    progress(1, 'Gespeichert');
+    showResult([res]);
+    ArtRium.toast('Loop liegt in der Struktur-Bibliothek');
+    loadLibrary();
+  } catch (e) {
+    progress(0, '');
+    $('save-progress').classList.remove('show');
+    ArtRium.toast(e.message || 'Speichern fehlgeschlagen', true);
+  } finally {
+    state.saving = false;
+    $('save-btn').disabled = false;
+  }
+}
+
+// ── Collection: loops gathered for one piece ────────────────────────────────
+// A music video cut from these wants several loops of the same length and
+// format, so the collection says when they do not agree.
+function collect() {
+  if (state.collection.length >= 12) { ArtRium.toast('Die Sammlung hat schon 12 Loops.', true); return; }
+  state.collection.push({ recipe: clone(state.recipe), title: $('title').value.trim() });
+  renderCollection();
+  ArtRium.toast('In der Sammlung');
+}
+function clearCollection() {
+  if (!state.collection.length || !confirm('Sammlung leeren?')) return;
+  state.collection = [];
+  renderCollection();
+}
+function renderCollection() {
+  const box = $('coll-strip');
+  box.innerHTML = '';
+  state.collection.forEach((c, i) => {
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    const cv = document.createElement('canvas');
+    const [w, h] = smallSize(c.recipe.format, 120);
+    cv.width = w; cv.height = h;
+    tile.appendChild(cv);
+    tile.insertAdjacentHTML('beforeend',
+      `<div class="cap">${ArtRium.escHtml(c.title || MOTIF[c.recipe.motif].name)}</div>
+       <button class="x" title="Entfernen">✕</button>`);
+    tile.querySelector('.x').onclick = (e) => { e.stopPropagation(); state.collection.splice(i, 1); renderCollection(); };
+    tile.onclick = () => adopt(c.recipe);
+    box.appendChild(tile);
+    paintWhenReady(cv, c.recipe, 0.2, VIEW.depth);
+  });
+  const n = state.collection.length;
+  $('coll-count').textContent = n ? String(n) : '';
+  $('coll-save-btn').disabled = !n || state.saving;
+  $('coll-save-btn').textContent = n ? `Alle ${n} speichern` : 'Alle speichern';
+  const formats = new Set(state.collection.map((c) => c.recipe.format));
+  const lengths = new Set(state.collection.map((c) => c.recipe.seconds));
+  $('coll-hint').textContent = !n
+    ? 'Loops für ein Stück sammeln — mit ★ im Speichern-Bereich.'
+    : (formats.size > 1 || lengths.size > 1)
+      ? `Achtung: gemischt (${[...formats].join(', ')} · ${[...lengths].map((s) => s + ' s').join(', ')}). Für einen gemeinsamen Schnitt besser ein Format und eine Länge.`
+      : `Alle ${[...formats][0]} · ${[...lengths][0]} s — passen in einen gemeinsamen Schnitt.`;
+}
+async function saveCollection() {
+  if (state.saving || !state.collection.length) return;
+  state.saving = true;
+  $('save-btn').disabled = true;
+  $('coll-save-btn').disabled = true;
+  const results = [];
+  try {
+    for (let i = 0; i < state.collection.length; i++) {
+      const c = state.collection[i];
+      const title = c.title || `${MOTIF[c.recipe.motif].name} · ${c.recipe.format} · #${c.recipe.seed}`;
+      results.push(await exportLoop(c.recipe, title, `${i + 1}/${state.collection.length} · `));
+    }
+    progress(1, `${results.length} Loops gespeichert`);
+    showResult(results);
+    ArtRium.toast(`${results.length} Loops gespeichert`);
+    loadLibrary();
+  } catch (e) {
+    ArtRium.toast(`${e.message || 'Speichern fehlgeschlagen'} (${results.length} gespeichert)`, true);
+    if (results.length) showResult(results);
+  } finally {
+    state.saving = false;
+    $('save-btn').disabled = false;
+    renderCollection();
+  }
+}
+
+// ── Library: loops saved from here ─────────────────────────────────────────
+async function loadLibrary() {
+  try {
+    state.library = await (await api('/api/forms/loops')).json();
+  } catch (_) {
+    state.library = [];
+  }
+  renderLibrary();
+}
+function renderLibrary() {
+  const box = $('lib-strip');
+  box.innerHTML = '';
+  $('lib-count').textContent = state.library.length ? String(state.library.length) : '';
+  if (!state.library.length) {
+    box.innerHTML = '<div class="empty-note">Noch keine Loops gespeichert.</div>';
+    return;
+  }
+  for (const t of state.library) {
+    const tile = document.createElement('div');
+    tile.className = 'tile';
+    const href = `/tools/vace/?track=${t.id}` + (t.mask ? `&mask=${t.mask.id}` : '');
+    tile.innerHTML = `${t.thumb_url ? `<img src="${ArtRium.escHtml(withAuth(t.thumb_url))}" alt="" loading="lazy">` : '<canvas></canvas>'}
+      <a class="go" href="${ArtRium.escHtml(href)}" title="In Struktur öffnen">↗</a>
+      <button class="x" title="Löschen">✕</button>
+      <div class="cap" title="${ArtRium.escHtml(t.title || '')}">${ArtRium.escHtml(t.title || t.filename)}</div>`;
+    tile.querySelector('.go').onclick = (e) => e.stopPropagation();
+    tile.querySelector('.x').onclick = (e) => { e.stopPropagation(); deleteLoop(t); };
+    tile.onclick = () => {
+      const r = normalizeRecipe(t.recipe);
+      if (!r) { ArtRium.toast('Das Rezept lässt sich nicht lesen.', true); return; }
+      adopt(r);
+      $('title').value = t.title || '';
+      $('title').dataset.auto = '';
+      ArtRium.toast('Rezept geladen — ändern und als neuen Loop speichern.');
+    };
+    box.appendChild(tile);
+  }
+}
+async function deleteLoop(t) {
+  if (!confirm(`„${t.title || t.filename}“ löschen?\n\nDie Spur${t.mask ? ' und ihre Maske' : ''} verschwinden auch aus Struktur. Fertige Videos bleiben.`)) return;
+  try {
+    if (t.mask) await api(`/api/vace/tracks/${t.mask.id}`, { method: 'DELETE' });
+    await api(`/api/vace/tracks/${t.id}`, { method: 'DELETE' });
+    ArtRium.toast('Gelöscht');
+  } catch (e) {
+    ArtRium.toast(e.message || 'Löschen fehlgeschlagen', true);
+  }
+  loadLibrary();
+}
+
+// ── Init ────────────────────────────────────────────────────────────────────
+$('scrub').addEventListener('input', (e) => seek(+e.target.value));
+window.addEventListener('resize', () => resizeView());
+window.addEventListener('keydown', (e) => {
+  const tag = (document.activeElement && document.activeElement.tagName) || '';
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) && document.activeElement.type !== 'range') return;
+  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  else if (e.code === 'ArrowRight' && !state.playing) { e.preventDefault(); seek(state.frame + 1); }
+  else if (e.code === 'ArrowLeft' && !state.playing) { e.preventDefault(); seek(state.frame - 1); }
+});
+
+// A test/debug handle: renders one frame of a recipe to pixels without
+// touching the page. Used by the seam check (every loop's last frame must lead
+// back into its first).
+window.formen = {
+  MOTIFS, defaultRecipe, normalizeRecipe, diceRecipe, autoRange, autoFrame, framesOf,
+  render: (recipe, phase, w, h, view = 'depth', aa = 1) =>
+    Array.from(renderPixels(normalizeRecipe(recipe), phase, w, h, VIEW[view], aa)),
+  get state() { return state; },
+};
+
+window.addEventListener('load', async () => {
+  try {
+    const opts = await (await api('/api/forms/options')).json();
+    if (opts && Array.isArray(opts.formats) && opts.formats.length) state.options = opts;
+  } catch (_) {
+    ArtRium.toast('Optionen nicht erreichbar — Vorschau läuft, Speichern braucht den Server.', true);
+  }
+  initGL();
+  state.recipe = defaultRecipe('balls');
+  const restored = formsSession.load();
+  if (gfx.ok) {
+    requestProgram(MOTIF[state.recipe.motif].gl);
+    // Without parallel compile every link would queue ahead of the first
+    // draw, so then programs are only compiled when first needed.
+    if (gfx.ext) for (const m of MOTIFS) requestProgram(m.gl);
+  }
+  if (!restored) autoFrame(state.recipe);
+  if (state.recipe.depth.auto) autoRange(state.recipe);
+  renderAll();
+  if (!state.variants.length) rollVariants(false, { quiet: true });
+  else renderVariants();
+  renderCollection();
+  formsSession.start();
+  requestAnimationFrame(frameLoop);
+  loadLibrary();
+  ArtRium.registerSw();
+});
+</script>
+</body>
+</html>

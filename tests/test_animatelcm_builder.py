@@ -665,6 +665,53 @@ class TestRecipe:
                 == ("euler", "normal")
 
 
+class TestStyleLora:
+    """A picture-style LoRA on the checkpoint, under the LCM LoRA, patching the
+    text encoder too — a kohya LoRA's trigger word lives there."""
+
+    def test_off_by_default(self):
+        wf = simple()
+        assert not nodes_of(wf, "LoraLoader")
+        assert wf["al_pos"]["inputs"]["clip"] == ["al_ckpt", 1]
+
+    def test_it_sits_between_checkpoint_and_lcm_lora(self):
+        wf = simple(style_lora="artvis3_sd15.safetensors", style_lora_strength=0.6)
+        lora = wf["al_stylelora"]["inputs"]
+        assert lora["model"] == ["al_ckpt", 0]
+        assert lora["strength_model"] == lora["strength_clip"] == 0.6
+        assert wf["al_lcmlora"]["inputs"]["model"] == ["al_stylelora", 0]
+
+    def test_every_encode_reads_the_patched_clip(self):
+        wf = simple(style_lora="artvis3_sd15.safetensors",
+                    embeddings=[Embedding("a"), Embedding("b")], embedding_join="sandwich")
+        encodes = nodes_of(wf, "CLIPTextEncode")
+        assert encodes
+        assert all(wf[n]["inputs"]["clip"] == ["al_stylelora", 1] for n in encodes)
+
+    def test_strength_is_clamped(self):
+        wf = simple(style_lora="x.safetensors", style_lora_strength=9)
+        assert wf["al_stylelora"]["inputs"]["strength_model"] == 1.5
+
+    def test_a_path_escape_is_refused(self):
+        with pytest.raises(ValueError):
+            simple(style_lora="../evil.safetensors")
+
+
+class TestCheckpoint:
+    """The SD 1.5 checkpoint is a request field now, so a comparison can swap it
+    without touching the graph. The default stays the Juggernaut every earlier
+    measurement was taken on."""
+
+    def test_the_default_is_juggernaut(self):
+        from services.comfy.animatelcm import CHECKPOINT
+        assert simple()["al_ckpt"]["inputs"]["ckpt_name"] == CHECKPOINT
+        assert "juggernaut" in CHECKPOINT
+
+    def test_it_reaches_the_loader(self):
+        wf = simple(checkpoint="sd_15\photon_v1.safetensors")
+        assert wf["al_ckpt"]["inputs"]["ckpt_name"] == "sd_15\photon_v1.safetensors"
+
+
 class TestSweep:
     def base(self):
         return AnimateLcmRequest(control_video=DEPTH, prompt="x",

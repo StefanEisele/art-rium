@@ -6,9 +6,10 @@ validation. Frontend fetches the matching list via GET /api/loras?model=...
 and renders the buttons from the result, so adding a LoRA only requires
 editing this file.
 
-The two registries are separate because a LoRA's weights are tied to the
+The registries are separate because a LoRA's weights are tied to the
 base model architecture it was trained against — a Z-Image Turbo LoRA
 cannot be loaded onto the SDXL checkpoint (ArtiVision XL) or vice versa.
+The SD 1.5 one serves the Struktur tool's AnimateLCM graph (routers/vace.py).
 """
 from typing import TypedDict
 
@@ -80,3 +81,28 @@ SDXL_LORAS: list[SdxlLoraSpec] = [
 
 SDXL_ALLOWED_LORAS: set[str] = {lora["filename"] for lora in SDXL_LORAS}
 SDXL_DEFAULT_LORA: str = SDXL_LORAS[0]["filename"]
+
+
+class Sd15StyleLoraSpec(TypedDict):
+    filename: str     # actual .safetensors filename inside ComfyUI's loras directory
+    label: str        # short label for the picker
+    strength: float   # measured default; applied to model and text encoder alike
+
+
+# Picture-style LoRAs for the AnimateLCM graph (SD 1.5, Juggernaut Reborn).
+# Not the distillation LoRAs in the same folder (AnimateLCM, LCM, Hyper-SD):
+# those change how the sampler converges, not what the picture is made of.
+SD15_STYLE_LORAS: list[Sd15StyleLoraSpec] = [
+    {
+        # Trained on the 46-picture artvision v3 set. 0.8 measured 2026-10-10
+        # (scripts/style_channel_sweep.py): 1.0 starts to break the background
+        # into a marbled mosaic late in the clip; the trigger word changes
+        # nothing measurable, so it is not prepended.
+        "filename": "artvis3_sd15.safetensors",
+        "label":    "Art Vision v3",
+        "strength": 0.8,
+    },
+]
+
+SD15_ALLOWED_STYLE_LORAS: set[str] = {lora["filename"] for lora in SD15_STYLE_LORAS}
+SD15_DEFAULT_STYLE_LORA: str = SD15_STYLE_LORAS[0]["filename"]

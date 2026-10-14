@@ -144,6 +144,7 @@ DEFAULT_ASPECT = "auto"
 
 # ── Dials ────────────────────────────────────────────────────────────────────
 DEPTH_MIN, DEPTH_MAX = 0.10, 1.50
+STYLE_LORA_MIN, STYLE_LORA_MAX, STYLE_LORA_DEFAULT = 0.0, 1.5, 0.8
 DEPTH_DEFAULT = 0.45
 DEPTH_END_DEFAULT = 0.70
 
@@ -397,6 +398,14 @@ class AnimateLcmRequest:
     cfg: float = DEFAULT_CFG
     sampler: str = SAMPLER
     scheduler: str = SCHEDULER
+    # A picture-style LoRA on the checkpoint (SD 1.5, e.g. one trained on the
+    # user's own series), model and text encoder both: a kohya LoRA trained
+    # with its text encoder learns its trigger word there. None = no LoRA.
+    style_lora: str | None = None
+    style_lora_strength: float = STYLE_LORA_DEFAULT
+    # SD 1.5 checkpoint under ComfyUI's checkpoints folder. The default is the
+    # Juggernaut every measurement so far was taken on.
+    checkpoint: str = CHECKPOINT
     # 0 drops the LCM distillation LoRA — Kent's recipe keeps the AnimateLCM
     # motion module but samples plainly (euler/normal, ~20 steps, cfg > 1).
     lcm_lora_strength: float = MOTION_LORA_STRENGTH
@@ -597,9 +606,21 @@ def _model_stack(wf: dict, p: str, req: AnimateLcmRequest,
     """
     wf[p + "ckpt"] = {
         "class_type": "CheckpointLoaderSimple",
-        "inputs": {"ckpt_name": CHECKPOINT},
+        "inputs": {"ckpt_name": req.checkpoint},
     }
     base_model = [p + "ckpt", 0]
+    if req.style_lora:
+        strength = clamp(req.style_lora_strength, STYLE_LORA_MIN, STYLE_LORA_MAX,
+                         STYLE_LORA_DEFAULT)
+        wf[p + "stylelora"] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": req.style_lora, "model": base_model,
+                "clip": [p + "ckpt", 1],
+                "strength_model": strength, "strength_clip": strength,
+            },
+        }
+        base_model = [p + "stylelora", 0]
     if req.lcm_lora_strength > 0:
         wf[p + "lcmlora"] = {
             "class_type": "LoraLoaderModelOnly",
@@ -762,23 +783,29 @@ def positive_chunks(req: AnimateLcmRequest) -> list[str]:
     return _chunks(req.prompt, held, req.embedding_join)
 
 
-def _encode(text: str, p: str) -> dict:
-    return {"class_type": "CLIPTextEncode", "inputs": {"text": text, "clip": [p + "ckpt", 1]}}
+def _clip(wf: dict, p: str) -> list:
+    """The text encoder every encode reads: the style LoRA's patched one when
+    `_model_stack` (which always runs first) added it, else the checkpoint's."""
+    return [p + "stylelora", 1] if p + "stylelora" in wf else [p + "ckpt", 1]
+
+
+def _encode(text: str, p: str, wf: dict) -> dict:
+    return {"class_type": "CLIPTextEncode", "inputs": {"text": text, "clip": _clip(wf, p)}}
 
 
 def _conditioning(wf: dict, p: str, chunks: list[str], out: str) -> None:
     """Encode `chunks` and join them into one conditioning at node `out`."""
     if len(chunks) == 1:
-        wf[out] = _encode(chunks[0], p)
+        wf[out] = _encode(chunks[0], p, wf)
         return
     refs = []
     for i, text in enumerate(chunks):
         if text:
-            wf[f"{out}_c{i}"] = _encode(text, p)
+            wf[f"{out}_c{i}"] = _encode(text, p, wf)
             refs.append([f"{out}_c{i}", 0])
         else:
             # Every blank in a sandwich is the same conditioning.
-            wf.setdefault(p + "pos_blank", _encode("", p))
+            wf.setdefault(p + "pos_blank", _encode("", p, wf))
             refs.append([p + "pos_blank", 0])
     joined = refs[0]
     for i, ref in enumerate(refs[1:], start=1):
@@ -895,7 +922,7 @@ def _text_nodes(wf: dict, p: str, req: AnimateLcmRequest, length: int,
             joined = [node, 0]
     wf[p + "neg"] = {
         "class_type": "CLIPTextEncode",
-        "inputs": {"text": req.negative, "clip": [p + "ckpt", 1]},
+        "inputs": {"text": req.negative, "clip": _clip(wf, p)},
     }
 
 
@@ -1043,6 +1070,8 @@ def _validate(req: AnimateLcmRequest) -> None:
             raise ValueError("an injection needs a video")
         if req.injection.color is not None and not req.mask_video:
             raise ValueError("a region-limited injection needs a mask_video")
+    if req.style_lora is not None and not is_embedding_name(req.style_lora.replace("\\", "/")):
+        raise ValueError(f"not a usable LoRA name: {req.style_lora!r}")
     if req.embedding_join not in EMBEDDING_JOINS:
         raise ValueError(f"embedding_join must be one of {EMBEDDING_JOINS}")
     for embedding in req.embeddings:

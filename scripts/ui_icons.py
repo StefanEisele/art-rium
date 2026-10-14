@@ -72,6 +72,8 @@ MOTIFS: dict[str, list[str]] = {
     "video":     ["a cinema film reel", "a film clapperboard"],
     "video-api": ["a sculpted cloud", "a satellite dish"],
     "vace":      ["a wireframe icosahedron", "a faceted low-poly polyhedron"],
+    "forms":     ["three smooth matte spheres of different sizes huddled together",
+                  "a stack of nested square frames receding like a tunnel"],
     "embeddings": ["a painter's colour swatch fan deck, spread open in a fan",
                    "a small glass jar of coloured pigment powder with a cork"],
     "improv":    ["a grand piano with its lid open", "a short row of piano keys"],

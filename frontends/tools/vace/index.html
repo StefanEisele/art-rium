@@ -262,7 +262,7 @@
   .emb-cell .ph { display: flex; align-items: center; justify-content: center; font-size: 26px; color: var(--text-dim); background: var(--surface); }
   .emb-cell .cap { padding: 6px 8px; font-size: 11px; color: var(--text-dim); }
   .emb-cell .cap b { display: block; color: var(--text); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #ladder input[type=text], #ladder select, #inj-card select {
+  #ladder input[type=text], #ladder select, #inj-card select, #style-lora {
     width: 100%; background: var(--surface2); color: var(--text); border: 1.5px solid var(--border);
     border-radius: 8px; padding: 9px 10px; font-size: 14px; font-family: inherit;
   }
@@ -334,6 +334,21 @@
       <div class="field">
         <label>Referenzbild — woraus das Bild gemacht ist</label>
         <div class="slot empty" id="slot-ref" onclick="openImagePicker(-1)">+ Bild aus der Galerie</div>
+      </div>
+
+      <!-- A picture-style LoRA trained on your own series (core/loras.py).
+           It carries colour and light; the embeddings below carry the motifs. -->
+      <div class="field dial" id="style-lora-field">
+        <div class="dial-head">
+          <label for="style-lora" style="margin:0">Stil-LoRA</label>
+          <span class="val" id="style-lora-val">0.80</span>
+        </div>
+        <select id="style-lora" onchange="onStyleLoraPick()">
+          <option value="">Kein LoRA</option>
+        </select>
+        <input type="range" id="style-lora-strength" min="0" max="150" step="5" value="80"
+               oninput="onStyleLoraStrength()">
+        <div class="hint" id="style-lora-hint"></div>
       </div>
 
       <!-- kentskooking's material channel: textual-inversion embeddings, most
@@ -659,7 +674,7 @@ const state = {
   reference: null,        // gallery image for the no-region case
   regions: [],            // [{color, image, ipWeight, embeddings}]
   lcm: { depth: 0.45, ip: 1.0, hires: 0.60, hiresOn: true, rife: 1, previewFirst: true,
-         baseWeight: 0.55 },
+         baseWeight: 0.55, styleLora: '', styleLoraStrength: 0.8 },
   baseRef: null,          // the picture the unmasked part of the frame is made of
   libTarget: 'control',
   pickerTarget: -1,       // -1 = the main reference, -2 = the base, else a region index
@@ -955,14 +970,19 @@ function renderSlots() {
        i => `${i.width}×${i.height}`, i => i.thumb_url);
 
   const c = state.control;
+  // The rate AnimateLCM writes its base pass at — each track frame is one
+  // render frame. `options.fps` is the job row's nominal Wan rate.
+  const fps = (state.options && (state.options.lcm_fps || state.options.fps)) || 8;
   $('control-hint').textContent = c
-    ? `Länge: ${c.usable_frames} Frames bei ${state.options ? state.options.fps : 16} fps ≈ ${(c.usable_frames / ((state.options && state.options.fps) || 16)).toFixed(1)} s.`
+    ? `Länge: ${c.usable_frames} Frames bei ${fps} fps ≈ ${(c.usable_frames / fps).toFixed(1)} s.`
     : 'Eine Tiefenspur aus Blender, oder ein normales Video — daraus wird die Tiefe im Graph abgeleitet.';
 
   renderPromptImports();
   $('add-region').disabled = !state.mask || state.regions.length >= 3;
   $('region-hint').textContent = state.mask
-    ? 'Ein Durchlauf je Region. Jeder nimmt den Render des vorigen als Vorlage, deshalb dauert es entsprechend länger.'
+    // AnimateLCM keys every region in one sampler pass (an IP-Adapter per
+    // mask). The "one pass per region" wording was VACE's, which is gone.
+    ? 'Alle Regionen in einem Durchlauf — jede Farbe bekommt ihr eigenes Referenzbild. Eine Region mit Embeddings kostet je Schritt eine Modellauswertung mehr.'
     : 'Ohne Maskenvideo wird das ganze Bild aus dem Referenzbild gebaut.';
   updateGenButton();
 }
@@ -1122,9 +1142,11 @@ function renderRegions() {
     wrap.append(sl, val);
     body.appendChild(wrap);
 
-    // kentskooking's RGB masks: this colour's own embedding stack.
-    const box = document.createElement('div');
-    box.className = 'region-embs';
+    // kentskooking's RGB masks: this colour's own embedding stack. Not
+    // `box`: that name is the region list itself, and shadowing it put every
+    // row into its own grandchild (HierarchyRequestError, no rows drawn).
+    const embBox = document.createElement('div');
+    embBox.className = 'region-embs';
     regionEmbs.forEach((e, k) => {
       const line = document.createElement('div');
       line.className = 'region-emb';
@@ -1145,15 +1167,15 @@ function renderRegions() {
       x.textContent = '×';
       x.onclick = () => { regionEmbs.splice(k, 1); renderRegions(); };
       line.append(nm, range, v, x);
-      box.appendChild(line);
+      embBox.appendChild(line);
     });
     const add = document.createElement('button');
     add.type = 'button';
     add.className = 'region-emb-add';
     add.textContent = '+ Embedding';
     add.onclick = () => openEmb(i);
-    box.appendChild(add);
-    body.appendChild(box);
+    embBox.appendChild(add);
+    body.appendChild(embBox);
 
     const drop = document.createElement('button');
     drop.className = 'drop';
@@ -1167,10 +1189,8 @@ function renderRegions() {
   renderPromptImports();
   renderInjection();
   $('add-region').disabled = !state.mask || state.regions.length >= 3;
-  // Regions cost a full pass each, so the count belongs in the heading where
-  // it is read before the render button rather than after it.
   $('region-count').textContent = state.regions.length
-    ? `· ${state.regions.length} Durchläufe`
+    ? `· ${state.regions.length} ${state.regions.length === 1 ? 'Region' : 'Regionen'}`
     : '';
   updateGenButton();
 }
@@ -1254,6 +1274,62 @@ function renderLcm() {
   $('lcm-preview-first').closest('.toggle-row').style.opacity = state.lcm.hiresOn ? '1' : '0.4';
   renderInjection();
   updateGenButton();
+}
+
+// ── Style LoRA ────────────────────────────────────────────────────────────
+// Measured 2026-10-10 (scripts/style_channel_sweep.py, two scenes, base and
+// hires pass): the artvis3 LoRA at 0.8 carries the series' colour and light
+// and leaves the geometry alone; at 1.0 the background starts to break up late
+// in the clip. Under the artvis3 embedding it is the steadiest channel tried —
+// the embedding alone brings the motifs but flickers.
+const styleLoraSpec = (filename) =>
+  ((state.options && state.options.lcm && state.options.lcm.style_lora
+    && state.options.lcm.style_lora.loras) || []).find(l => l.filename === filename) || null;
+
+function fillStyleLoras() {
+  const opts = state.options && state.options.lcm && state.options.lcm.style_lora;
+  const loras = (opts && opts.loras) || [];
+  const sel = $('style-lora');
+  loras.forEach(l => {
+    const o = document.createElement('option');
+    o.value = l.filename; o.textContent = l.label;
+    sel.appendChild(o);
+  });
+  $('style-lora-field').style.display = loras.length ? '' : 'none';
+}
+
+function onStyleLoraPick() {
+  state.lcm.styleLora = $('style-lora').value;
+  // A LoRA starts at its own measured strength, not at the last one's.
+  const spec = styleLoraSpec(state.lcm.styleLora);
+  if (spec) state.lcm.styleLoraStrength = spec.strength;
+  renderStyleLora();
+}
+
+function onStyleLoraStrength() {
+  state.lcm.styleLoraStrength = parseInt($('style-lora-strength').value, 10) / 100;
+  renderStyleLora();
+}
+
+function renderStyleLora() {
+  const on = !!state.lcm.styleLora;
+  const s = state.lcm.styleLoraStrength;
+  // A remembered LoRA that has left the registry would be refused by the
+  // server; the select shows "Kein LoRA" and the request leaves it out.
+  if (on && !styleLoraSpec(state.lcm.styleLora) && state.options) state.lcm.styleLora = '';
+  $('style-lora').value = state.lcm.styleLora;
+  $('style-lora-strength').value = Math.round(s * 100);
+  $('style-lora-val').textContent = s.toFixed(2);
+  ['style-lora-strength', 'style-lora-val'].forEach(id => {
+    $(id).style.opacity = state.lcm.styleLora ? '1' : '0.4';
+  });
+  $('style-lora-strength').disabled = !state.lcm.styleLora;
+  $('style-lora-hint').textContent = !state.lcm.styleLora
+    ? 'Ohne LoRA tragen nur Prompt, Referenzbild und Embeddings den Stil.'
+    : s < 0.65 ? 'Leicht — die Farbe kommt, die Motive kaum.'
+    : s <= 0.85 ? 'Gemessenes Optimum — Farbe und Licht der Serie, Geometrie bleibt.'
+    : s <= 1.0 ? 'Kräftig — gegen Ende kann der Hintergrund zerfallen.'
+    : 'Über dem gemessenen Bereich. Ungeprüft.';
 }
 
 // ── Embeddings ────────────────────────────────────────────────────────────
@@ -2072,7 +2148,7 @@ function updateGenButton() {
   // and can be finished at any time, including after the next render.
   btn.disabled = !ready || !!state.jobId;
   btn.textContent = !state.control ? 'Steuerspur wählen'
-    : n ? `Rendern · ${n} Durchläufe` : 'Rendern';
+    : n ? `Rendern · ${n} ${n === 1 ? 'Region' : 'Regionen'}` : 'Rendern';
 }
 
 function buildRequest() {
@@ -2105,6 +2181,10 @@ function buildRequest() {
       name: e.name, weight: e.weight, curve: e.curve || null, cycles: e.cycles || 2,
     }));
     body.embedding_join = state.embJoin;
+  }
+  if (state.lcm.styleLora) {
+    body.style_lora = state.lcm.styleLora;
+    body.style_lora_strength = state.lcm.styleLoraStrength;
   }
   if (state.seed != null) body.seed = state.seed;
   const inj = state.injection;
@@ -2328,6 +2408,39 @@ async function adoptEmbeddingLink() {
   } catch { ArtRium.toast('Embedding konnte nicht übernommen werden.', true); }
 }
 
+// ── Deep link: /tools/vace/?track=<id>&mask=<id> ──────────────────────────
+// The Formen tool sends a loop it just stored here. The depth track becomes
+// the control and the mask its mask — through pickTrack, so the mask's
+// regions are pre-filled exactly as for a segmented one. Dropped from the URL
+// afterwards, so a reload does not re-pick over later changes.
+async function adoptTrackLink() {
+  const params = new URLSearchParams(location.search);
+  const trackId = params.get('track');
+  const maskId = params.get('mask');
+  if (!trackId) return;
+  params.delete('track');
+  params.delete('mask');
+  history.replaceState(null, '', location.pathname + (params.toString() ? '?' + params : ''));
+  try {
+    const tracks = await (await api('/api/vace/tracks')).json();
+    const control = tracks.find(t => t.id === trackId);
+    if (!control) { ArtRium.toast('Diese Spur gibt es nicht (mehr).', true); return; }
+    state.libTarget = 'control';
+    pickTrack(control);
+    const mask = maskId && tracks.find(t => t.id === maskId);
+    if (mask) {
+      // A different mask's regions would sit on the wrong colours.
+      state.regions = [];
+      state.libTarget = 'mask';
+      pickTrack(mask);
+    }
+    state.libTarget = 'control';
+    renderRegions();
+    renderSlots();
+    ArtRium.toast(mask ? 'Loop und Maske übernommen.' : 'Loop übernommen.');
+  } catch { ArtRium.toast('Spur konnte nicht übernommen werden.', true); }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────
 $('prompt').addEventListener('input', updateGenButton);
 let _searchTimer;
@@ -2357,13 +2470,38 @@ window.addEventListener('load', async () => {
     $('lcm-ip').value = Math.round(state.lcm.ip * 100);
     $('lcm-hires').value = Math.round(state.lcm.hires * 100);
   }
+  // The measured style setting (see Style LoRA above): the LoRA at its own
+  // strength plus the default embeddings, which the server only offers when
+  // ComfyUI can load them.
+  const styleDefaults = () => {
+    const opts = lcmOpts && lcmOpts.style_lora;
+    const spec = opts && styleLoraSpec(opts.default);
+    if (spec) {
+      state.lcm.styleLora = spec.filename;
+      state.lcm.styleLoraStrength = spec.strength;
+    }
+    for (const e of (lcmOpts && lcmOpts.embeddings) || []) {
+      if (state.embeddings.some(x => x.name === e.name)) continue;
+      state.embeddings.push({ name: e.name, label: e.label, trained: false,
+                              trainingId: null, thumb: null, weight: e.weight });
+    }
+  };
+  styleDefaults();
   // After the defaults above have been applied, so a remembered setup wins
   // over them, and before the renderers, which all read `state`.
   vaceSession.load();
+  // A setup remembered from before the style LoRA existed has no opinion on
+  // it yet — it gets the measured default once, alongside its own tracks.
+  // From then on `styleLora` is saved ('' = deliberately off) and left alone.
+  if (state.lcm.styleLora === undefined) styleDefaults();
+  if (typeof state.lcm.styleLora !== 'string') state.lcm.styleLora = '';
+  if (typeof state.lcm.styleLoraStrength !== 'number') state.lcm.styleLoraStrength = 0.8;
   $('lcm-depth').value = Math.round(state.lcm.depth * 100);
   $('lcm-ip').value    = Math.round(state.lcm.ip * 100);
   $('lcm-hires').value = Math.round(state.lcm.hires * 100);
   fillBudgetRow();
+  fillStyleLoras();
+  renderStyleLora();
   renderLcm();
   renderSlots();
   renderRegions();
@@ -2373,6 +2511,7 @@ window.addEventListener('load', async () => {
   renderInjection();
   vaceSession.start();
   await adoptEmbeddingLink();
+  await adoptTrackLink();
   await restoreOpenJob();
   ArtRium.registerSw();
 });

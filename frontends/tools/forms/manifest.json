@@ -1,0 +1,19 @@
+{
+  "name": "Formen",
+  "short_name": "Formen",
+  "description": "Geloopte Tiefenvideos und Masken für Struktur",
+  "start_url": "/tools/forms/",
+  "scope": "/tools/forms/",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#111"/>
+  <!-- Three spheres as a depth pass: near is dark, far fades to white. -->
+  <defs>
+    <radialGradient id="near" cx="0.4" cy="0.38" r="0.7">
+      <stop offset="0" stop-color="#5a5a5a"/><stop offset="1" stop-color="#1c1c1c"/>
+    </radialGradient>
+    <radialGradient id="mid" cx="0.4" cy="0.38" r="0.7">
+      <stop offset="0" stop-color="#9a9a9a"/><stop offset="1" stop-color="#5e5e5e"/>
+    </radialGradient>
+  </defs>
+  <rect x="9" y="9" width="46" height="46" rx="8" fill="#f2f2f2"/>
+  <circle cx="40" cy="24" r="8" fill="url(#mid)"/>
+  <circle cx="26" cy="36" r="12" fill="url(#near)"/>
+  <circle cx="44" cy="43" r="5" fill="#E2732F"/>
+</svg>

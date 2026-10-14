@@ -43,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.auth import require_auth
 from core.config import settings
+from core.loras import SD15_ALLOWED_STYLE_LORAS, SD15_DEFAULT_STYLE_LORA, SD15_STYLE_LORAS
 from core.db import AsyncSessionLocal, get_db
 from core.models import ControlTrack, Image, Video
 from core.job_control import cancel_job
@@ -95,6 +96,9 @@ from services.comfy.animatelcm import (
 from services.comfy.animatelcm import (
     BASE_IP_DEFAULT as LCM_BASE_DEFAULT,
     IP_DEFAULT as LCM_IP_DEFAULT,
+    STYLE_LORA_DEFAULT as LCM_STYLE_LORA_DEFAULT,
+    STYLE_LORA_MAX as LCM_STYLE_LORA_MAX,
+    STYLE_LORA_MIN as LCM_STYLE_LORA_MIN,
 )
 from services.comfy.animatelcm import (
     Region as LcmRegion,
@@ -222,6 +226,10 @@ class GenerateRequest(BaseModel):
     embeddings: list[EmbeddingSpec] = []
     embedding_join: str = DEFAULT_EMBEDDING_JOIN
     injection: Optional[InjectionSpec] = None
+    # A picture-style LoRA from core/loras.py's SD 1.5 registry. None here, so
+    # an API caller gets the graph it always got; the page sends the default.
+    style_lora: Optional[str] = None
+    style_lora_strength: float = LCM_STYLE_LORA_DEFAULT
 
 
 def _track_rel(track_id: uuid.UUID, suffix: str) -> str:
@@ -488,8 +496,11 @@ async def get_track_thumb(track_id: uuid.UUID, db: AsyncSession = Depends(get_db
 @router.delete("/tracks/{track_id}", status_code=204)
 async def delete_track(track_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     track = await _get_track(track_id, db)
+    # `_recipe.json`: the generator recipe of a loop drawn in the Formen tool
+    # (routers/forms.py). Without the track it describes nothing.
     for rel in filter(None, (track.filepath, track.thumbnail_path,
-                             _track_rel(track_id, "_preview.mp4"))):
+                             _track_rel(track_id, "_preview.mp4"),
+                             _track_rel(track_id, "_recipe.json"))):
         path = settings.storage_dir / rel
         if path.exists():
             try:
@@ -886,12 +897,32 @@ async def get_track_preview(track_id: uuid.UUID, db: AsyncSession = Depends(get_
 
 # ── Options ──────────────────────────────────────────────────────────────────
 
+# What a fresh page starts with in the embeddings row. Measured 2026-10-10
+# (scripts/style_channel_sweep.py, two scenes, base + hires): the artvis3
+# embedding under the artvis3 LoRA gives the series' motifs on top of the
+# LoRA's colour without the flicker the embedding has on its own.
+DEFAULT_EMBEDDINGS = [{"name": "artrium/artvis3emb", "weight": 1.0}]
+
+
+async def _default_embeddings() -> list[dict]:
+    """The defaults ComfyUI can actually load — a default that the render
+    would then refuse is worse than none. Offline: offered as they are; the
+    render checks again."""
+    known = await embedding_names()
+    return [dict(e, label=e["name"].rsplit("/", 1)[-1]) for e in DEFAULT_EMBEDDINGS
+            if known is None or e["name"] in known]
+
+
 @router.get("/options")
 async def vace_options():
     """Dial ranges and defaults. Server-side so the page cannot drift away
     from the graph's own sweeps."""
     return {
         "fps": FPS,
+        # What a track's frames actually play back at: AnimateLCM reads the
+        # track frame by frame and writes its base pass at this rate (x RIFE).
+        # `fps` above is the job row's nominal rate, a Wan leftover.
+        "lcm_fps": LCM_FPS,
         "max_regions": MAX_REGIONS,
         # Automatic colour-ID masks. The palette is not a preference: ColorToMask
         # measures euclidean RGB distance, and pure primaries are the furthest
@@ -912,6 +943,13 @@ async def vace_options():
                     "„Tomate\" gar nichts.",
         },
         "lcm": {
+            "style_lora": {
+                "loras": SD15_STYLE_LORAS, "default": SD15_DEFAULT_STYLE_LORA,
+                "min": LCM_STYLE_LORA_MIN, "max": LCM_STYLE_LORA_MAX,
+                "hint": "Der Stil, auf den Bildern der Serie trainiert. Trägt Farbe "
+                        "und Licht; über 1.0 zerfällt der Hintergrund.",
+            },
+            "embeddings": await _default_embeddings(),
             "depth": {"default": LCM_DEPTH_DEFAULT, "sweep": list(LCM_DEPTH_SWEEP),
                       "hint": "Wie wörtlich die Geometrie genommen wird."},
             "ip": {"default": LCM_IP_DEFAULT, "sweep": list(LCM_IP_SWEEP),
@@ -1052,6 +1090,14 @@ async def _check_embeddings(body: GenerateRequest) -> None:
                                 detail=f"ComfyUI kennt dieses Embedding nicht: {', '.join(missing)}")
 
 
+def _check_style_lora(body: GenerateRequest) -> None:
+    """Only a registered SD 1.5 LoRA. Anything else in ComfyUI's folder is a
+    Wan, Qwen or SDXL file that would fail ten minutes into the job, or a
+    distillation LoRA that changes the sampler rather than the picture."""
+    if body.style_lora is not None and body.style_lora not in SD15_ALLOWED_STYLE_LORAS:
+        raise HTTPException(status_code=400, detail=f"Unbekanntes Stil-LoRA: {body.style_lora}")
+
+
 async def _prepare(body: GenerateRequest, db: AsyncSession) -> _Prepared:
     control = await _get_track(body.control_track_id, db)
     if not (settings.storage_dir / control.filepath).is_file():
@@ -1080,6 +1126,7 @@ async def _prepare(body: GenerateRequest, db: AsyncSession) -> _Prepared:
         raise HTTPException(status_code=400,
                             detail="Ein Referenzbild oder ein Embedding ist nötig")
     await _check_embeddings(body)
+    _check_style_lora(body)
 
     mask = None
     if body.mask_track_id:
@@ -1377,6 +1424,8 @@ def _lcm_request(
         embeddings=[LcmEmbedding(e.name, e.weight, e.curve, e.cycles)
                     for e in req.embeddings],
         embedding_join=req.embedding_join,
+        style_lora=req.style_lora,
+        style_lora_strength=req.style_lora_strength,
         injection=(LcmInjection(
             video=str(settings.storage_dir / injection[0]),
             strength=req.injection.strength, start=req.injection.start,
